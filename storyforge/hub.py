@@ -48,6 +48,8 @@ from .updater import (
 
 
 HUB_PROTOCOL_VERSION = 1
+HUB_MINIMUM_CLIENT_PROTOCOL_VERSION = 1
+HUB_MINIMUM_SERVER_PROTOCOL_VERSION = 1
 _MINIMUM_RENDER_CLIENT_CORE = (0, 4, 0)
 _MINIMUM_RENDER_CLIENT_RC = 7
 MINIMUM_RENDER_CLIENT_VERSION = (
@@ -288,6 +290,9 @@ _RECORD_LEASE_RPC_METHODS = frozenset(
         "release_record_lease",
         "bind_lease_gate_batch",
     }
+)
+_DEVICE_BOUND_LEASE_RPC_METHODS = frozenset(
+    {"claim_record_lease", "heartbeat_record_lease", "release_record_lease"}
 )
 _JOB_ARCHIVE_RPC_METHODS = frozenset(
     {"archive_job_snapshot", "restore_job_snapshot"}
@@ -2103,7 +2108,9 @@ class HubServer:
         return {
             "ok": True,
             "service": "storyforge-hub",
+            "app_version": __version__,
             "protocol_version": HUB_PROTOCOL_VERSION,
+            "minimum_client_protocol_version": HUB_MINIMUM_CLIENT_PROTOCOL_VERSION,
             "schema_version": summary["schema_version"],
             "site": summary["site"],
             "time": _utc_now(),
@@ -2758,6 +2765,24 @@ class HubServer:
             )
         arguments = dict(params)
         access = self._authorize_rpc(method, arguments, actor_user_id)
+        if method in _DEVICE_BOUND_LEASE_RPC_METHODS:
+            if auth.device_id:
+                supplied_device = str(arguments.get("device_id") or "").strip()
+                if supplied_device and supplied_device != auth.device_id:
+                    raise _HubHTTPError(
+                        HTTPStatus.FORBIDDEN,
+                        "device_identity_mismatch",
+                        "lease device does not match the authenticated workstation",
+                    )
+                # Never trust a workstation-supplied owner. The bearer token is
+                # the authoritative device identity for the lease lifecycle.
+                arguments["device_id"] = auth.device_id
+            elif "hub.manage" not in access.permissions:
+                raise _HubHTTPError(
+                    HTTPStatus.FORBIDDEN,
+                    "device_identity_required",
+                    "production leases require an enrolled workstation",
+                )
         if method == "claim_record_lease" and auth.device_id:
             # Only gate new work. Older clients may still heartbeat or release
             # an already-running lease, so updating never strands a job.
@@ -2815,6 +2840,37 @@ class HubServer:
                 for record_id in arguments.get("record_ids") or []:
                     self._require_own_record(str(record_id), access)
             self._prepare_write_arguments(method, arguments, access)
+            if method == "save_production_record" and auth.device_id:
+                value = arguments.get("value")
+                if isinstance(value, dict):
+                    supplied_device = str(value.get("device_id") or "").strip()
+                    if supplied_device and supplied_device != auth.device_id:
+                        raise _HubHTTPError(
+                            HTTPStatus.FORBIDDEN,
+                            "device_identity_mismatch",
+                            "record device does not match the authenticated workstation",
+                        )
+                    value["device_id"] = auth.device_id
+                    if value.get("id"):
+                        # Updating an existing render record is a lease-owned
+                        # operation.  Do not let a second workstation enrolled
+                        # to the same member omit this optional catalog guard
+                        # and overwrite the first workstation's live result.
+                        value["expected_lease_owner_device"] = auth.device_id
+            elif method == "save_production_records_bulk" and auth.device_id:
+                for value in arguments.get("values") or []:
+                    if not isinstance(value, dict):
+                        continue
+                    supplied_device = str(value.get("device_id") or "").strip()
+                    if supplied_device and supplied_device != auth.device_id:
+                        raise _HubHTTPError(
+                            HTTPStatus.FORBIDDEN,
+                            "device_identity_mismatch",
+                            "record device does not match the authenticated workstation",
+                        )
+                    value["device_id"] = auth.device_id
+                    if value.get("id"):
+                        value["expected_lease_owner_device"] = auth.device_id
             arguments["actor_user_id"] = access.user_id
 
         if (
@@ -3277,9 +3333,37 @@ class HubClient:
         return result
 
     def verify_identity(self) -> dict[str, Any]:
-        """Validate this bearer token against an authenticated catalog RPC."""
+        """Validate protocol compatibility before activating authenticated RPC."""
 
-        return self.call("bootstrap_summary")
+        health = self.health()
+        if str(health.get("service") or "") != "storyforge-hub":
+            raise HubConnectionError("endpoint is not a StoryForge Hub")
+        try:
+            server_protocol = int(health.get("protocol_version"))
+            minimum_client = int(
+                health.get("minimum_client_protocol_version")
+                or server_protocol
+            )
+        except (TypeError, ValueError) as error:
+            raise HubConnectionError("Hub compatibility response is invalid") from error
+        if server_protocol < HUB_MINIMUM_SERVER_PROTOCOL_VERSION:
+            raise HubConnectionError(
+                "Hub protocol is too old; update the Hub computer before connecting"
+            )
+        if HUB_PROTOCOL_VERSION < minimum_client:
+            raise HubConnectionError(
+                "this StoryForge workstation is too old for the Hub; update it before connecting"
+            )
+        identity = self.call("bootstrap_summary")
+        identity["hub_compatibility"] = {
+            "server_protocol_version": server_protocol,
+            "minimum_client_protocol_version": minimum_client,
+            "negotiated_protocol_version": min(
+                HUB_PROTOCOL_VERSION, server_protocol
+            ),
+            "server_app_version": str(health.get("app_version") or ""),
+        }
+        return identity
 
     def get_device_session(self) -> dict[str, Any]:
         """Return the safe account/device identity bound to this token.
@@ -3907,6 +3991,8 @@ __all__ = [
     "DEFAULT_DOWNLOAD_EXTENSIONS",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "HUB_PROTOCOL_VERSION",
+    "HUB_MINIMUM_CLIENT_PROTOCOL_VERSION",
+    "HUB_MINIMUM_SERVER_PROTOCOL_VERSION",
     "MAX_TEXT_POLISH_CHARACTERS",
     "TEXT_POLISH_RPC_METHOD",
     "UPLOAD_SHA256_HEADER",

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from storyforge.providers.base import ProviderConfig
-from storyforge.providers.tts import TTSProvider, wav_duration
+from storyforge.providers.tts import TTSProvider, prune_tts_cache, wav_duration
 
 
 def wav_bytes(duration: float = 0.1, rate: int = 16_000) -> bytes:
@@ -68,6 +68,67 @@ def config(
 
 
 class SentenceTTSCacheTests(unittest.TestCase):
+    def test_prune_cache_removes_expired_then_oldest_excess_files(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            now = 2_000_000_000.0
+            expired = root / "schema" / "00" / "expired.wav"
+            oldest = root / "schema" / "01" / "oldest.wav"
+            newest = root / "schema" / "02" / "newest.wav"
+            for path in (expired, oldest, newest):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"123456")
+            os.utime(expired, (now - 40 * 86400, now - 40 * 86400))
+            os.utime(oldest, (now - 60, now - 60))
+            os.utime(newest, (now - 30, now - 30))
+
+            with patch("storyforge.providers.tts.time.time", return_value=now):
+                deleted = prune_tts_cache(
+                    root,
+                    max_age_days=30,
+                    max_bytes=6,
+                )
+
+            self.assertEqual(deleted, 2)
+            self.assertFalse(expired.exists())
+            self.assertFalse(oldest.exists())
+            self.assertTrue(newest.exists())
+
+    def test_prune_cache_is_best_effort_for_missing_or_locked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cached = root / "schema" / "00" / "cached.wav"
+            cached.parent.mkdir(parents=True)
+            cached.write_bytes(b"cache")
+
+            with patch(
+                "storyforge.providers.tts.Path.unlink",
+                side_effect=PermissionError("locked"),
+            ):
+                self.assertEqual(
+                    prune_tts_cache(root, max_age_days=0, max_bytes=0),
+                    0,
+                )
+            self.assertTrue(cached.exists())
+            self.assertEqual(prune_tts_cache(root / "missing"), 0)
+
+    def test_successful_cache_write_schedules_bounded_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache_path = root / "storyforge-tts-wav-v1" / "00" / "cached.wav"
+            with (
+                patch.dict(
+                    "storyforge.providers.tts._TTS_CACHE_LAST_PRUNED",
+                    {},
+                    clear=True,
+                ),
+                patch("storyforge.providers.tts.prune_tts_cache") as prune,
+            ):
+                CountingProvider._write_cache(cache_path, b"cached-audio")
+
+            self.assertEqual(cache_path.read_bytes(), b"cached-audio")
+            prune.assert_called_once_with(root.resolve())
+
     def test_identical_sentence_is_reused_across_providers_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

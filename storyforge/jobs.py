@@ -151,7 +151,12 @@ class JobQueue:
             self.start()
 
     def set_terminal_callback(self, callback: TerminalCallback | None) -> None:
-        """Observe streamed terminal jobs before bounded history evicts them."""
+        """Observe every terminal job before it can leave the live queue.
+
+        The callback is owned by the long-running production worker, not by a
+        browser poll. Streamed jobs still use it as an eviction barrier, while
+        ordinary jobs publish their final state as soon as processing unwinds.
+        """
 
         if callback is not None and not callable(callback):
             raise TypeError("terminal callback must be callable")
@@ -489,19 +494,30 @@ class JobQueue:
         return True
 
     def _finish_streamed_job(self, job: RenderJob) -> None:
+        """Publish one terminal result; retain streamed history only after ack.
+
+        The historical method name is kept as an internal compatibility
+        surface. Terminal publication now applies to ordinary jobs as well.
+        """
+
         with self._lock:
             streamed = job.id in self._streamed_job_ids
-            callback = self._terminal_callback if streamed else None
-        if not streamed or job.status not in ARCHIVABLE_JOB_STATUSES:
+            callback = self._terminal_callback
+        if job.status not in ARCHIVABLE_JOB_STATUSES:
             return
         if callback is not None:
+            # Mark publication before invoking external storage. Readers must
+            # not observe a completed/failed card while its durable record and
+            # lease release are still in flight.
+            with self._lock:
+                self._pending_terminal_callback_ids.add(job.id)
             try:
                 with self._terminal_callback_lock:
                     callback(job)
             except BaseException:
-                # Rendering must continue even if the durable ledger is
-                # temporarily unavailable. Keep the card in memory so the
-                # normal UI sync can retry it instead of losing final state.
+                # Keep the terminal snapshot in memory and let the Worker
+                # retry it. A browser GET must never be required to make a
+                # finished render durable.
                 print(traceback.format_exc(), end="")
                 with self._lock:
                     self._stream_paused = True
@@ -537,7 +553,27 @@ class JobQueue:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [job.to_dict() for job in self._jobs]
+            snapshots: list[dict[str, Any]] = []
+            for job in self._jobs:
+                snapshot = job.to_dict()
+                publication_pending = (
+                    job.id in self._pending_terminal_callback_ids
+                    or (
+                        job.id in self._active_job_ids
+                        and job.status
+                        in {
+                            JobStatus.COMPLETED,
+                            JobStatus.FAILED,
+                            JobStatus.INTERRUPTED,
+                        }
+                    )
+                )
+                if publication_pending and job.status in ARCHIVABLE_JOB_STATUSES:
+                    snapshot["status"] = JobStatus.RENDERING.value
+                    snapshot["progress"] = min(float(job.progress), 0.99)
+                    snapshot["stage_label"] = "正在保存制作记录"
+                snapshots.append(snapshot)
+            return snapshots
 
     def archive_snapshot(self, job_id: str) -> dict[str, Any]:
         """Return a stable snapshot only when a job can no longer execute."""
@@ -717,6 +753,12 @@ class JobQueue:
             return bool(self._active_job_ids) or any(
                 job.status in active for job in self._jobs
             )
+
+    def active_job_ids(self) -> set[str]:
+        """Return a stable snapshot of processors which currently own work."""
+
+        with self._lock:
+            return set(self._active_job_ids)
 
     def get_job(self, job_id: str) -> RenderJob | None:
         with self._lock:
@@ -952,6 +994,8 @@ class JobQueue:
         """Return work only from the oldest unfinished enqueue operation."""
 
         with self._lock:
+            if self._shutdown_requested.is_set():
+                return None, None, self._work_revision
             while self._scheduled_batches:
                 batch = self._scheduled_batches[0]
                 jobs_by_id = {job.id: job for job in self._jobs}
@@ -1011,6 +1055,7 @@ class JobQueue:
         if not requested:
             return []
         changed: list[dict[str, Any]] = []
+        callback_jobs: list[RenderJob] = []
         tokens: list[CancellationToken] = []
         with self._lock:
             # Keep tombstones even for lazy stream-tail jobs which the loader
@@ -1031,10 +1076,17 @@ class JobQueue:
                 token = self._job_tokens.get(job.id)
                 if token is not None:
                     tokens.append(token)
+                elif job.id not in self._active_job_ids:
+                    # Queued work has no processor to unwind, so its terminal
+                    # state is safe to publish now. Active work is published by
+                    # ``_run`` only after child processes have stopped.
+                    callback_jobs.append(job)
             if changed:
                 self._work_revision += 1
         for token in tokens:
             token.cancel()
+        for job in callback_jobs:
+            self._finish_streamed_job(job)
         return changed
 
     def cancel(self) -> None:
@@ -1074,7 +1126,12 @@ class JobQueue:
         """
 
         self.begin_shutdown()
-        self.cancel()
+        # Closing the UI or applying an update must not destroy work which has
+        # never started. Cancel only the processor currently owning resources;
+        # durable queued snapshots remain queued for the next Worker process.
+        with self._lock:
+            active_ids = set(self._active_job_ids)
+        self.cancel_jobs(active_ids, reason="application shutdown")
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         current = threading.current_thread()
 
@@ -1147,6 +1204,8 @@ class JobQueue:
         # render is running; a one-time snapshot would leave those jobs parked
         # forever because ``start`` correctly refuses to launch a second worker.
         while True:
+            if self._shutdown_requested.is_set():
+                return
             if self._cancel.is_set():
                 with self._lock:
                     queued = [item for item in self._jobs if item.status == JobStatus.QUEUED]

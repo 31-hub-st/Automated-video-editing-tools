@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -22,6 +24,264 @@ from storyforge.updater import (  # noqa: E402
     inspect_update_package,
     normalize_version,
 )
+
+
+FROZEN_BUILD_VALIDATION = "BUILD_STARTUP_VALIDATION.json"
+FROZEN_KOKORO_VALIDATION = "BUILD_KOKORO_VALIDATION.json"
+FROZEN_RELEASE_VALIDATION = "BUILD_RELEASE_VALIDATION.json"
+RELEASE_VALIDATION_SCHEMA = 1
+
+
+def _read_passed_frozen_validation(
+    path: Path,
+    *,
+    label: str,
+    requested_version: str,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise ValueError(f"Frozen StoryForge packages require {path.name}.")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f"{path.name} is not valid UTF-8 JSON.") from error
+    if not isinstance(raw, dict) or raw.get("ok") is not True:
+        raise ValueError(f"{path.name} does not contain a passed {label} self-test.")
+    if raw.get("frozen") is not True:
+        raise ValueError(f"{path.name} was not produced by the frozen application.")
+    try:
+        validated_version = normalize_version(raw.get("app_version"))
+    except ValueError as error:
+        raise ValueError(f"{path.name} contains an invalid app_version.") from error
+    if validated_version != requested_version:
+        raise ValueError(
+            f"{label.capitalize()} validation version mismatch: "
+            f"validated binary is {validated_version}, requested package is "
+            f"{requested_version}."
+        )
+    return raw
+
+
+def _bundle_manifest(source: Path) -> dict[str, object]:
+    """Hash every release file except the attestation that contains the hash."""
+
+    records: list[tuple[str, int, str]] = []
+    total_bytes = 0
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"Release directory cannot contain symlinks: {path}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source).as_posix()
+        if relative.casefold() == FROZEN_RELEASE_VALIDATION.casefold():
+            continue
+        size = int(path.stat().st_size)
+        digest = file_sha256(path)
+        records.append((relative, size, digest))
+        total_bytes += size
+    records.sort(key=lambda item: item[0].casefold())
+    manifest_digest = hashlib.sha256()
+    for relative, size, digest in records:
+        manifest_digest.update(relative.encode("utf-8"))
+        manifest_digest.update(b"\0")
+        manifest_digest.update(str(size).encode("ascii"))
+        manifest_digest.update(b"\0")
+        manifest_digest.update(digest.encode("ascii"))
+        manifest_digest.update(b"\n")
+    return {
+        "bundle_manifest_sha256": manifest_digest.hexdigest(),
+        "bundle_file_count": len(records),
+        "bundle_size_bytes": total_bytes,
+    }
+
+
+def _local_ai_assets_present(source: Path) -> bool:
+    kokoro = source / "local-ai" / "kokoro"
+    return bool(
+        (kokoro / "kokoro-v1_0.pth").is_file()
+        and (kokoro / "config.json").is_file()
+        and (kokoro / "voices").is_dir()
+        and any(path.is_file() for path in (kokoro / "voices").glob("*"))
+    )
+
+
+def write_release_validation(
+    source_directory: str | Path,
+    *,
+    entrypoint: str,
+    requested_version: str,
+    with_local_ai: bool,
+) -> dict[str, object]:
+    """Attest the exact frozen directory after all runtime smoke tests pass."""
+
+    source = Path(source_directory).expanduser().resolve(strict=True)
+    version = normalize_version(requested_version)
+    normalized_entrypoint = str(entrypoint or "").replace("\\", "/").strip("/")
+    entrypoint_path = source / Path(normalized_entrypoint)
+    if not normalized_entrypoint or not entrypoint_path.is_file():
+        raise ValueError("Release entrypoint does not exist in the build directory.")
+    startup_path = source / FROZEN_BUILD_VALIDATION
+    _read_passed_frozen_validation(
+        startup_path,
+        label="startup",
+        requested_version=version,
+    )
+    assets_present = _local_ai_assets_present(source)
+    if bool(with_local_ai) != assets_present:
+        raise ValueError(
+            "WithLocalAI release identity does not match the bundled Kokoro assets."
+        )
+    kokoro_path = source / FROZEN_KOKORO_VALIDATION
+    kokoro_digest = ""
+    if with_local_ai:
+        _read_passed_frozen_validation(
+            kokoro_path,
+            label="Kokoro",
+            requested_version=version,
+        )
+        kokoro_digest = file_sha256(kokoro_path)
+    elif kokoro_path.exists():
+        raise ValueError(
+            f"Lightweight releases cannot contain stale {FROZEN_KOKORO_VALIDATION}."
+        )
+    attestation: dict[str, object] = {
+        "schema_version": RELEASE_VALIDATION_SCHEMA,
+        "ok": True,
+        "frozen": True,
+        "app_version": version,
+        "entrypoint": normalized_entrypoint,
+        "entrypoint_sha256": file_sha256(entrypoint_path),
+        "startup_validation_sha256": file_sha256(startup_path),
+        "kokoro_validation_sha256": kokoro_digest,
+        "with_local_ai": bool(with_local_ai),
+        **_bundle_manifest(source),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    destination = source / FROZEN_RELEASE_VALIDATION
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.stem}-", suffix=".tmp", dir=source
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(attestation, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary_name, destination)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+    return attestation
+
+
+def _verify_release_validation(
+    source: Path,
+    *,
+    entrypoint: str,
+    requested_version: str,
+) -> dict[str, object]:
+    validation_path = source / FROZEN_RELEASE_VALIDATION
+    if not validation_path.is_file():
+        raise ValueError(
+            f"Frozen StoryForge packages require {FROZEN_RELEASE_VALIDATION}; "
+            "run scripts/build_exe.ps1 and package that exact verified output."
+        )
+    try:
+        raw = json.loads(validation_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f"{FROZEN_RELEASE_VALIDATION} is not valid UTF-8 JSON.") from error
+    if not isinstance(raw, dict):
+        raise ValueError(f"{FROZEN_RELEASE_VALIDATION} must contain an object.")
+    if raw.get("schema_version") != RELEASE_VALIDATION_SCHEMA:
+        raise ValueError(f"{FROZEN_RELEASE_VALIDATION} schema is unsupported.")
+    if raw.get("ok") is not True or raw.get("frozen") is not True:
+        raise ValueError(f"{FROZEN_RELEASE_VALIDATION} is not a passed frozen build.")
+    if normalize_version(raw.get("app_version")) != requested_version:
+        raise ValueError("Release validation app_version does not match the package.")
+    if str(raw.get("entrypoint") or "").replace("\\", "/") != entrypoint:
+        raise ValueError("Release validation entrypoint does not match the package.")
+    entrypoint_path = source / Path(entrypoint)
+    if not hmac.compare_digest(
+        str(raw.get("entrypoint_sha256") or "").casefold(),
+        file_sha256(entrypoint_path),
+    ):
+        raise ValueError("Release entrypoint changed after frozen startup validation.")
+    startup_path = source / FROZEN_BUILD_VALIDATION
+    if not hmac.compare_digest(
+        str(raw.get("startup_validation_sha256") or "").casefold(),
+        file_sha256(startup_path),
+    ):
+        raise ValueError("Startup validation changed after release attestation.")
+    with_local_ai = raw.get("with_local_ai")
+    if not isinstance(with_local_ai, bool):
+        raise ValueError("Release validation with_local_ai flag is invalid.")
+    if with_local_ai != _local_ai_assets_present(source):
+        raise ValueError("Release validation does not match bundled Kokoro assets.")
+    kokoro_path = source / FROZEN_KOKORO_VALIDATION
+    if with_local_ai:
+        _read_passed_frozen_validation(
+            kokoro_path,
+            label="Kokoro",
+            requested_version=requested_version,
+        )
+        if not hmac.compare_digest(
+            str(raw.get("kokoro_validation_sha256") or "").casefold(),
+            file_sha256(kokoro_path),
+        ):
+            raise ValueError("Kokoro validation changed after release attestation.")
+    elif kokoro_path.exists() or str(raw.get("kokoro_validation_sha256") or ""):
+        raise ValueError("Lightweight release contains stale Kokoro validation.")
+    current_manifest = _bundle_manifest(source)
+    for key in (
+        "bundle_manifest_sha256",
+        "bundle_file_count",
+        "bundle_size_bytes",
+    ):
+        if raw.get(key) != current_manifest[key]:
+            raise ValueError(
+                "Frozen build directory changed after release validation "
+                f"({key} mismatch)."
+            )
+    return raw
+
+
+def _validate_release_identity(
+    source: Path,
+    *,
+    entrypoint: str,
+    requested_version: str,
+) -> None:
+    """Refuse update archives whose binary and release labels disagree."""
+
+    source_version = normalize_version(__version__)
+    requested = normalize_version(requested_version)
+    entry_name = Path(entrypoint).name.casefold()
+    frozen_storyforge = (
+        Path(entrypoint).suffix.casefold() == ".exe"
+        and entry_name.startswith("storyforge")
+    )
+    validation_path = source / FROZEN_BUILD_VALIDATION
+    if frozen_storyforge:
+        _read_passed_frozen_validation(
+            validation_path,
+            label="startup",
+            requested_version=requested,
+        )
+        _verify_release_validation(
+            source,
+            entrypoint=str(entrypoint).replace("\\", "/").strip("/"),
+            requested_version=requested,
+        )
+
+    # Source packages have no frozen validation file, so the imported source
+    # version itself is their release identity. Frozen builds must agree with
+    # both checks; this prevents an old verified directory from being relabeled
+    # by a newer copy of the packaging script.
+    if requested != source_version:
+        raise ValueError(
+            "StoryForge source version mismatch: "
+            f"source is {source_version}, requested package is {requested}."
+        )
 
 
 def _safe_files(source: Path, output: Path) -> list[tuple[Path, str]]:
@@ -61,6 +321,11 @@ def build_package(
         or not (source / Path(normalized_entrypoint)).is_file()
     ):
         raise ValueError("entrypoint 必须是构建目录内存在的启动文件。")
+    _validate_release_identity(
+        source,
+        entrypoint=normalized_entrypoint,
+        requested_version=version,
+    )
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     files = _safe_files(source, output)

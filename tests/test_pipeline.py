@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 import wave
 from dataclasses import replace
@@ -25,11 +26,15 @@ from storyforge.pipeline import (
     _decode_media_sample,
     _fit_preview_tts_to_duration,
     _copy_file_atomic,
+    _completed_failure_code,
     _cover_outro_enabled,
     _plan_category_video_segments,
     _preflight_output_directory,
+    _preflight_workspace_directory,
     _required_output_bytes,
     _serial_fallback_segments,
+    _should_retry_in_low_memory_mode,
+    _should_retry_with_cpu,
     _story_card_final_label,
     _story_card_platform_logo,
     assemble_narration_wav,
@@ -77,6 +82,42 @@ def _speech_segment(index: int, text: str, path: Path, duration: float) -> Speec
         voice="af_bella",
         provider="fake-tts",
     )
+
+
+class HeavyResourceSerializationTests(unittest.TestCase):
+    def test_pipeline_holds_shared_heavy_resource_lock_for_entire_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            lock = threading.Lock()
+            runner = PipelineRunner(
+                lambda: AppSettings(),
+                ffmpeg_path=Path("fake-ffmpeg.exe"),
+                work_root=Path(temp) / "render-work",
+                heavy_resource_lock=lock,
+            )
+            job = RenderJob(
+                batch_id="batch-1",
+                platform_id="platform-1",
+                source_file=str(Path(temp) / "story.txt"),
+                title="Story",
+                code="B12345",
+                video_folder=str(Path(temp) / "videos"),
+                music_folder=str(Path(temp) / "music"),
+                output_folder=str(Path(temp) / "output"),
+            )
+            platform = PlatformProfile(id="platform-1", name="GoodNovel")
+
+            def assert_locked(*_args, **_kwargs):
+                self.assertTrue(lock.locked())
+                return "finished.mp4"
+
+            with (
+                mock.patch.object(runner, "_run_job", side_effect=assert_locked),
+                mock.patch("storyforge.pipeline.release_embedded_kokoro_runtime"),
+            ):
+                result = runner(job, platform, lambda *_args: None)
+
+            self.assertEqual(result, "finished.mp4")
+            self.assertFalse(lock.locked())
 
 
 class NarrationAssemblyTests(unittest.TestCase):
@@ -168,6 +209,82 @@ class NarrationAssemblyTests(unittest.TestCase):
                         duration_seconds=60,
                         output_mode="audio_only",
                     )
+
+    def test_serial_output_preflight_reserves_peak_staging_space(self) -> None:
+        normal = _required_output_bytes(600, "video_and_mp3")
+        serial = _required_output_bytes(
+            600,
+            "video_and_mp3",
+            serial_staging=True,
+        )
+        self.assertGreater(serial, normal)
+
+    def test_workspace_preflight_protects_system_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "render-work"
+            with mock.patch(
+                "storyforge.pipeline.shutil.disk_usage",
+                return_value=mock.Mock(free=16 * 1024**2),
+            ):
+                with self.assertRaisesRegex(PipelineError, "工作盘空间不足"):
+                    _preflight_workspace_directory(
+                        root,
+                        duration_seconds=600,
+                    )
+
+    def test_completed_failure_code_includes_windows_resource_exit_codes(self) -> None:
+        for return_code in (0xC0000017, 0xC000009A, 0xC000012D, -1073741523):
+            with self.subTest(return_code=return_code):
+                completed = subprocess.CompletedProcess(
+                    ["ffmpeg"],
+                    return_code,
+                    stdout="",
+                    stderr="",
+                )
+                self.assertEqual(
+                    _completed_failure_code(completed, output_exists=False),
+                    "out_of_memory",
+                )
+
+    def test_cpu_retry_is_only_allowed_for_hardware_encoder_initialization(self) -> None:
+        encoders = ["h264_nvenc", "libx264"]
+        self.assertTrue(
+            _should_retry_with_cpu("encoder_init", "h264_nvenc", encoders)
+        )
+        for code in (
+            "unknown",
+            "missing_input",
+            "filter_or_subtitle",
+            "permission_denied",
+            "out_of_memory",
+        ):
+            with self.subTest(code=code):
+                self.assertFalse(
+                    _should_retry_with_cpu(code, "h264_nvenc", encoders)
+                )
+
+    def test_identical_cpu_compatibility_oom_is_not_retried(self) -> None:
+        self.assertFalse(
+            _should_retry_in_low_memory_mode(
+                "out_of_memory",
+                serial_render_prepared=True,
+                cpu_compatibility_attempted=True,
+            )
+        )
+        self.assertTrue(
+            _should_retry_in_low_memory_mode(
+                "out_of_memory",
+                serial_render_prepared=False,
+                cpu_compatibility_attempted=True,
+            )
+        )
+        self.assertFalse(
+            _should_retry_in_low_memory_mode(
+                "unknown",
+                serial_render_prepared=False,
+                cpu_compatibility_attempted=False,
+            )
+        )
 
     def test_legacy_output_checkbox_preserves_video_intent_without_overriding_new_mode(self) -> None:
         job = RenderJob(
@@ -468,6 +585,57 @@ class UsageLedgerTests(unittest.TestCase):
 
 
 class PipelineRunnerTests(unittest.TestCase):
+    def test_single_clip_low_memory_source_skips_redundant_stitched_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            staging = root / "output" / ".storyforge-staging" / "job"
+            job_dir = root / "render-work" / "job"
+            staging.mkdir(parents=True)
+            job_dir.mkdir(parents=True)
+            source = root / "one.mp4"
+            source.write_bytes(b"one")
+            commands: list[list[str]] = []
+
+            def render(command, **_kwargs):
+                command = list(command)
+                commands.append(command)
+                Path(command[-1]).parent.mkdir(parents=True, exist_ok=True)
+                Path(command[-1]).write_bytes(b"video")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            runner = PipelineRunner(
+                lambda: AppSettings(),
+                ffmpeg_path=Path("fake-ffmpeg.exe"),
+                command_runner=render,
+                work_root=root / "render-work",
+            )
+            result, completed = runner._prepare_low_memory_video_source(
+                segments=[
+                    VideoSegment(
+                        source,
+                        8.0,
+                        4.0,
+                        source_width=1080,
+                        source_height=1920,
+                    )
+                ],
+                staging_dir=staging,
+                job_dir=job_dir,
+                width=1080,
+                height=1920,
+                fps=60,
+                color_grade="neutral",
+                video_transition="cut",
+                progress=lambda *_args: None,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("concat", commands[0])
+            self.assertEqual(result.path.name, "segment-0001.mp4")
+
     def test_low_memory_source_normalizes_one_clip_at_a_time_on_output_drive(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -673,10 +841,12 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertTrue((job_dir / "render-command-low-memory.txt").is_file())
             manifests = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifests["media"]["low_memory_fallback"])
+            self.assertTrue(manifests["media"]["safe_serial_render"])
             delivery_commands = [
                 item for item in commands if Path(item[-1]).name.endswith(".partial.mp4")
             ]
             self.assertEqual(len(delivery_commands), 2)
+            self.assertTrue(all(command.count("-i") == 2 for command in delivery_commands))
             self.assertIn("h264_nvenc", delivery_commands[0])
             self.assertIn("-filter_complex_threads", delivery_commands[1])
             self.assertIn("libx264", delivery_commands[1])
@@ -1888,7 +2058,7 @@ class PipelineRunnerTests(unittest.TestCase):
             job_dir = job_workspace_directory(job, root / "render-work")
             self.assertTrue((job_dir / "01-original.txt").is_file())
             self.assertTrue((job_dir / "02-narration-script.txt").is_file())
-            self.assertTrue((job_dir / ".work" / "narration.wav").is_file())
+            self.assertFalse((job_dir / ".work" / "narration.wav").exists())
             narration_audio_path = Path(job.narration_audio_file)
             self.assertTrue(narration_audio_path.is_file())
             self.assertEqual(
@@ -1924,11 +2094,7 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(len(text_configs), 1)
             self.assertEqual(len(tts_configs), 2)
 
-            with wave.open(str(job_dir / ".work" / "narration.wav"), "rb") as wav:
-                expected_seconds = len(spoken) * 0.05 + 0.08
-                self.assertAlmostEqual(
-                    wav.getnframes() / wav.getframerate(), expected_seconds, places=6
-                )
+            expected_seconds = len(spoken) * 0.05 + 0.08
             subtitle_text = (job_dir / ".work" / "subtitles.ass").read_text(
                 encoding="utf-8-sig"
             )
@@ -2007,6 +2173,11 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(manifest["voice"]["provider"], "local_kokoro")
             self.assertEqual(manifest["voice"]["requested_wpm"], 240)
             self.assertAlmostEqual(manifest["voice"]["speed_multiplier"], 240 / 185)
+            self.assertAlmostEqual(
+                manifest["voice"]["duration_seconds"],
+                expected_seconds,
+                places=6,
+            )
             self.assertEqual(manifest["media"]["mood"], "romance")
             self.assertEqual(
                 manifest["media"]["video_selection"]["mode"],

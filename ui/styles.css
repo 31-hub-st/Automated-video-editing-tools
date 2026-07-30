@@ -2986,6 +2986,10 @@ body.web-runtime:not(.web-can-publishing-manage) [data-resource-view="publishing
 .web-session-mode > i { width: 8px; height: 8px; background: #46d2a7; border-radius: 50%; box-shadow: 0 0 0 4px rgba(70,210,167,.13); }
 .web-session-mode b { font-size: 12px; }
 .web-session-mode small, .web-session-user small { color: #9dafce; font-size: 11px; }
+.queue-sync-status { padding-left: 9px; border-left: 1px solid rgba(255,255,255,.18); }
+.queue-sync-status.is-ready { color: #8ee2c8; }
+.queue-sync-status.is-retrying { color: #ffd58c; }
+.queue-sync-status.is-error { color: #ffaaa1; }
 .web-session-user b { font-size: 12px; }
 .web-session-user button { padding: 3px 8px; color: #dce6fb; background: transparent; border: 1px solid rgba(255,255,255,.2); border-radius: 6px; cursor: pointer; }
 .web-session-user button:hover { color: #fff; border-color: rgba(255,255,255,.5); }
@@ -3003,6 +3007,17 @@ body.client-local-web:not(.desktop-auth-runtime) .employee-update-trigger { disp
 .employee-update-trigger.is-ready > i { background: #46d2a7; box-shadow: 0 0 0 4px rgba(70,210,167,.13); }
 .employee-update-trigger.is-warn > i { background: #f0b657; box-shadow: 0 0 0 4px rgba(240,182,87,.14); }
 .employee-update-trigger:focus-visible { outline: 3px solid rgba(130,161,255,.42); outline-offset: 2px; }
+
+/* Rendering and TTS share the workstation with WebView. Freeze decorative
+   preview loops while a real job is active so the control surface stays
+   responsive on 16 GB employee machines. */
+body.production-resource-busy .video-preview *,
+body.production-resource-busy .video-preview .preview-media::before,
+body.production-resource-busy .outro-cover-preview *,
+body.production-resource-busy .sample-stage::before,
+body.production-resource-busy .tally-light.is-live {
+  animation-play-state: paused !important;
+}
 body.web-runtime [data-draft-folder].web-host-only { color: var(--muted); background: #eef2f7; border-color: var(--line); cursor: help; }
 .web-host-path-note { display: block; margin-top: 6px; color: #6b7890; font-size: 11px; }
 .artifact-download { display: inline-flex; align-items: center; justify-content: center; margin-top: 8px; padding: 5px 9px; color: var(--cobalt-deep); background: var(--cobalt-pale); border: 1px solid #bdcaf2; border-radius: 6px; font-size: 11px; font-weight: 700; text-decoration: none; }

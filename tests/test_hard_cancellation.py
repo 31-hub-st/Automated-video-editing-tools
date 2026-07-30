@@ -9,17 +9,40 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from storyforge.cancellation import (
     CancellationToken,
     JobCancelledError,
     cancellation_scope,
     run_cancellable_process,
+    windows_process_creation_flags,
 )
 from storyforge.jobs import JobQueue
 from storyforge.models import JobStatus, PlatformProfile, RenderJob
 from storyforge.providers.base import ProviderConfig
 from storyforge.providers.tts import KokoroProvider
+
+
+class WindowsProcessFlagTests(unittest.TestCase):
+    def test_ffmpeg_gets_below_normal_priority_without_affecting_other_tools(self) -> None:
+        with (
+            mock.patch.object(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True
+            ),
+            mock.patch.object(
+                subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x4000, create=True
+            ),
+        ):
+            ffmpeg = windows_process_creation_flags(("FFmpeg.exe",), 0x10)
+            imageio_ffmpeg = windows_process_creation_flags(
+                (r"C:\cache\ffmpeg-win-x86_64-v7.1.exe",), 0x10
+            )
+            python = windows_process_creation_flags(("python.exe",), 0x10)
+
+        self.assertEqual(ffmpeg, 0x10 | 0x200 | 0x4000)
+        self.assertEqual(imageio_ffmpeg, 0x10 | 0x200 | 0x4000)
+        self.assertEqual(python, 0x10 | 0x200)
 
 
 def _wait_until(predicate, timeout: float = 8.0) -> bool:
@@ -197,8 +220,11 @@ class JobQueueHardCancellationTests(unittest.TestCase):
             entered = threading.Event()
             platform = PlatformProfile(id="platform-1", name="GoodNovel")
             job = _job("shutdown-active", platform, root)
+            queued = _job("shutdown-queued", platform, root)
+            calls: list[str] = []
 
-            def processor(_job, _platform, _progress):
+            def processor(current_job, _platform, _progress):
+                calls.append(current_job.id)
                 entered.set()
                 run_cancellable_process(
                     [
@@ -217,7 +243,7 @@ class JobQueueHardCancellationTests(unittest.TestCase):
                 return "late-output.mp4"
 
             queue = JobQueue(processor)
-            queue.enqueue_jobs([job], platform)
+            queue.enqueue_jobs([job, queued], platform)
             queue.start()
             self.assertTrue(entered.wait(4))
             self.assertTrue(
@@ -235,6 +261,8 @@ class JobQueueHardCancellationTests(unittest.TestCase):
             )
             self.assertEqual([item.id for item in changed], [job.id])
             self.assertEqual(job.status, JobStatus.INTERRUPTED)
+            self.assertEqual(queued.status, JobStatus.QUEUED)
+            self.assertEqual(calls, [job.id])
 
             with self.assertRaisesRegex(RuntimeError, "shutting down"):
                 queue.enqueue_jobs([_job("late-job", platform, root)], platform)

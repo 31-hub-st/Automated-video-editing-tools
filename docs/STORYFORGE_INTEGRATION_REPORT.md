@@ -3,15 +3,15 @@
 > 文档用途：供后续开发团队将 StoryForge 的小说资料、分集规划、文案处理、配音、字幕、素材编排、浏览器即时预览、批量渲染、生产记录和多电脑协同能力嫁接到其他程序。
 >
 > 基准日期：2026-07-30  
-> 当前源码版本：`storyforge.__version__` 0.4.0-rc7  
+> 当前源码版本：`storyforge.__version__` 0.4.1
 > 数据库 Schema：12  
-> 设置 Schema：18  
+> 设置 Schema：19
 > Hub 协议：1  
 > Local Worker / 浏览器协议：2  
 > 成片 Manifest：2
 > 更新清单 Schema：1；更新包元数据：1；生产方案 `recipe_version`：1；生产预设 Schema：2
 >
-> 解释优先级：本报告前部的“0.4.0 当前嫁接合同”覆盖后文明确标为历史兼容的 0.3.x 描述；后文未冲突的实体、接口和兼容合同继续有效。当前本机构建验收候选物为 `D:\StoryForgeBuildTemp\release\rc7-final\StoryForge Studio\`，冻结态启动、内置 FFmpeg 与 Kokoro 实际合成自检均通过；更新包已发布到 Hub，但它仍需在实际员工电脑完成跨机冒烟后才能改称正式生产版。
+> 解释优先级：本报告前部的“0.4.1 当前嫁接合同”覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。当前稳定构建位于 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio\`，冻结态启动、内置 FFmpeg、Kokoro 实际合成、60 FPS 完整成片与独立 MP3 均已通过本机验收；更新包已发布到 Hub。员工电脑的最终安装与硬件冒烟状态仍以设备上报为准。
 
 ---
 
@@ -37,7 +37,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - `HubServer` / `HubClient`：局域网目录共享、权限和任务租约；
 - `StoryForgeApi`：现有桌面桥接层，可作为新适配器的参考，但不应直接定义未来公共 API。
 
-### 1.1 0.4.0 当前嫁接合同（兼容 0.3.4）
+### 1.1 0.4.1 当前嫁接合同（兼容 0.3.4/0.4.0）
 
 - **网页与桌面是同一业务产品，媒体运行端不同。**桌面 WebView、Hub 团队网页和制作电脑 loopback 网页复用同一 UI 和账号权限。Hub 网页可发起试听、目录选择、完整建队、队列控制和失败重试，但前端必须先通过一次性设备票据连接访问者电脑上只监听 `127.0.0.1:18765–18770` 的 Local Worker；`WEB_DESKTOP_ONLY_MEDIA_METHODS` 继续阻止这些方法落到 Hub 主机进程。
 - **完整窗口无需常开。**员工发布包在 EXE 同级携带不含密钥的 `storyforge-connection.json`。全新制作电脑只输入账号和 8 位密码；软件自动读取 Windows 电脑名称、登记安装身份、用 DPAPI 保存内部设备凭据，并静默注册登录触发的 `StoryForge Local Worker`。员工不填写 Hub 地址、不复制令牌、不运行脚本。`admin-tools` 中的启用/停用脚本仅保留为管理员维修入口。集成到其他程序时应保留这个独立 Worker 生命周期，不要把媒体能力绑死在可见窗口。
@@ -45,7 +45,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - **本机健康状态成为 Worker 合同。**Local Worker 的连接结果返回经过脱敏的 `app_version / ffmpeg_ready / ffmpeg_label / encoders / recommended_encoder / tts_provider / tts_ready / edge_tts_runtime_ready / embedded_kokoro_ready / kokoro_configured / tts_endpoint_configured / tts_api_key_configured`。网页必须用这组当前电脑状态展示 FFmpeg/Kokoro，不得误用 Hub 主机检测或浏览器能力。
 - **Kokoro 版本边界明确。**轻量版包含界面、本机制作服务和 FFmpeg，但不含进程内 Kokoro/PyTorch；它可以使用 Edge TTS、Deepgram 或 OpenAI-compatible Kokoro HTTP 服务。`-WithLocalAI` 完整版才可在 Kokoro 地址留空时使用内置运行时和 `local-ai\kokoro` 离线资产。网页显示“轻量版，Kokoro 还未配置”是能力状态，不是网页故障。
 - **封面结尾可关闭。**`production_settings.cover_outro_enabled`、`AppSettings.cover_outro_enabled` 与冻结到 `RenderJob.cover_outro_enabled` 的值默认 `true`。值为 `false` 时 FFmpeg 计划不插入小说封面或封面动画，保持正文画面完成结尾；CTA 旁白、当前字幕样式、BGM 和顶部搜索口令仍继续。旧草稿没有字段时迁移为 `true`。
-- **输出合同固定为二选一。**Settings Schema 18 使用 `production_settings.output_mode` / `BatchSpec.output_mode`：默认 `video_and_mp3`，完整 MP4 通过快速质检后复用内部 `narration.wav`，再交付与成片同基名的 48 kHz、192 kbps 纯旁白 MP3；显式 `audio_only` 跳过视频渲染，只交付 MP3。MP3 不含 BGM 或素材原声，且不得再次调用 TTS。产品不再提供 video-only。MP4 与 MP3 都先写私有临时路径，只有合同内全部产物成功后才原子发布正式文件；失败不会留下可被员工误发的正式名残片。
+- **输出合同固定为二选一。**Settings Schema 19 使用 `production_settings.output_mode` / `BatchSpec.output_mode`：默认 `video_and_mp3`，完整 MP4 通过快速质检后复用内部 `narration.wav`，再交付与成片同基名的 48 kHz、192 kbps 纯旁白 MP3；显式 `audio_only` 跳过视频渲染，只交付 MP3。MP3 不含 BGM 或素材原声，且不得再次调用 TTS。产品不再提供 video-only。MP4 与 MP3 都先写私有临时路径，只有合同内全部产物成功后才原子发布正式文件；失败不会留下可被员工误发的正式名残片。
 - **旧字段只作安全迁移。**旧 `export_narration_audio=true`、`false` 或缺失都迁移为 `output_mode=video_and_mp3`，不能根据旧布尔值关闭 MP3；只有显式 `output_mode=audio_only` 才进入纯音频模式。最终路径写入 `RenderJob.output_file` / `narration_audio_file`、Manifest、生产记录与对应 `video` / `narration` Artifact；`audio_only` 只登记 `narration`，不得把 MP3 伪装成视频 Artifact。
 - **生产媒体始终不跨机共享。**`settings.hub.share_narration` 与旧 `share_previews` 只作为 false-only 兼容字段读取，旧 `true` 在加载时迁移并持久化为 `false`，设置 API 也会忽略伪造的开启请求。完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 和字幕对齐文件只把元数据、校验信息和本机引用写入 Hub，文件本身永不上传；Hub 的 3 日备份不包含这些员工电脑产物，管理员远程页面也不能读取这些路径对应的文件。
 - **素材分类缺失时使用可追溯的通用回退。**视频仍优先读取员工所选素材总目录中的题材子目录；该分类不存在或没有有效视频时，从同一员工所选总目录随机选取可用视频，不访问 Hub 或其他电脑目录。任务警告、Manifest 与生产记录必须记录“通用素材回退”，但 `story_mood`/人工题材不变，界面不得把回退素材显示成题材命中。总目录也无有效视频时才失败并跳过。
@@ -1649,19 +1649,20 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 
 | 项目 | 当前候选值 |
 |---|---|
-| 目录 | `D:\StoryForgeBuildTemp\release\rc7-final\StoryForge Studio\` |
-| 版本 | `0.4.0-rc7` |
-| EXE | `StoryForge Studio.exe`，71.9 MB |
-| EXE SHA-256 | `AFBEAF40A8EBB7BC7CBB300E493FB1A73AC98A36C972D499309472198FBB9170` |
-| 完整目录 | 约 1.36 GB，7806 个文件（更新 ZIP 含元数据后为 7807 项） |
+| 目录 | `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio\` |
+| 版本 | `0.4.1` |
+| EXE | `StoryForge Studio.exe`，75,423,391 字节 |
+| EXE SHA-256 | `038ADADCB27368BA5A24BB81E13D3347FFAD734EA5BE31322AB98294D0006FB1` |
+| 完整目录 | 1,462,548,617 字节，7807 个文件；发布证明中的被签清单为 7806 个文件、1,462,547,965 字节 |
 | 本地 AI | Kokoro 模型 312.1 MB，22 个 Voice 文件 |
 | 自动连接 | `storyforge-connection.json` 仅含 Schema、Hub 地址与站点名，不含账号、密码或设备凭据 |
-| 冻结态自检 | `BUILD_STARTUP_VALIDATION.json` 与 `BUILD_KOKORO_VALIDATION.json` 均为 `ok=true` |
-| 更新 ZIP | `D:\StoryForgeBuildTemp\updates\StoryForge-0.4.0-rc7.zip`，683.9 MB |
-| 更新 ZIP SHA-256 | `9CCC434D8F8D723A08DECACD239F9C38815C66A2A190DF5BB9C8988CA671F8BF` |
-| Hub 公告文件 | `StoryForge-0.4.0-rc7-9ccc434d8f8d.zip` |
+| 冻结态自检 | `BUILD_STARTUP_VALIDATION.json`、`BUILD_KOKORO_VALIDATION.json` 与 `BUILD_RELEASE_VALIDATION.json` 均为 `ok=true` |
+| 发布清单摘要 | `F1B83929E4485B993ED64353604A89E8E77764617CB02B07F30770C4B1442F89` |
+| 更新 ZIP | `D:\StoryForgeBuildTemp\updates\StoryForge-0.4.1.zip`，717,189,196 字节 |
+| 更新 ZIP SHA-256 | `172730D7FDA5DABDAD956CC56D200FAD8D57EF3DB6EDB0FBFD179AE7D070F59A` |
+| Hub 公告文件 | `StoryForge-0.4.1-172730d7fda5.zip` |
 
-该候选物已通过本机冻结态验收和 690 项源码回归基线；尚不能用本机结果冒充实际员工电脑的网络、账号、本机目录和硬件编码冒烟结论。
+该稳定物已通过 732 项源码回归（730 通过、2 跳过、0 失败）、源码态真实渲染以及冻结目录真实渲染；两次真实渲染均覆盖 1080×1920、60 FPS、H.264、旁白、字幕烧录、BGM/无 BGM 与独立 MP3。仍不能用本机结果冒充每台员工电脑的网络、账号、本机目录、驱动和硬件编码冒烟结论。
 
 ### 20.1 完整发布目录（首次安装和人工修复）
 

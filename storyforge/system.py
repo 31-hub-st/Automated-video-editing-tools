@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from importlib.util import find_spec
@@ -12,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .cancellation import run_cancellable_process
+from .cancellation import run_cancellable_process, windows_process_creation_flags
 from .providers.tts import edge_tts_runtime_available
 
 
@@ -33,7 +34,31 @@ def resolve_ffmpeg() -> Path | None:
 
 
 def _creation_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    if os.name != "nt":
+        return 0
+    return windows_process_creation_flags(
+        ("ffmpeg.exe",),
+        int(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
+    )
+
+
+_DISABLED_ENCODERS: set[tuple[str, str]] = set()
+_DISABLED_ENCODERS_LOCK = threading.RLock()
+
+
+def mark_encoder_unavailable(ffmpeg: str | Path, encoder: str) -> None:
+    """Avoid retrying a hardware encoder that failed in this app session."""
+
+    key = (os.path.normcase(str(Path(ffmpeg).resolve())), str(encoder))
+    with _DISABLED_ENCODERS_LOCK:
+        _DISABLED_ENCODERS.add(key)
+    available_encoders.cache_clear()
+
+
+def _encoder_is_disabled(ffmpeg: str | Path, encoder: str) -> bool:
+    key = (os.path.normcase(str(Path(ffmpeg).resolve())), str(encoder))
+    with _DISABLED_ENCODERS_LOCK:
+        return key in _DISABLED_ENCODERS
 
 
 @lru_cache(maxsize=8)
@@ -41,8 +66,8 @@ def _runtime_encoder_works(executable: str, encoder: str) -> bool:
     """Verify that a compiled hardware encoder can initialize on this PC.
 
     FFmpeg can list NVENC/QSV/AMF even when the matching GPU or driver is not
-    present.  A one-frame probe prevents `auto` from selecting an unusable
-    encoder and failing only after a long narration has already been created.
+    present.  A short delivery-resolution probe prevents `auto` from selecting
+    an encoder that initializes at 64x64 but fails at StoryForge's real size.
     """
 
     try:
@@ -55,12 +80,14 @@ def _runtime_encoder_works(executable: str, encoder: str) -> bool:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=64x64:r=1:d=1",
+                "color=c=black:s=1080x1920:r=60:d=0.25",
                 "-frames:v",
-                "1",
+                "15",
                 "-an",
                 "-c:v",
                 encoder,
+                "-pix_fmt",
+                "yuv420p",
                 "-f",
                 "null",
                 "-",
@@ -70,7 +97,7 @@ def _runtime_encoder_works(executable: str, encoder: str) -> bool:
             # unavailable on the current PC.  A short bound keeps the desktop
             # bootstrap responsive when a driver advertises an encoder that it
             # cannot actually start.
-            timeout=5,
+            timeout=8,
             check=False,
             creationflags=_creation_flags(),
         )
@@ -106,7 +133,7 @@ def available_encoders(ffmpeg: Path | None = None) -> list[str]:
     hardware = [
         name
         for name in ("h264_nvenc", "h264_qsv", "h264_amf")
-        if name in compiled
+        if name in compiled and not _encoder_is_disabled(executable, name)
     ]
     # Probe independent GPU backends concurrently.  The previous sequential
     # implementation could make the splash status appear frozen for as long as

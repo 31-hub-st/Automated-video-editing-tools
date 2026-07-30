@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
-from storyforge import __version__
 from storyforge.api import StoryForgeApi
 from storyforge.config import SettingsRepository
 from storyforge.models import AppSettings
@@ -31,8 +32,26 @@ def package(root: Path, version: str) -> Path:
 
 
 class ApiUpdateRuntimeTests(unittest.TestCase):
+    def test_headless_worker_can_schedule_and_request_safe_process_exit(self) -> None:
+        requested = threading.Event()
+        api = object.__new__(StoryForgeApi)
+        api._window = None
+        api._process_exit_callback = requested.set
+        api._update_manager = SimpleNamespace(
+            schedule_on_restart=lambda: {
+                "state": "scheduled",
+                "rendering_busy": False,
+            }
+        )
+        api._guard = lambda operation: operation()
+
+        result = api.restart_to_apply_update()
+
+        self.assertTrue(result["exit_queued"])
+        self.assertTrue(requested.wait(1.0))
+
     def test_host_publishes_and_client_downloads_without_live_overwrite(self) -> None:
-        self.assertEqual(__version__, "0.4.0-rc7")
+        target_version = "9.9.9"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             port = free_port()
@@ -46,13 +65,13 @@ class ApiUpdateRuntimeTests(unittest.TestCase):
             client: StoryForgeApi | None = None
             try:
                 published = host.publish_update(
-                    str(package(root, "0.4.1")),
-                    "0.4.1",
+                    str(package(root, target_version)),
+                    target_version,
                     "Editable cards and captions",
                 )
                 self.assertTrue(published["ok"], published)
                 self.assertEqual(
-                    published["data"]["manifest"]["version"], "0.4.1"
+                    published["data"]["manifest"]["version"], target_version
                 )
 
                 client_repository = SettingsRepository(root / "client")
@@ -71,7 +90,7 @@ class ApiUpdateRuntimeTests(unittest.TestCase):
                 self.assertTrue(checked["ok"], checked)
                 status = checked["data"]
                 self.assertEqual(status["state"], "scheduled")
-                self.assertEqual(status["available_version"], "0.4.1")
+                self.assertEqual(status["available_version"], target_version)
                 self.assertTrue(Path(status["package_path"]).is_file())
                 self.assertTrue(status["apply_on_restart"])
 

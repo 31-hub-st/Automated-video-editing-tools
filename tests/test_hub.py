@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -15,6 +16,7 @@ from storyforge.catalog import CatalogRepository, CatalogValidationError
 from storyforge.credentials import hash_password
 from storyforge.hub import (
     CATALOG_RPC_METHODS,
+    HUB_PROTOCOL_VERSION,
     MINIMUM_RENDER_CLIENT_VERSION,
     HubAuthenticationError,
     HubCatalogProxy,
@@ -179,6 +181,8 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
         self.assertTrue(health["ok"])
         self.assertEqual(health["service"], "storyforge-hub")
         self.assertEqual(health["protocol_version"], 1)
+        self.assertEqual(health["minimum_client_protocol_version"], 1)
+        self.assertTrue(health["app_version"])
         self.assertEqual(health["site"]["id"], "hub-test-site")
         with urlopen(self.server.base_url + "/health", timeout=3) as response:
             public_health = json.loads(response.read().decode("utf-8"))
@@ -188,6 +192,38 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
         self.assertEqual(caught.exception.status, 401)
         self.assertEqual(caught.exception.code, "unauthorized")
         self.assertFalse(self.server.authenticate("Bearer 中文无效令牌").authenticated)
+
+    def test_identity_handshake_rejects_incompatible_hub_or_workstation(self) -> None:
+        client = HubClient("http://127.0.0.1:1", TOKEN)
+        with (
+            patch.object(
+                client,
+                "health",
+                return_value={
+                    "ok": True,
+                    "service": "storyforge-hub",
+                    "protocol_version": 0,
+                    "minimum_client_protocol_version": 0,
+                },
+            ),
+            self.assertRaisesRegex(HubConnectionError, "Hub protocol is too old"),
+        ):
+            client.verify_identity()
+
+        with (
+            patch.object(
+                client,
+                "health",
+                return_value={
+                    "ok": True,
+                    "service": "storyforge-hub",
+                    "protocol_version": HUB_PROTOCOL_VERSION + 1,
+                    "minimum_client_protocol_version": HUB_PROTOCOL_VERSION + 1,
+                },
+            ),
+            self.assertRaisesRegex(HubConnectionError, "workstation is too old"),
+        ):
+            client.verify_identity()
 
     def test_missing_authorization_has_bearer_challenge(self) -> None:
         body = json.dumps(
@@ -1385,11 +1421,20 @@ class PermissionEnforcementTests(HubTestCase):
         )
 
     def test_lease_permissions_are_own_scoped_and_offline_proxy_cannot_create(self) -> None:
+        password = "Lease1!Password"
         first = self.catalog.save_user(
-            {"username": "lease-owner", "role": "producer"}
+            {
+                "username": "lease-owner",
+                "role": "producer",
+                "password_hash": hash_password(password),
+            }
         )
         second = self.catalog.save_user(
-            {"username": "lease-other", "role": "producer"}
+            {
+                "username": "lease-other",
+                "role": "producer",
+                "password_hash": hash_password(password),
+            }
         )
         novel, binding, code = self.story_relationships("lease-scope")
         first_draft = self.make_draft(first["id"], novel, binding, code)
@@ -1405,12 +1450,32 @@ class PermissionEnforcementTests(HubTestCase):
         clients = self.restart_with_users(
             {"lease-owner-token": first["id"], "lease-other-token": second["id"]}
         )
-        proxy = HubCatalogProxy(clients["lease-owner-token"])
+        # A producer's legacy bearer token is intentionally not sufficient
+        # for a lease: the Hub must know which enrolled computer owns it.
+        with self.assertRaises(HubRemoteError) as unbound:
+            HubCatalogProxy(clients["lease-owner-token"]).claim_record_lease(
+                first_record["id"], "forged-device"
+            )
+        self.assertEqual(unbound.exception.status, 403)
+        self.assertEqual(unbound.exception.code, "device_identity_required")
+
+        enrolled = HubClient.enroll_device(
+            self.server.base_url,
+            first["username"],
+            password,
+            "Lease owner PC",
+            timeout_seconds=5,
+        )
+        proxy = HubCatalogProxy(
+            HubClient(self.server.base_url, enrolled["token"], timeout_seconds=5)
+        )
         self.assertTrue(
-            proxy.claim_record_lease(first_record["id"], "owner-device")["claimed"]
+            proxy.claim_record_lease(
+                first_record["id"], enrolled["device_id"]
+            )["claimed"]
         )
         with self.assertRaises(HubRemoteError) as other_denied:
-            proxy.claim_record_lease(second_record["id"], "owner-device")
+            proxy.claim_record_lease(second_record["id"], enrolled["device_id"])
         self.assertEqual(other_denied.exception.status, 403)
 
         before_total = self.catalog.list_records()["total"]
@@ -1423,6 +1488,64 @@ class PermissionEnforcementTests(HubTestCase):
         self.assertEqual(
             self.catalog.get_record(second_record["id"])["lease_owner_device"], ""
         )
+
+    def test_enrolled_device_cannot_overwrite_same_users_other_device_lease(self) -> None:
+        password = "Lease2!Password"
+        user = self.catalog.save_user(
+            {
+                "username": "shared-member-two-devices",
+                "role": "producer",
+                "password_hash": hash_password(password),
+            }
+        )
+        novel, binding, code = self.story_relationships("device-owner")
+        draft = self.make_draft(user["id"], novel, binding, code)
+        record = self.catalog.save_production_record(
+            {"draft_id": draft["id"], "job_id": "device-owned-job"},
+            actor_user_id=user["id"],
+        )
+        first = HubClient.enroll_device(
+            self.server.base_url,
+            user["username"],
+            password,
+            "First render PC",
+            timeout_seconds=5,
+        )
+        second = HubClient.enroll_device(
+            self.server.base_url,
+            user["username"],
+            password,
+            "Second render PC",
+            timeout_seconds=5,
+        )
+        first_proxy = HubCatalogProxy(
+            HubClient(self.server.base_url, first["token"], timeout_seconds=5)
+        )
+        second_proxy = HubCatalogProxy(
+            HubClient(self.server.base_url, second["token"], timeout_seconds=5)
+        )
+        first_proxy.claim_record_lease(record["id"], first["device_id"])
+
+        with self.assertRaises(HubRemoteError) as single_denied:
+            second_proxy.save_production_record(
+                {"id": record["id"], "status": "completed", "progress": 1.0}
+            )
+        self.assertEqual(single_denied.exception.status, 409)
+
+        with self.assertRaises(HubRemoteError) as bulk_denied:
+            second_proxy.save_production_records_bulk(
+                [
+                    {
+                        "id": record["id"],
+                        "status": "completed",
+                        "progress": 1.0,
+                    }
+                ]
+            )
+        self.assertEqual(bulk_denied.exception.status, 409)
+        persisted = self.catalog.get_record(record["id"])
+        self.assertEqual(persisted["status"], "queued")
+        self.assertEqual(persisted["lease_owner_device"], first["device_id"])
 
 
 class SecureDownloadTests(HubTestCase):

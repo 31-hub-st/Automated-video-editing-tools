@@ -3,6 +3,7 @@
 
   const DEFAULT_PREVIEW_SECONDS = 15;
   const MERGED_DURATION_WARNING_SECONDS = 10 * 60;
+  const RECORD_POLL_INTERVAL_MS = 3000;
 
   const state = {
     bootstrapped: false,
@@ -18,6 +19,17 @@
     selectedPlatformId: "",
     platformLogoPreviewSource: "",
     pollTimer: null,
+    pollEnabled: false,
+    pollInFlight: false,
+    pollEpoch: 0,
+    pollFailureCount: 0,
+    jobVisualSignature: "",
+    queueVisualSignature: "",
+    recordPollTimer: null,
+    recordPollInFlight: false,
+    recordPollPending: false,
+    recordPollUrgent: false,
+    recordPollLastAt: 0,
     previousJobStates: new Map(),
     novels: [],
     publishingAccounts: [],
@@ -1196,6 +1208,12 @@
       return { ok: false, error: "本机制作服务尚未连接，暂时不能读取素材、试听配音或生成视频。请打开或重新启动当前电脑上的 StoryForge。" };
     }
     try {
+      const longRunningMethods = new Set([
+        "generate_voice_candidates",
+        "preview_voice_speed",
+        "normalize_media_library",
+      ]);
+      const timeoutMs = longRunningMethods.has(method) ? 15 * 60 * 1000 : 120000;
       const { response, result } = await localWorkerFetch(worker.baseUrl, "/worker/api/rpc", {
         method: "POST",
         headers: {
@@ -1204,7 +1222,7 @@
           "X-StoryForge-Worker-Session": worker.sessionToken,
         },
         body: JSON.stringify({ method, args }),
-      }, 120000);
+      }, timeoutMs);
       if (retry && [401, 403].includes(response.status)) {
         state.localWorker = null;
         await connectLocalWorker({ quiet: true, force: true });
@@ -2435,7 +2453,10 @@
     if (viewName === "styles") updateStylePreview();
     if (viewName === "providers") applyProviderAccessMode();
     if (viewName === "publishing") renderPublishingAccounts();
-    if (viewName === "records") renderRecords();
+    if (viewName === "records") {
+      renderRecords();
+      void loadProductionRecordGroups({ silent: true });
+    }
     if (viewName === "accounts") {
       renderSoftwareUsers();
     }
@@ -6005,7 +6026,7 @@
     }, 20_000);
   }
 
-  async function loadProductionRecordGroups({ silent = false } = {}) {
+  async function loadProductionRecordGroups({ silent = false, expectedPollEpoch = null } = {}) {
     const filters = {
       status: state.recordStatusFilter,
       novel_id: state.recordNovelFilter,
@@ -6019,12 +6040,60 @@
       limit: 5000,
     };
     try {
-      state.productionRecordGroups = await checkedCall("get_production_record_groups", filters);
+      const groups = await checkedCall("get_production_record_groups", filters);
+      if (expectedPollEpoch !== null && expectedPollEpoch !== state.pollEpoch) return false;
+      state.productionRecordGroups = groups;
     } catch (error) {
+      if (expectedPollEpoch !== null && expectedPollEpoch !== state.pollEpoch) return false;
       state.productionRecordGroups = null;
       if (!silent && !isBrowserDemo) toast(error.message, "error");
     }
     renderRecords();
+    return true;
+  }
+
+  function productionRecordsViewVisible() {
+    return Boolean($('[data-view="records"]')?.classList.contains("is-visible"));
+  }
+
+  async function runScheduledProductionRecordRefresh() {
+    state.recordPollTimer = null;
+    if (!state.recordPollPending || !productionRecordsViewVisible()) {
+      state.recordPollPending = false;
+      state.recordPollUrgent = false;
+      return;
+    }
+    if (state.recordPollInFlight) return;
+    const pollEpoch = state.pollEpoch;
+    state.recordPollPending = false;
+    state.recordPollUrgent = false;
+    state.recordPollInFlight = true;
+    state.recordPollLastAt = Date.now();
+    try {
+      await loadProductionRecordGroups({ silent: true, expectedPollEpoch: pollEpoch });
+    } finally {
+      state.recordPollInFlight = false;
+      if (state.recordPollPending && productionRecordsViewVisible()) {
+        scheduleProductionRecordRefresh({ urgent: state.recordPollUrgent });
+      }
+    }
+  }
+
+  function scheduleProductionRecordRefresh({ urgent = false } = {}) {
+    if (!productionRecordsViewVisible()) return;
+    state.recordPollPending = true;
+    state.recordPollUrgent = state.recordPollUrgent || urgent;
+    if (state.recordPollInFlight) return;
+    const waitMs = state.recordPollUrgent
+      ? 0
+      : Math.max(0, RECORD_POLL_INTERVAL_MS - (Date.now() - state.recordPollLastAt));
+    if (state.recordPollTimer) {
+      if (!state.recordPollUrgent) return;
+      window.clearTimeout(state.recordPollTimer);
+    }
+    state.recordPollTimer = window.setTimeout(() => {
+      void runScheduledProductionRecordRefresh();
+    }, waitMs);
   }
 
   function selectedProductionRecordTasks() {
@@ -6670,6 +6739,7 @@
     if (localTaskCount) localTaskCount.textContent = `${activeBatches.length} 批 · ${activeJobs.length} 条`;
 
     const activeJob = activeJobs.find((job) => executionStatuses.has(job.status));
+    document.body.classList.toggle("production-resource-busy", Boolean(activeJob));
     const legacyHoldJob = activeJobs.find((job) => job.status === "awaiting_approval")
       || activeJobs.find((job) => job.status === "waiting_preview");
     const tally = $("#queue-tally");
@@ -6959,7 +7029,6 @@
           ${!archivedView && !state.platforms.length ? '<button type="button" class="button button-secondary empty-action" data-open-view="platforms">创建平台档案</button>' : ""}
         </div>`;
       renderProductionState();
-      renderRecords();
       renderLibraryFailureBanner();
       applyWebCapabilityHints(root);
       return;
@@ -7098,7 +7167,6 @@
       });
     });
     renderProductionState();
-    renderRecords();
     renderLibraryFailureBanner();
     applyWebCapabilityHints(root);
   }
@@ -8763,17 +8831,66 @@
     };
   }
 
-  async function pollJobs() {
+  function jobsVisualSignature(jobs) {
+    return JSON.stringify((jobs || []).map((job) => ({
+      id: job.id,
+      status: job.status,
+      progress: Math.round(Number(job.progress || 0) * 1000),
+      stage_label: job.stage_label || "",
+      message: job.message || "",
+      error_log: job.error_log || "",
+      archived: Boolean(job.archived),
+      preview_uri: job.preview_uri || "",
+      preview_approved: Boolean(job.preview_approved),
+      output_folder: job.output_folder || job.output_dir || "",
+      batch_summary: job.batch_summary || null,
+    })));
+  }
+
+  function queueVisualSignature(connection) {
+    return JSON.stringify({
+      state: connection?.state || "",
+      reconnecting: Boolean(connection?.reconnecting),
+      retry_in_seconds: Math.ceil(Number(connection?.retry_in_seconds || 0)),
+      message: connection?.message || "",
+    });
+  }
+
+  function setQueueSyncStatus(kind, message) {
+    const proof = $("#queue-sync-status");
+    if (!proof) return;
+    proof.className = `queue-sync-status ${kind ? `is-${kind}` : ""}`;
+    proof.textContent = message;
+  }
+
+  function scheduleJobPoll(delayMs = 1200, pollEpoch = state.pollEpoch) {
+    if (!state.pollEnabled || pollEpoch !== state.pollEpoch) return;
+    if (state.pollTimer) window.clearTimeout(state.pollTimer);
+    state.pollTimer = window.setTimeout(() => {
+      state.pollTimer = null;
+      if (!state.pollEnabled || pollEpoch !== state.pollEpoch) return;
+      void pollJobs(pollEpoch);
+    }, Math.max(0, delayMs));
+  }
+
+  async function pollJobs(pollEpoch = state.pollEpoch) {
+    if (!state.pollEnabled || pollEpoch !== state.pollEpoch || state.pollInFlight) return;
+    state.pollInFlight = true;
     try {
       const [nextJobs, queueConnection] = await Promise.all([
         checkedCall("get_jobs"),
         checkedCall("get_queue_connection"),
       ]);
-      state.queueConnection = queueConnection && typeof queueConnection === "object"
+      if (!state.pollEnabled || pollEpoch !== state.pollEpoch) return;
+      const normalizedQueueConnection = queueConnection && typeof queueConnection === "object"
         ? queueConnection
         : state.queueConnection;
+      let recordRefreshNeeded = false;
       nextJobs.forEach((job) => {
         const before = state.previousJobStates.get(job.id);
+        if (before !== job.status && terminalStatuses.has(job.status)) {
+          recordRefreshNeeded = true;
+        }
         if (before && before !== job.status && job.status === "completed") {
           toast(`“${job.title}”已经生成完成。`, "info");
         } else if (before && before !== job.status && job.status === "failed") {
@@ -8784,33 +8901,67 @@
           toast(`“${job.title}”已在安全节点中断，可从任务卡重试。`, "error");
         }
       });
+      const nextJobsSignature = jobsVisualSignature(nextJobs);
+      const nextQueueSignature = queueVisualSignature(normalizedQueueConnection);
+      const jobsChanged = nextJobsSignature !== state.jobVisualSignature;
+      const queueChanged = nextQueueSignature !== state.queueVisualSignature;
       state.jobs = nextJobs;
+      state.queueConnection = normalizedQueueConnection;
       state.previousJobStates = new Map(state.jobs.map((job) => [job.id, job.status]));
-      renderJobs();
-      const nextDetailSignature = detailJobSignature();
-      if (state.productionNovel && nextDetailSignature !== state.lastDetailJobSignature) {
-        renderProductionWorkbench();
+      state.jobVisualSignature = nextJobsSignature;
+      state.queueVisualSignature = nextQueueSignature;
+      state.pollFailureCount = 0;
+      setQueueSyncStatus("ready", "任务同步正常");
+      if (jobsChanged) {
+        renderJobs();
+        const nextDetailSignature = detailJobSignature();
+        if (state.productionNovel && nextDetailSignature !== state.lastDetailJobSignature) {
+          renderProductionWorkbench();
+        }
+        if (state.selectedNovel && nextDetailSignature !== state.lastDetailJobSignature && !$("#novel-detail-drawer")?.classList.contains("is-hidden")) {
+          renderNovelDetail();
+        }
+        scheduleProductionRecordRefresh({ urgent: recordRefreshNeeded });
+      } else if (queueChanged) {
+        renderProductionState();
       }
-      if (state.selectedNovel && nextDetailSignature !== state.lastDetailJobSignature && !$("#novel-detail-drawer")?.classList.contains("is-hidden")) {
-        renderNovelDetail();
-      }
-      if (!hasPollableWork() && state.pollTimer) {
-        window.clearInterval(state.pollTimer);
-        state.pollTimer = null;
-      }
+      if (hasPollableWork()) scheduleJobPoll(1200, pollEpoch);
+      else state.pollEnabled = false;
     } catch (error) {
-      if (state.pollTimer) window.clearInterval(state.pollTimer);
-      state.pollTimer = null;
+      if (!state.pollEnabled || pollEpoch !== state.pollEpoch) return;
+      state.pollFailureCount += 1;
+      const retryDelay = Math.min(15000, 1200 * (2 ** Math.min(4, state.pollFailureCount - 1)));
+      setQueueSyncStatus(
+        state.pollFailureCount >= 4 ? "error" : "retrying",
+        `任务同步中断，${Math.ceil(retryDelay / 1000)} 秒后重试`,
+      );
+      if (state.pollEnabled) scheduleJobPoll(retryDelay, pollEpoch);
+    } finally {
+      state.pollInFlight = false;
+      if (state.pollEnabled && pollEpoch !== state.pollEpoch && !state.pollTimer) {
+        scheduleJobPoll(0, state.pollEpoch);
+      }
     }
   }
 
   function startPolling() {
-    if (!state.pollTimer) state.pollTimer = window.setInterval(pollJobs, 1200);
+    if (!state.pollEnabled) {
+      state.pollEnabled = true;
+      state.pollEpoch += 1;
+    }
+    if (!state.pollTimer && !state.pollInFlight) scheduleJobPoll(0, state.pollEpoch);
   }
 
   function stopPolling() {
-    if (state.pollTimer) window.clearInterval(state.pollTimer);
+    state.pollEnabled = false;
+    state.pollEpoch += 1;
+    if (state.pollTimer) window.clearTimeout(state.pollTimer);
     state.pollTimer = null;
+    state.pollFailureCount = 0;
+    if (state.recordPollTimer) window.clearTimeout(state.recordPollTimer);
+    state.recordPollTimer = null;
+    state.recordPollPending = false;
+    state.recordPollUrgent = false;
   }
 
   function bindEvents() {

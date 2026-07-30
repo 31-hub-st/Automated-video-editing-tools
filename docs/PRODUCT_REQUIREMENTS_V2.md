@@ -1,7 +1,7 @@
 # StoryForge Studio V2 产品需求基线
 
 更新日期：2026-07-30  
-适用源码版本：StoryForge Studio `0.4.0-rc7`  
+适用源码版本：StoryForge Studio `0.4.1`
 状态：需求已确认，进入制作  
 目标语言：美式英语仍是默认生产语言；小说库支持多语种自动识别与分类，本地配音已覆盖九个语言档案
 
@@ -195,7 +195,7 @@ StoryForge Studio 是一套 Windows 本地优先的小说推文视频生产工�
 - 配置确认后，在制作电脑点击“直接生成完整视频”，一次创建 `job_kind="full"`、`status="queued"` 的全部任务，并返回 `preview_required=false`；不再设置独立审批步骤。
 - 修改女声、WPM、字幕、音乐、素材、封面或渲染模式后，保存当前草稿；即时预览随配置更新，之后可直接重新创建完整任务。
 - `output_mode` 只有 `video_and_mp3` 与 `audio_only` 两个合法值，默认 `video_and_mp3`。默认模式在完整 MP4 通过质量检查后复用同一内部旁白 WAV，编码并交付与成片同名的 48 kHz、192 kbps MP3；不得重复调用 TTS，MP3 不得混入 BGM 或素材原声。`audio_only` 跳过视频渲染，只交付同规格纯旁白 MP3。
-- 不再存在 video-only。旧 `export_narration_audio=true`、`false` 或字段缺失都安全迁移为 `output_mode=video_and_mp3`，不能根据旧布尔值关闭 MP3；只有显式 `output_mode=audio_only` 才进入纯音频模式。当前设置 Schema 为 18。
+- 不再存在 video-only。旧 `export_narration_audio=true`、`false` 或字段缺失都安全迁移为 `output_mode=video_and_mp3`，不能根据旧布尔值关闭 MP3；只有显式 `output_mode=audio_only` 才进入纯音频模式。当前设置 Schema 为 19。
 - 员工发布目录按批次平铺，默认模式只包含最终 MP4 和同基名纯旁白 MP3，`audio_only` 只包含最终 MP3。Manifest、日志、ASS、内部 WAV、原稿、渲染命令、恢复信息和缓存属于技术产物，统一保存在当前员工 Windows 账号的 `%APPDATA%\StoryForgeStudio\render-work/<批次>/<任务>/` 等应用数据目录；旧任务原有目录仍兼容读取。
 
 ### 11.1 历史 preview 兼容

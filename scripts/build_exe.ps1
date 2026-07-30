@@ -337,6 +337,28 @@ assert summary['schema_version'] == SCHEMA_VERSION, summary
         Copy-Item -LiteralPath $kokoroResultPath `
             -Destination (Join-Path $bundleRoot 'BUILD_KOKORO_VALIDATION.json') -Force
     }
+
+    # Bind the exact frozen directory to the self-tests above. The release
+    # attestation hashes the entrypoint and every bundle file except itself, so
+    # a stale validation JSON cannot be copied beside a different or partially
+    # modified executable and then published as a trusted employee update.
+    $releaseValidationScript = @'
+import sys
+sys.path.insert(0, sys.argv[1])
+from scripts.build_update_package import write_release_validation
+write_release_validation(
+    sys.argv[2],
+    entrypoint=sys.argv[3],
+    requested_version=sys.argv[4],
+    with_local_ai=sys.argv[5] == '1',
+)
+'@
+    Write-Host 'Hashing and attesting the verified frozen release directory...'
+    Invoke-Checked -Command $venvPython -CommandArguments @(
+        '-c', $releaseValidationScript, $projectRoot, $bundleRoot,
+        'StoryForge Studio.exe', $expectedAppVersion,
+        $(if ($WithLocalAI) { '1' } else { '0' })
+    )
 }
 finally {
     if ($null -eq $previousDataDir) {
@@ -351,6 +373,7 @@ $sizeMb = [Math]::Round((Get-Item -LiteralPath $exePath).Length / 1MB, 1)
 Write-Host ''
 Write-Host "Build complete: StoryForge v$expectedAppVersion - $exePath ($sizeMb MB)"
 Write-Host "Startup validation: $(Join-Path $bundleRoot 'BUILD_STARTUP_VALIDATION.json')"
+Write-Host "Release attestation: $(Join-Path $bundleRoot 'BUILD_RELEASE_VALIDATION.json')"
 if (-not $WithLocalAI) {
     Write-Host 'This is the lightweight build. Use a Kokoro HTTP service or rebuild with -WithLocalAI.'
 }

@@ -1,6 +1,6 @@
 # StoryForge Studio
 
-> 当前源码版本：`0.4.0-rc7`。本机验收候选目录为 `D:\StoryForgeBuildTemp\release\rc7-final\StoryForge Studio\`，EXE SHA-256 为 `AFBEAF40A8EBB7BC7CBB300E493FB1A73AC98A36C972D499309472198FBB9170`；冻结态启动、内置 FFmpeg 和 Kokoro 实际合成自检已通过。更新包已发布到 Hub，但仍需员工电脑安装后完成一次真实批次冒烟，才能称正式生产版。
+> 当前稳定源码版本：`0.4.1`。完整程序位于 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio\`，EXE SHA-256 为 `038ADADCB27368BA5A24BB81E13D3347FFAD734EA5BE31322AB98294D0006FB1`；冻结态启动、内置 FFmpeg、Kokoro 实际合成、60 FPS 完整成片与独立 MP3 均已通过本机验收。员工更新包已经发布到 Hub，员工电脑联网并重启 StoryForge 后即可自动取得 0.4.1；实际安装状态仍以“多电脑协同”中的设备版本为准。
 
 局域网网页端与桌面端使用同一套账号、页面和制作能力。浏览器中的资料操作由 Hub 处理；试听配音、选择素材、FFmpeg 渲染和输出则交给当前员工电脑的“本机制作服务”。员工首次在 EXE 中用账号密码登录后，该服务会自动登记并随 Windows 登录运行，无需一直打开 StoryForge 完整窗口。最短使用流程见 [网页端使用说明](docs/WEB_ACCESS.md)。
 
@@ -201,7 +201,7 @@ dist\StoryForge Studio\
 └─ storyforge-connection.json
 ```
 
-当前本机构建验收候选目录为 `D:\StoryForgeBuildTemp\release\rc7-final\StoryForge Studio`；其 EXE SHA-256 为 `AFBEAF40A8EBB7BC7CBB300E493FB1A73AC98A36C972D499309472198FBB9170`。自动更新 ZIP 为 `D:\StoryForgeBuildTemp\updates\StoryForge-0.4.0-rc7.zip`，SHA-256 为 `9CCC434D8F8D723A08DECACD239F9C38815C66A2A190DF5BB9C8988CA671F8BF`。Hub 公告文件为 `StoryForge-0.4.0-rc7-9ccc434d8f8d.zip`。旧版发布摘要仅作历史记录，不能把旧产物改名冒充本版；跨电脑正式发布仍须执行多电脑冒烟验收。
+当前稳定目录为 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio`；其 EXE SHA-256 为 `038ADADCB27368BA5A24BB81E13D3347FFAD734EA5BE31322AB98294D0006FB1`。员工更新 ZIP 为 `D:\StoryForgeBuildTemp\updates\StoryForge-0.4.1.zip`，大小 717,189,196 字节，SHA-256 为 `172730D7FDA5DABDAD956CC56D200FAD8D57EF3DB6EDB0FBFD179AE7D070F59A`。Hub 公告文件为 `StoryForge-0.4.1-172730d7fda5.zip`。旧版发布摘要仅作历史记录，不能把旧产物改名冒充本版；员工电脑是否已安装成功，应以设备上报版本和一次真实任务冒烟为准。
 
 指定输出目录：
 

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import wave
 import zlib
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,12 @@ from .failure_diagnostics import capture_failure_diagnostics, classify_failure
 from .models import AppSettings, JobStatus, PlatformProfile, RenderJob
 from .providers.base import ProviderConfig, ProviderError
 from .providers.text import TextRequest, TextResult, create_text_provider
-from .providers.tts import TTSResult, create_tts_provider, female_voice_candidates
+from .providers.tts import (
+    TTSResult,
+    create_tts_provider,
+    female_voice_candidates,
+    release_embedded_kokoro_runtime,
+)
 from .services.media import (
     MediaError,
     MusicPlan,
@@ -53,7 +59,7 @@ from .services.text_processing import (
     analyze_manuscript,
     split_english_sentences,
 )
-from .system import available_encoders, resolve_ffmpeg
+from .system import available_encoders, mark_encoder_unavailable, resolve_ffmpeg
 
 
 ProgressCallback = Callable[[JobStatus, float, str], None]
@@ -81,8 +87,19 @@ _MEDIA_DECODE_CACHE_LIMIT = 4096
 _MEBIBYTE = 1024**2
 _VIDEO_OUTPUT_BYTES_PER_SECOND = 4 * _MEBIBYTE
 _AUDIO_OUTPUT_BYTES_PER_SECOND = 32 * 1024
+# Serial rendering keeps the normalized clips and one stream-concatenated copy
+# beside the final partial file.  Reserve two additional delivery-sized video
+# streams instead of pretending that only the final MP4 exists.
+_SERIAL_STAGING_BYTES_PER_SECOND = 8 * _MEBIBYTE
 _VIDEO_OUTPUT_SAFETY_BYTES = 512 * _MEBIBYTE
 _AUDIO_OUTPUT_SAFETY_BYTES = 64 * _MEBIBYTE
+_WORKSPACE_BYTES_PER_SECOND = 512 * 1024
+_WORKSPACE_SAFETY_BYTES = 512 * _MEBIBYTE
+_WINDOWS_OUT_OF_MEMORY_RETURN_CODES = {
+    0xC0000017,  # STATUS_NO_MEMORY
+    0xC000009A,  # STATUS_INSUFFICIENT_RESOURCES
+    0xC000012D,  # STATUS_COMMITMENT_LIMIT
+}
 _NARRATION_ID3_DESCRIPTION = "StoryForgeNarration"
 _NARRATION_METADATA_LIMIT = 4 * _MEBIBYTE
 _LOCAL_VOICE_PROFILES = {
@@ -186,7 +203,12 @@ def _format_storage_size(value: int) -> str:
     return f"{value / _MEBIBYTE:.0f} MB"
 
 
-def _required_output_bytes(duration_seconds: float, output_mode: str) -> int:
+def _required_output_bytes(
+    duration_seconds: float,
+    output_mode: str,
+    *,
+    serial_staging: bool = False,
+) -> int:
     """Estimate the peak free space needed on the selected output disk.
 
     Full video is encoded directly into a private staging directory on the
@@ -205,9 +227,11 @@ def _required_output_bytes(duration_seconds: float, output_mode: str) -> int:
     if output_mode == "audio_only":
         media_bytes = math.ceil(duration * _AUDIO_OUTPUT_BYTES_PER_SECOND)
         return media_bytes + _AUDIO_OUTPUT_SAFETY_BYTES
+    video_bytes_per_second = _VIDEO_OUTPUT_BYTES_PER_SECOND
+    if serial_staging:
+        video_bytes_per_second += _SERIAL_STAGING_BYTES_PER_SECOND
     media_bytes = math.ceil(
-        duration
-        * (_VIDEO_OUTPUT_BYTES_PER_SECOND + _AUDIO_OUTPUT_BYTES_PER_SECOND)
+        duration * (video_bytes_per_second + _AUDIO_OUTPUT_BYTES_PER_SECOND)
     )
     return media_bytes + _VIDEO_OUTPUT_SAFETY_BYTES
 
@@ -217,6 +241,7 @@ def _preflight_output_directory(
     *,
     duration_seconds: float,
     output_mode: str,
+    serial_staging: bool = False,
 ) -> Path:
     """Verify the exact employee output disk before starting FFmpeg.
 
@@ -273,7 +298,11 @@ def _preflight_output_directory(
             except OSError:
                 pass
 
-    required_bytes = _required_output_bytes(duration_seconds, output_mode)
+    required_bytes = _required_output_bytes(
+        duration_seconds,
+        output_mode,
+        serial_staging=serial_staging,
+    )
     try:
         free_bytes = int(shutil.disk_usage(output_root).free)
     except OSError as error:
@@ -289,6 +318,116 @@ def _preflight_output_directory(
             "（含渲染临时空间）。请清理磁盘或更换输出文件夹。"
         )
     return output_root
+
+
+def _preflight_workspace_directory(
+    work_root: str | Path,
+    *,
+    duration_seconds: float,
+) -> Path:
+    """Protect the system drive before sentence WAVs are assembled.
+
+    The employee-facing output may live on D:/E:, while the private work tree
+    defaults to AppData on C:.  Checking only the output disk therefore cannot
+    prevent a long narration from exhausting the system volume.
+    """
+
+    root = Path(work_root).expanduser().resolve()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        free_bytes = int(shutil.disk_usage(root).free)
+    except OSError as error:
+        raise PipelineError(
+            f"StoryForge 工作目录不可用：{root}。请清理系统盘或更换工作目录。"
+        ) from error
+    try:
+        duration = float(duration_seconds)
+    except (TypeError, ValueError):
+        duration = 1.0
+    if not math.isfinite(duration):
+        duration = 1.0
+    required_bytes = (
+        math.ceil(max(1.0, duration) * _WORKSPACE_BYTES_PER_SECOND)
+        + _WORKSPACE_SAFETY_BYTES
+    )
+    if free_bytes < required_bytes:
+        raise PipelineError(
+            "StoryForge 工作盘空间不足："
+            f"当前剩余 {_format_storage_size(free_bytes)}，"
+            f"本次至少需要 {_format_storage_size(required_bytes)}。"
+            "请先清理系统盘，避免配音或渲染中途失败。"
+        )
+    return root
+
+
+def _cleanup_large_job_work_files(job_dir: Path) -> None:
+    """Remove reproducible WAV intermediates while retaining small diagnostics."""
+
+    work_dir = job_dir / ".work"
+    try:
+        shutil.rmtree(work_dir / "voice")
+    except (FileNotFoundError, OSError):
+        pass
+    if not work_dir.is_dir():
+        return
+    try:
+        candidates = tuple(work_dir.rglob("*.wav"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _completed_failure_code(
+    completed: subprocess.CompletedProcess[Any],
+    *,
+    output_exists: bool,
+) -> str:
+    """Classify one FFmpeg attempt, including resource-only exit codes."""
+
+    if completed.returncode == 0 and output_exists:
+        return ""
+    return_code = int(completed.returncode)
+    # CPython exposes Windows process status codes as unsigned DWORD values,
+    # while test doubles and older wrappers may surface their signed form.
+    # Masking handles both representations without changing POSIX ENOMEM.
+    if (
+        return_code == -12
+        or (return_code & 0xFFFFFFFF) in _WINDOWS_OUT_OF_MEMORY_RETURN_CODES
+    ):
+        return "out_of_memory"
+    detail = completed.stderr or completed.stdout or ""
+    return classify_failure(str(detail)[-3000:])
+
+
+def _should_retry_with_cpu(
+    failure_code: str,
+    encoder: str,
+    encoders: Sequence[str],
+) -> bool:
+    """Permit exactly the hardware-initialization fallback, nothing broader."""
+
+    return (
+        failure_code == "encoder_init"
+        and encoder != "libx264"
+        and "libx264" in encoders
+    )
+
+
+def _should_retry_in_low_memory_mode(
+    failure_code: str,
+    *,
+    serial_render_prepared: bool,
+    cpu_compatibility_attempted: bool,
+) -> bool:
+    """Avoid repeating an identical serial-source CPU compatibility render."""
+
+    return failure_code == "out_of_memory" and not (
+        serial_render_prepared and cpu_compatibility_attempted
+    )
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> Path:
@@ -1512,6 +1651,7 @@ class PipelineRunner:
         quality_checker: QualityChecker = run_fast_quality_check,
         usage_ledger: UsageLedger | None = None,
         work_root: Path | None = None,
+        heavy_resource_lock: Any | None = None,
     ) -> None:
         self.settings_getter = settings_getter
         self.ffmpeg_path = ffmpeg_path or resolve_ffmpeg()
@@ -1522,6 +1662,7 @@ class PipelineRunner:
         self.usage_ledger = usage_ledger or UsageLedger()
         inferred_work_root = self.usage_ledger.path.parent / "render-work"
         self.work_root = (work_root or inferred_work_root).expanduser().resolve()
+        self.heavy_resource_lock = heavy_resource_lock
         self._publish_transaction_root = self.work_root / "publish-transactions"
         self._publish_transaction_lock = threading.RLock()
         # The queue is sequential, so once this process observes a genuine
@@ -1614,6 +1755,25 @@ class PipelineRunner:
                 )
                 return None, completed
             normalized_paths.append(normalized_path)
+
+        if len(normalized_paths) == 1:
+            assert completed is not None
+            (job_dir / "render-command-low-memory.txt").write_text(
+                "\n\n".join(command_lines) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            only_segment = serial_segments[0]
+            return (
+                VideoSegment(
+                    path=normalized_paths[0],
+                    source_duration=only_segment.duration,
+                    duration=only_segment.duration,
+                    source_width=float(width),
+                    source_height=float(height),
+                ),
+                completed,
+            )
 
         concat_list = fallback_dir / "segments.ffconcat"
         concat_lines = ["ffconcat version 1.0"]
@@ -2592,6 +2752,30 @@ class PipelineRunner:
         platform: PlatformProfile,
         progress: ProgressCallback,
     ) -> str:
+        """Run one job and never retain reproducible large WAV intermediates."""
+
+        job_dir = job_workspace_directory(job, self.work_root)
+        resource_scope = self.heavy_resource_lock or nullcontext()
+        with resource_scope:
+            try:
+                return self._run_job(job, platform, progress)
+            finally:
+                # In-process Kokoro retains model tensors between calls.  Keeping
+                # those allocations alive while FFmpeg starts its 1080x1920 graph
+                # can push an otherwise healthy employee PC over its memory limit.
+                release_embedded_kokoro_runtime()
+                # Preview narration is still exposed as a review artifact. Full
+                # production already publishes the reusable MP3, so its private
+                # sentence and merged WAVs only waste the employee's system disk.
+                if job.job_kind != "preview":
+                    _cleanup_large_job_work_files(job_dir)
+
+    def _run_job(
+        self,
+        job: RenderJob,
+        platform: PlatformProfile,
+        progress: ProgressCallback,
+    ) -> str:
         raise_if_cancelled()
         live_settings = self.settings_getter()
         settings = self._settings_for_job(live_settings, job)
@@ -2631,6 +2815,10 @@ class PipelineRunner:
             source_path.name,
             wpm=settings.narration_wpm,
             chapter_pause_seconds=settings.chapter_pause_seconds,
+        )
+        _preflight_workspace_directory(
+            self.work_root,
+            duration_seconds=max(1.0, analysis.estimated_duration_seconds),
         )
         output_mode = production_output_mode(job)
         existing_narration_source: Path | None = None
@@ -2808,6 +2996,10 @@ class PipelineRunner:
                 chapter_pause_seconds=settings.chapter_pause_seconds,
                 segment_unit_counts=segment_unit_counts,
             )
+        # Release embedded model ownership at the phase boundary, before any
+        # media decoder or FFmpeg encoder is opened.  The wrapper repeats this
+        # best-effort cleanup for failures occurring earlier in the job.
+        release_embedded_kokoro_runtime()
         final_stem = publish_media_stem(job, platform)
         if output_mode == "audio_only":
             _preflight_output_directory(
@@ -3054,6 +3246,12 @@ class PipelineRunner:
             bgm_mode=bgm_mode,
         )
         segments = _segments_with_geometry(self.ffmpeg_path, segments)
+        _preflight_output_directory(
+            job.output_folder,
+            duration_seconds=render_duration,
+            output_mode=output_mode,
+            serial_staging=len(segments) > 1,
+        )
         final_path = publish_dir / f"{final_stem}.mp4"
         # os.replace is atomic only on the same filesystem. Keep the private
         # staging area beside the selected output root rather than AppData so
@@ -3097,8 +3295,68 @@ class PipelineRunner:
             if settings.video_encoder != "auto"
             else (encoders[0] if encoders else "libx264")
         )
+        render_segments = list(segments)
+        render_color_grade = getattr(settings, "color_grade", "neutral")
+        render_transition = video_transition
+        serial_render_prepared = False
+        if len(segments) > 1:
+            # A multi-input graph retains one decoder/filter chain per clip.
+            # At 1080x1920/60 this can exhaust a normal employee workstation
+            # before the encoder starts. Normalize deterministically one clip
+            # at a time instead of first making a known-risk attempt.
+            warnings.append(
+                "多素材任务已使用逐段安全渲染，避免同时解码全部素材。"
+            )
+            progress(JobStatus.RENDERING, 0.64, "逐段整理视频素材")
+            try:
+                serial_source, serial_completed = self._prepare_low_memory_video_source(
+                    segments=segments,
+                    staging_dir=publish_staging_dir,
+                    job_dir=job_dir,
+                    width=settings.output_width,
+                    height=settings.output_height,
+                    fps=settings.output_fps,
+                    color_grade=render_color_grade,
+                    video_transition=video_transition,
+                    progress=progress,
+                )
+            except JobCancelledError:
+                self._abort_publish_transaction(journal_path, publish_transaction)
+                _remove_empty_directory(publish_dir)
+                raise
+            except (MediaError, OSError, PipelineError, ValueError) as error:
+                serial_source = None
+                serial_completed = subprocess.CompletedProcess(
+                    [str(self.ffmpeg_path)],
+                    1,
+                    stdout="",
+                    stderr=f"Safe serial preparation failed: {error}",
+                )
+            if serial_source is None:
+                self._abort_publish_transaction(journal_path, publish_transaction)
+                _remove_empty_directory(publish_dir)
+                detail = (
+                    serial_completed.stderr
+                    or serial_completed.stdout
+                    or "FFmpeg safe serial preparation failed"
+                )[-3000:]
+                render_error_log = job_dir / "render-error.log"
+                render_error_log.write_text(detail, encoding="utf-8", newline="\n")
+                diagnostics = capture_failure_diagnostics(
+                    render_error_log,
+                    stage="ffmpeg_serial_prepare",
+                )
+                raise PipelineError(
+                    f"视频素材逐段整理失败：{diagnostics.get('summary') or 'FFmpeg 处理失败。'}",
+                    error_log=render_error_log,
+                    failure_diagnostics=diagnostics,
+                )
+            render_segments = [serial_source]
+            render_color_grade = "neutral"
+            render_transition = "cut"
+            serial_render_prepared = True
         plan = build_ffmpeg_plan(
-            segments,
+            render_segments,
             narration.path,
             music,
             subtitle_path,
@@ -3117,14 +3375,14 @@ class PipelineRunner:
             render_mode=settings.render_mode,
             cover_animation=settings.cover_animation,
             cover_outro_enabled=effective_cover_outro,
-            color_grade=getattr(settings, "color_grade", "neutral"),
+            color_grade=render_color_grade,
             end_card_without_cover=True,
             cover_intro_enabled=not story_card_template,
             platform_logo_path=platform_logo_path,
             platform_logo_duration=intro_card_duration,
             platform_logo_x_percent=settings.intro_card.position_x_percent,
             platform_logo_y_percent=settings.intro_card.position_y_percent + 1.5625,
-            video_transition=video_transition,
+            video_transition=render_transition,
         )
         (job_dir / "render-command.txt").write_text(
             plan.readable_command, encoding="utf-8", newline="\n"
@@ -3187,6 +3445,7 @@ class PipelineRunner:
                 "video_transition": video_transition,
                 "videos": [str(item.path) for item in segments],
                 "video_selection": video_selection,
+                "safe_serial_render": serial_render_prepared,
                 "encoder": encoder,
                 "width": settings.output_width,
                 "height": settings.output_height,
@@ -3240,58 +3499,52 @@ class PipelineRunner:
         persist_manifest()
 
         # Do not create employee-facing batch folders during text/TTS/media
-        # preparation.  A failure before rendering must not leave empty
-        # folders mixed into the publishing queue.
+        # preparation. A failure before rendering must not leave empty folders
+        # mixed into the publishing queue.
         progress(JobStatus.RENDERING, 0.68, "渲染 1080 × 1920")
-        if self._prefer_low_memory_render and len(segments) > 1:
-            warnings.append(
-                "本次运行已检测到该电脑不适合多素材同时解码，"
-                "后续多素材任务直接使用逐段低内存模式。"
-            )
-            completed = subprocess.CompletedProcess(
+        try:
+            completed = run_cancellable_process(
                 plan.as_list(),
-                1,
-                stdout="",
-                stderr="Cannot allocate memory: retained low-memory render mode",
+                runner=self.command_runner,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                ),
             )
-        else:
-            try:
-                completed = run_cancellable_process(
-                    plan.as_list(),
-                    runner=self.command_runner,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    check=False,
-                    creationflags=(
-                        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                    ),
-                )
-            except JobCancelledError:
-                self._abort_publish_transaction(journal_path, publish_transaction)
-                _remove_empty_directory(publish_dir)
-                raise
-        if (
-            (completed.returncode != 0 or not staged_video_path.is_file())
-            and encoder != "libx264"
-            and "libx264" in encoders
-            # Memory exhaustion comes from the all-input filter graph, not
-            # the hardware encoder. Re-running that same graph on CPU only
-            # wastes another full attempt and usually consumes more memory.
-            and classify_failure(
-                (completed.stderr or completed.stdout or "")[-3000:]
-            )
-            != "out_of_memory"
-        ):
-            hardware_detail = (
+        except JobCancelledError:
+            self._abort_publish_transaction(journal_path, publish_transaction)
+            _remove_empty_directory(publish_dir)
+            raise
+
+        failure_code = _completed_failure_code(
+            completed,
+            output_exists=staged_video_path.is_file(),
+        )
+        # Compatibility mode always builds a libx264 compatibility plan even
+        # when the stored encoder preference still names a hardware backend.
+        cpu_compatibility_attempted = settings.render_mode == "compatibility"
+        # A CPU retry is correct only when the selected hardware encoder could
+        # not initialize. Missing files, filters, permissions and unknown
+        # failures must remain visible instead of paying for a second render.
+        if _should_retry_with_cpu(failure_code, encoder, encoders):
+            cpu_compatibility_attempted = True
+            hardware_detail = str(
                 completed.stderr or completed.stdout or "硬件编码器未能完成渲染"
             )[-1200:]
+            mark_encoder_unavailable(self.ffmpeg_path, encoder)
             warnings.append(
-                f"{encoder} 硬件编码失败，已自动切换 CPU 快速模式重试。"
+                f"{encoder} 初始化失败，本次仅切换一次 CPU 安全模式。"
             )
+            try:
+                staged_video_path.unlink()
+            except OSError:
+                pass
             fallback_plan = build_ffmpeg_plan(
-                segments,
+                render_segments,
                 narration.path,
                 music,
                 subtitle_path,
@@ -3307,17 +3560,19 @@ class PipelineRunner:
                 cover_intro_start=2.0,
                 cover_intro_duration=2.0,
                 end_card_duration=end_card_duration,
-                render_mode="speed",
+                render_mode="compatibility",
                 cover_animation=settings.cover_animation,
                 cover_outro_enabled=effective_cover_outro,
-                color_grade=getattr(settings, "color_grade", "neutral"),
+                color_grade=render_color_grade,
                 end_card_without_cover=True,
                 cover_intro_enabled=not story_card_template,
                 platform_logo_path=platform_logo_path,
                 platform_logo_duration=intro_card_duration,
                 platform_logo_x_percent=settings.intro_card.position_x_percent,
-                platform_logo_y_percent=settings.intro_card.position_y_percent + 1.5625,
-                video_transition=video_transition,
+                platform_logo_y_percent=(
+                    settings.intro_card.position_y_percent + 1.5625
+                ),
+                video_transition=render_transition,
             )
             (job_dir / "render-command-fallback.txt").write_text(
                 fallback_plan.readable_command,
@@ -3329,7 +3584,7 @@ class PipelineRunner:
                 encoding="utf-8",
                 newline="\n",
             )
-            progress(JobStatus.RENDERING, 0.70, "硬件编码失败，CPU 快速重试")
+            progress(JobStatus.RENDERING, 0.74, "硬件编码初始化失败，CPU 安全重试")
             try:
                 completed = run_cancellable_process(
                     fallback_plan.as_list(),
@@ -3339,64 +3594,82 @@ class PipelineRunner:
                     encoding="utf-8",
                     errors="replace",
                     check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    creationflags=(
+                        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                    ),
                 )
             except JobCancelledError:
                 self._abort_publish_transaction(journal_path, publish_transaction)
                 _remove_empty_directory(publish_dir)
                 raise
-            if completed.returncode == 0 and staged_video_path.is_file():
+            failure_code = _completed_failure_code(
+                completed,
+                output_exists=staged_video_path.is_file(),
+            )
+            if not failure_code:
                 encoder = "libx264"
                 plan = fallback_plan
                 manifest["media"]["encoder"] = encoder
                 manifest["warnings"] = warnings
 
-        render_detail = (
-            completed.stderr or completed.stdout or "未知 FFmpeg 错误"
-        )[-3000:]
-        if (
-            (completed.returncode != 0 or not staged_video_path.is_file())
-            and classify_failure(render_detail) == "out_of_memory"
+        if _should_retry_in_low_memory_mode(
+            failure_code,
+            serial_render_prepared=serial_render_prepared,
+            cpu_compatibility_attempted=cpu_compatibility_attempted,
         ):
             self._prefer_low_memory_render = True
             warnings.append(
-                "制作电脑内存不足，已自动改用逐段低内存模式；"
-                "画面内容、字幕、配音和封面保持不变。"
+                "检测到内存、分页文件或线程资源不足，已直接改用逐段安全模式；"
+                "不会再重复高负载渲染。"
             )
             if video_transition == "fade":
                 warnings.append(
-                    "低内存模式已将片段间 0.2 秒淡化转场改为直接切换，"
-                    "成片总时长与旁白同步不变。"
+                    "安全模式将片段间淡化改为直接切换，成片仍与旁白同步。"
                 )
             try:
                 staged_video_path.unlink()
             except OSError:
                 pass
-            progress(JobStatus.RENDERING, 0.71, "内存不足，切换逐段低内存模式")
-            try:
-                low_memory_source, completed = self._prepare_low_memory_video_source(
-                    segments=segments,
-                    staging_dir=publish_staging_dir,
-                    job_dir=job_dir,
-                    width=settings.output_width,
-                    height=settings.output_height,
-                    fps=settings.output_fps,
-                    color_grade=getattr(settings, "color_grade", "neutral"),
-                    video_transition=video_transition,
-                    progress=progress,
-                )
-            except JobCancelledError:
-                self._abort_publish_transaction(journal_path, publish_transaction)
-                _remove_empty_directory(publish_dir)
-                raise
-            except (MediaError, OSError, PipelineError, ValueError) as error:
-                completed = subprocess.CompletedProcess(
-                    [str(self.ffmpeg_path)],
-                    1,
-                    stdout="",
-                    stderr=f"Low-memory preparation failed: {error}",
-                )
-                low_memory_source = None
+            low_memory_source = render_segments[0] if serial_render_prepared else None
+            if low_memory_source is None:
+                try:
+                    _preflight_output_directory(
+                        job.output_folder,
+                        duration_seconds=render_duration,
+                        output_mode=output_mode,
+                        serial_staging=True,
+                    )
+                except PipelineError:
+                    self._abort_publish_transaction(
+                        journal_path, publish_transaction
+                    )
+                    _remove_empty_directory(publish_dir)
+                    raise
+                progress(JobStatus.RENDERING, 0.71, "资源不足，逐段整理视频素材")
+                try:
+                    low_memory_source, completed = self._prepare_low_memory_video_source(
+                        segments=segments,
+                        staging_dir=publish_staging_dir,
+                        job_dir=job_dir,
+                        width=settings.output_width,
+                        height=settings.output_height,
+                        fps=settings.output_fps,
+                        color_grade=getattr(settings, "color_grade", "neutral"),
+                        video_transition=video_transition,
+                        progress=progress,
+                    )
+                except JobCancelledError:
+                    self._abort_publish_transaction(journal_path, publish_transaction)
+                    _remove_empty_directory(publish_dir)
+                    raise
+                except (MediaError, OSError, PipelineError, ValueError) as error:
+                    completed = subprocess.CompletedProcess(
+                        [str(self.ffmpeg_path)],
+                        1,
+                        stdout="",
+                        stderr=f"Low-memory preparation failed: {error}",
+                    )
+                    low_memory_source = None
 
             if low_memory_source is not None:
                 low_memory_plan = build_ffmpeg_plan(
@@ -3419,8 +3692,6 @@ class PipelineRunner:
                     render_mode="compatibility",
                     cover_animation=settings.cover_animation,
                     cover_outro_enabled=effective_cover_outro,
-                    # Grading was already applied once while each source clip
-                    # was normalized. Applying it here again would alter color.
                     color_grade="neutral",
                     end_card_without_cover=True,
                     cover_intro_enabled=not story_card_template,
@@ -3430,9 +3701,6 @@ class PipelineRunner:
                     platform_logo_y_percent=(
                         settings.intro_card.position_y_percent + 1.5625
                     ),
-                    # A fade requires two decoded clips in memory. The serial
-                    # source has already removed the 0.2 s overlaps and uses
-                    # a cut only for this emergency fallback.
                     video_transition="cut",
                 )
                 with (job_dir / "render-command-low-memory.txt").open(
@@ -3441,7 +3709,7 @@ class PipelineRunner:
                     newline="\n",
                 ) as stream:
                     stream.write("\n" + low_memory_plan.readable_command + "\n")
-                progress(JobStatus.RENDERING, 0.79, "低内存模式：合成字幕与配音")
+                progress(JobStatus.RENDERING, 0.79, "安全模式：合成字幕与配音")
                 try:
                     completed = run_cancellable_process(
                         low_memory_plan.as_list(),
@@ -3459,7 +3727,11 @@ class PipelineRunner:
                     self._abort_publish_transaction(journal_path, publish_transaction)
                     _remove_empty_directory(publish_dir)
                     raise
-                if completed.returncode == 0 and staged_video_path.is_file():
+                failure_code = _completed_failure_code(
+                    completed,
+                    output_exists=staged_video_path.is_file(),
+                )
+                if not failure_code:
                     encoder = "libx264"
                     plan = low_memory_plan
                     manifest["media"]["encoder"] = encoder

@@ -536,6 +536,42 @@ class FFmpegPlanningTests(unittest.TestCase):
         self.assertEqual(command[command.index("-filter_complex_threads") + 1], "1")
         self.assertEqual(command[command.index("-threads") + 1], "2")
 
+    def test_normal_cpu_render_bounds_filter_and_encoder_threads(self) -> None:
+        base = Path("C:/Story Forge/bounded-cpu")
+        plan = build_ffmpeg_plan(
+            [VideoSegment(base / "clip.mp4", 10.0, 10.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "output.mp4",
+            10.0,
+            video_encoder="libx264",
+            render_mode="quality",
+        )
+
+        command = plan.as_list()
+        self.assertEqual(command[command.index("-filter_threads") + 1], "2")
+        self.assertEqual(command[command.index("-filter_complex_threads") + 1], "2")
+        self.assertEqual(command[command.index("-threads") + 1], "2")
+
+    def test_normal_hardware_render_bounds_filters_without_cpu_thread_flag(self) -> None:
+        base = Path("C:/Story Forge/bounded-gpu")
+        plan = build_ffmpeg_plan(
+            [VideoSegment(base / "clip.mp4", 10.0, 10.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "output.mp4",
+            10.0,
+            video_encoder="h264_nvenc",
+            render_mode="quality",
+        )
+
+        command = plan.as_list()
+        self.assertEqual(command[command.index("-filter_threads") + 1], "2")
+        self.assertEqual(command[command.index("-filter_complex_threads") + 1], "2")
+        self.assertNotIn("-threads", command)
+
     def test_platform_logo_tracks_custom_intro_card_center_with_safe_clamp(self) -> None:
         base = Path("C:/Story Forge/custom-logo")
         logo = base / "logo-custom.png"

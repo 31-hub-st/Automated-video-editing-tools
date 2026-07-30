@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import wave
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ from storyforge.providers.tts import (
     create_tts_provider,
     female_voice_candidates,
     kokoro_language_code,
+    release_embedded_kokoro_runtime,
 )
 
 
@@ -324,6 +326,71 @@ class TTSProviderTests(unittest.TestCase):
         self.assertIs(pipeline, fake_module.KPipeline)
         self.assertIsNotNone(observed["stdout"])
         self.assertIsNotNone(observed["stderr"])
+
+    def test_embedded_kokoro_runtime_release_drops_models_and_cuda_caches(self) -> None:
+        events: list[str] = []
+
+        class FakeModel:
+            pass
+
+        class FakePipeline:
+            pass
+
+        model = FakeModel()
+        pipeline = FakePipeline()
+        pipeline.model = model
+        model.pipeline = pipeline
+        model_reference = weakref.ref(model)
+        pipeline_reference = weakref.ref(pipeline)
+        pipelines = {"a": pipeline}
+        del model, pipeline
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: True,
+                empty_cache=lambda: events.append("empty_cache"),
+                ipc_collect=lambda: events.append("ipc_collect"),
+            )
+        )
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", pipelines),
+            patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            released = release_embedded_kokoro_runtime()
+
+        self.assertEqual(released, 1)
+        self.assertEqual(pipelines, {})
+        self.assertIsNone(pipeline_reference())
+        self.assertIsNone(model_reference())
+        self.assertEqual(events, ["empty_cache", "ipc_collect"])
+
+    def test_embedded_kokoro_runtime_release_is_safe_without_torch_or_cuda(self) -> None:
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {"a": object()}),
+            patch.dict(sys.modules, {"torch": None}),
+        ):
+            self.assertEqual(release_embedded_kokoro_runtime(), 1)
+
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {"a": object()}),
+            patch.dict(sys.modules, {"torch": SimpleNamespace()}),
+        ):
+            self.assertEqual(release_embedded_kokoro_runtime(), 1)
+
+    def test_empty_kokoro_cache_does_not_import_torch(self) -> None:
+        original_import = builtins.__import__
+
+        def reject_torch(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torch":
+                raise AssertionError("empty Kokoro cache must not import torch")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {}),
+            patch.dict(sys.modules, {"torch": None}),
+            patch("builtins.__import__", side_effect=reject_torch),
+        ):
+            self.assertEqual(release_embedded_kokoro_runtime(), 0)
 
     def test_multilingual_female_voice_catalog_keeps_english_and_adds_free_languages(self) -> None:
         self.assertEqual(KOKORO_LANGUAGE_CODES["en"], "a")

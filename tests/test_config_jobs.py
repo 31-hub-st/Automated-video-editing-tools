@@ -1685,6 +1685,26 @@ class JobQueueTests(unittest.TestCase):
 
         self.assertEqual(processed, [next_batch[0].id])
 
+    def test_ordinary_job_publishes_terminal_state_without_browser_poll(self) -> None:
+        platform = PlatformProfile(id="platform-1", name="NovelBox")
+        job = self._fifo_jobs("ordinary-terminal", 1, platform)[0]
+        persisted: list[tuple[str, JobStatus, str]] = []
+        queue = JobQueue(lambda *_args: "ordinary-output.mp4")
+        queue.set_terminal_callback(
+            lambda finished: persisted.append(
+                (finished.id, finished.status, finished.output_file)
+            )
+        )
+        queue.enqueue_jobs([job], platform)
+
+        queue.start()
+        _join_queue(self, queue)
+
+        self.assertEqual(
+            persisted,
+            [(job.id, JobStatus.COMPLETED, "ordinary-output.mp4")],
+        )
+
     def test_streamed_queue_processes_large_tail_with_bounded_history(self) -> None:
         platform = PlatformProfile(id="platform-1", name="NovelBox")
         required = {

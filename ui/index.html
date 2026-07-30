@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>StoryForge Studio</title>
-    <link rel="stylesheet" href="styles.css?v=31" />
+    <link rel="stylesheet" href="styles.css?v=32" />
   </head>
   <body>
     <section class="web-login is-hidden" id="web-login" aria-labelledby="web-login-title">
@@ -74,7 +74,7 @@
 
       <main class="workspace">
         <div class="web-session-bar is-hidden" id="web-session-bar" role="status">
-          <span class="web-session-mode"><i></i><b>网页控制台</b><small id="web-session-host">已连接 StoryForge Hub</small></span>
+          <span class="web-session-mode"><i></i><b>网页控制台</b><small id="web-session-host">已连接 StoryForge Hub</small><small class="queue-sync-status is-ready" id="queue-sync-status" aria-live="polite">任务同步正常</small></span>
           <span class="web-session-user"><button type="button" class="employee-update-trigger" id="open-employee-update" aria-label="打开软件更新"><i aria-hidden="true"></i><span><b>软件更新</b><small id="employee-update-trigger-label">检查版本</small></span></button><small>当前账号</small><b id="web-session-name">—</b><button type="button" id="web-change-password">设置密码</button><button type="button" id="web-logout">退出</button></span>
         </div>
         <section class="view is-visible" data-view="queue">
@@ -1206,6 +1206,6 @@
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <input class="is-hidden" id="web-file-picker" type="file" tabindex="-1" aria-hidden="true" />
-    <script src="app.js?v=32"></script>
+    <script src="app.js?v=33"></script>
   </body>
 </html>

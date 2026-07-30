@@ -29,6 +29,16 @@ class FailureDiagnosticsTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(classify_failure(log_text), expected)
 
+    def test_windows_resource_and_thread_exhaustion_are_memory_failures(self) -> None:
+        for log_text in (
+            "std::bad_alloc",
+            "pthread_create failed: Resource temporarily unavailable",
+            "The paging file is too small for this operation to complete",
+            "Insufficient system resources exist to complete the requested service",
+        ):
+            with self.subTest(log_text=log_text):
+                self.assertEqual(classify_failure(log_text), "out_of_memory")
+
     def test_sanitizes_controls_paths_and_secrets(self) -> None:
         raw = (
             "\x1b[31mFAILED\x1b[0m\x00\t"

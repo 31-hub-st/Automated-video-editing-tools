@@ -7682,6 +7682,13 @@ class CatalogRepository:
                         batch_id=row["batch_id"],
                         record_id=record_id,
                     )
+                    terminal_status = status in {
+                        "completed",
+                        "failed",
+                        "skipped",
+                        "interrupted",
+                        "cancelled",
+                    }
                     connection.execute(
                         """
                         UPDATE production_records SET job_id = ?, device_id = ?, status = ?,
@@ -7689,6 +7696,7 @@ class CatalogRepository:
                             started_at = ?, completed_at = ?, cancel_requested_at = ?,
                             cancelled_at = ?, cancel_requested_by_user_id = ?,
                             cancellation_reason = ?, metadata_json = ?,
+                            lease_owner_device = ?, lease_expires_at = ?, heartbeat_at = ?,
                             row_version = row_version + 1, updated_at = ?
                         WHERE id = ?
                         """,
@@ -7727,6 +7735,9 @@ class CatalogRepository:
                                 maximum=2000,
                             ),
                             _json_dump(updated_metadata),
+                            "" if terminal_status else row["lease_owner_device"],
+                            None if terminal_status else row["lease_expires_at"],
+                            None if terminal_status else row["heartbeat_at"],
                             now,
                             record_id,
                         ),

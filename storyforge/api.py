@@ -24,6 +24,9 @@ from typing import Any, TypeVar
 from . import __version__
 from .backup import HubBackupManager
 from .catalog import (
+    CatalogConflictError,
+    CatalogNotFoundError,
+    CatalogPermissionError,
     CatalogRepository,
     installation_id_sha256,
     normalize_portable_device_config,
@@ -45,6 +48,7 @@ from .hub import (
     HubClient,
     HubConnectionError,
     HubError,
+    HubRemoteError,
     HubServer,
     HubTextProvider,
 )
@@ -65,6 +69,8 @@ T = TypeVar("T")
 PRODUCTION_QUEUE_WINDOW = 4
 PRODUCTION_STREAM_THRESHOLD = 128
 QUEUE_SHUTDOWN_TIMEOUT_SECONDS = 15.0
+RECORD_LEASE_SECONDS = 180
+RECORD_LEASE_HEARTBEAT_SECONDS = 45.0
 
 
 def _sanitize_hub_diagnostic_value(value: Any) -> Any:
@@ -141,6 +147,15 @@ class StoryForgeApi:
         self._catalog = catalog or self._initialize_catalog_runtime()
         self._desktop_session_lock = threading.RLock()
         self._folder_dialog_lock = threading.Lock()
+        # Candidate synthesis can load the embedded Kokoro model.  Local web
+        # requests are handled by a ThreadingHTTPServer, so serialize previews
+        # and keep them out of the FFmpeg render window on memory-constrained
+        # employee PCs.
+        self._heavy_resource_lock = threading.Lock()
+        # Compatibility alias for the candidate-preview path and older tests.
+        # The exact same lock is also held by PipelineRunner for each job, so
+        # a queued render cannot start in the tiny window after the busy check.
+        self._voice_preview_lock = self._heavy_resource_lock
         self._local_draft_files_lock = threading.RLock()
         self._local_draft_files: dict[str, dict[str, str]] = {}
         self._desktop_session_path = (
@@ -178,6 +193,11 @@ class StoryForgeApi:
         else:
             self._library.sync_platforms(self._state.platforms)
         self._window: Any = None
+        # The scheduled Local Worker has no pywebview window.  Its process
+        # lifetime is owned by ``main._run_local_worker_service`` and can be
+        # stopped safely through this callback after the HTTP response has
+        # been returned to either the browser or desktop viewer.
+        self._process_exit_callback: Callable[[], None] | None = None
         self._request_context = threading.local()
         self._recorded_artifacts: set[tuple[str, str, str]] = set()
         self._recorded_media_jobs: set[str] = set()
@@ -185,6 +205,12 @@ class StoryForgeApi:
         self._job_media_selection: dict[str, dict[str, Any]] = {}
         self._lease_lock = threading.RLock()
         self._leased_records: set[str] = set()
+        # Record ids whose ownership was authoritatively lost while their
+        # local worker was still unwinding.  One final terminal callback can
+        # legitimately receive a lease conflict for these records; that
+        # conflict acknowledges that another device/Hub is authoritative and
+        # must not pause every younger batch forever.
+        self._superseded_lease_records: set[str] = set()
         # record id -> next monotonic heartbeat time / consecutive failures.
         # Transport faults are retried; only an authoritative owner change
         # stops local rendering.
@@ -198,7 +224,7 @@ class StoryForgeApi:
         self._shutdown_lock = threading.RLock()
         self._shutdown_in_progress = threading.Event()
         self._shutdown_job_ids: set[str] = set()
-        self._queue.set_terminal_callback(self._sync_streamed_job_record)
+        self._queue.set_terminal_callback(self._sync_terminal_job_record)
         self._update_publish_lock = threading.RLock()
         self._update_publish_status: dict[str, Any] = {
             "state": "publisher_idle",
@@ -1988,25 +2014,33 @@ class StoryForgeApi:
 
         def operation() -> dict[str, Any]:
             window = self._window
-            if window is None:
-                raise RuntimeError("请在已安装的 StoryForge 软件中执行立即重启安装。")
+            process_exit = self._process_exit_callback
+            if window is None and process_exit is None:
+                raise RuntimeError("当前 StoryForge 进程无法安全重启，请关闭后重新打开。")
             status = self._update_manager.schedule_on_restart()
             if bool(status.get("rendering_busy")):
                 result = dict(status)
                 result["exit_queued"] = False
                 return result
 
-            def close_window() -> None:
+            def request_process_exit() -> None:
                 time.sleep(0.35)
-                try:
-                    window.destroy()
-                except (AttributeError, OSError, RuntimeError):
-                    # The verified update remains scheduled, so a normal close
-                    # still applies it without losing the downloaded package.
-                    pass
+                if process_exit is not None:
+                    try:
+                        process_exit()
+                    except (OSError, RuntimeError):
+                        pass
+                    return
+                if window is not None:
+                    try:
+                        window.destroy()
+                    except (AttributeError, OSError, RuntimeError):
+                        # The verified update remains scheduled, so a normal
+                        # close still applies it without losing the package.
+                        pass
 
             threading.Thread(
-                target=close_window,
+                target=request_process_exit,
                 name="storyforge-update-restart",
                 daemon=True,
             ).start()
@@ -2016,6 +2050,13 @@ class StoryForgeApi:
             return result
 
         return self._guard(operation)
+
+    def _attach_process_exit_callback(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        """Attach the process owner used by a headless Local Worker."""
+
+        self._process_exit_callback = callback
 
     def cancel_scheduled_update(self) -> dict[str, Any]:
         return self._guard(self._update_manager.cancel_schedule)
@@ -2278,18 +2319,10 @@ class StoryForgeApi:
 
             self._queue.begin_shutdown()
             queue_items = list(self._queue.list_jobs())
-            terminal_statuses = {
-                JobStatus.COMPLETED.value,
-                JobStatus.FAILED.value,
-                JobStatus.CANCELLED.value,
-                JobStatus.INTERRUPTED.value,
-            }
-            interrupted_job_ids = {
-                str(item.get("id") or "")
-                for item in queue_items
-                if str(item.get("id") or "")
-                and str(item.get("status") or "") not in terminal_statuses
-            }
+            # Only a processor which actually started is interrupted. Work
+            # still waiting in the durable queue remains queued and resumes on
+            # the next Worker start instead of becoming a manual retry.
+            interrupted_job_ids = self._queue.active_job_ids()
             self._shutdown_job_ids.update(interrupted_job_ids)
             queue_record_ids = {
                 str(item.get("production_record_id") or "")
@@ -2311,9 +2344,9 @@ class StoryForgeApi:
                     reason=interruption_message,
                 )
 
-                # Persist each stopped job before releasing its lease.  A
-                # failed catalog/Hub write deliberately keeps that individual
-                # lease until expiry rather than exposing duplicate work.
+                # Persist each stopped active job before releasing its lease.
+                # Queued jobs were never executed, so keep their durable status
+                # unchanged and release only the workstation lease for restart.
                 for item in queue_items:
                     job = self._queue.get_job(str(item.get("id") or ""))
                     if job is None or not job.production_record_id:
@@ -2324,11 +2357,19 @@ class StoryForgeApi:
                         )
                     if not still_leased:
                         continue
+                    if (
+                        job.id not in interrupted_job_ids
+                        and job.status == JobStatus.QUEUED
+                    ):
+                        self._release_record_lease(job.production_record_id)
+                        continue
                     try:
                         self._sync_one_job_record(
                             job,
                             shutdown_confirmed=True,
                         )
+                        if job.id not in interrupted_job_ids:
+                            self._release_record_lease(job.production_record_id)
                     except (
                         OSError,
                         sqlite3.Error,
@@ -2375,6 +2416,50 @@ class StoryForgeApi:
             )
             self._lease_thread.start()
 
+    @staticmethod
+    def _lease_error_is_authoritative(error: BaseException) -> bool:
+        """Whether retrying the same work would violate Hub ownership/auth."""
+
+        if isinstance(
+            error,
+            (HubAuthenticationError, CatalogConflictError, CatalogPermissionError),
+        ):
+            return True
+        if isinstance(error, HubRemoteError):
+            return int(error.status) in {401, 403, 409, 410, 423, 426}
+        return isinstance(error, (PermissionError, ValueError, KeyError, TypeError))
+
+    @staticmethod
+    def _lease_deadline(result: Mapping[str, Any] | None) -> float:
+        """Convert a server lease expiry into a conservative monotonic deadline."""
+
+        record = dict((result or {}).get("record") or {})
+        raw_expiry = str(record.get("lease_expires_at") or "").strip()
+        remaining = float(RECORD_LEASE_SECONDS)
+        if raw_expiry:
+            try:
+                expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                remaining = max(
+                    0.0,
+                    (expiry.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except ValueError:
+                pass
+        return time.monotonic() + min(float(RECORD_LEASE_SECONDS), remaining)
+
+    def _healthy_lease_state(
+        self, result: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return {
+            "failures": 0,
+            "next_attempt": time.monotonic() + RECORD_LEASE_HEARTBEAT_SECONDS,
+            "deadline": self._lease_deadline(result),
+            "last_error": "",
+            "state": "healthy",
+        }
+
     def _lease_heartbeat_loop(self) -> None:
         while not self._lease_stop.is_set():
             with self._lease_lock:
@@ -2383,19 +2468,28 @@ class StoryForgeApi:
                 return
             device_id = self._current_device_id()
             now = time.monotonic()
-            next_wait = 45.0
+            next_wait = RECORD_LEASE_HEARTBEAT_SECONDS
             for record_id in record_ids:
                 with self._lease_lock:
                     health = dict(self._lease_health.get(record_id) or {})
+                deadline = float(health.get("deadline") or 0.0)
+                if deadline > 0.0 and now >= deadline:
+                    self._stop_jobs_for_lost_lease(
+                        record_id, "lease renewal deadline expired"
+                    )
+                    continue
                 next_attempt = float(health.get("next_attempt") or 0.0)
                 if next_attempt > now:
-                    next_wait = min(next_wait, max(0.25, next_attempt - now))
+                    wait_until = next_attempt
+                    if deadline > 0.0:
+                        wait_until = min(wait_until, deadline)
+                    next_wait = min(next_wait, max(0.25, wait_until - now))
                     continue
                 try:
-                    self._catalog.heartbeat_record_lease(
+                    heartbeat = self._catalog.heartbeat_record_lease(
                         record_id,
                         device_id,
-                        lease_seconds=180,
+                        lease_seconds=RECORD_LEASE_SECONDS,
                     )
                 except (
                     OSError,
@@ -2407,10 +2501,36 @@ class StoryForgeApi:
                 ) as error:
                     if self._lease_stop.is_set():
                         return
-                    if self._recover_or_confirm_record_lease_loss(
-                        record_id, device_id
+                    if self._lease_error_is_authoritative(error) or (
+                        deadline > 0.0 and time.monotonic() >= deadline
                     ):
+                        detail = str(error)
+                        if deadline > 0.0 and time.monotonic() >= deadline:
+                            detail = f"lease renewal deadline expired; {detail}"
+                        self._stop_jobs_for_lost_lease(record_id, detail)
+                        continue
+                    recovery = self._recover_or_confirm_record_lease_loss(
+                        record_id, device_id
+                    )
+                    if recovery is True:
                         self._stop_jobs_for_lost_lease(record_id, str(error))
+                        continue
+                    if recovery is None:
+                        # Re-claim succeeded and already installed a fresh
+                        # server-derived deadline.  Do not overwrite it below
+                        # with the stale deadline captured before recovery.
+                        with self._lease_lock:
+                            recovered_health = dict(
+                                self._lease_health.get(record_id) or {}
+                            )
+                        recovered_attempt = float(
+                            recovered_health.get("next_attempt") or 0.0
+                        )
+                        if recovered_attempt > 0.0:
+                            next_wait = min(
+                                next_wait,
+                                max(0.25, recovered_attempt - time.monotonic()),
+                            )
                         continue
                     failures = int(health.get("failures") or 0) + 1
                     delay = min(30.0, float(2 ** max(0, min(5, failures - 1))))
@@ -2419,6 +2539,7 @@ class StoryForgeApi:
                             self._lease_health[record_id] = {
                                 "failures": failures,
                                 "next_attempt": time.monotonic() + delay,
+                                "deadline": deadline,
                                 "last_error": f"{type(error).__name__}: {error}",
                                 "state": "reconnecting",
                             }
@@ -2426,18 +2547,17 @@ class StoryForgeApi:
                     continue
                 with self._lease_lock:
                     if record_id in self._leased_records:
-                        self._lease_health[record_id] = {
-                            "failures": 0,
-                            "next_attempt": time.monotonic() + 45.0,
-                            "last_error": "",
-                            "state": "healthy",
-                        }
-            self._lease_stop.wait(max(0.25, min(45.0, next_wait)))
+                        self._lease_health[record_id] = self._healthy_lease_state(
+                            heartbeat
+                        )
+            self._lease_stop.wait(
+                max(0.25, min(RECORD_LEASE_HEARTBEAT_SECONDS, next_wait))
+            )
 
     def _recover_or_confirm_record_lease_loss(
         self, record_id: str, device_id: str
-    ) -> bool:
-        """Return True only when Hub authoritatively reports another owner.
+    ) -> bool | None:
+        """Return True for loss, None for renewal, False while unconfirmed.
 
         A missed heartbeat can be a brief LAN outage.  Re-claiming is safe for
         the same owner and also repairs a lease which expired before another
@@ -2446,22 +2566,20 @@ class StoryForgeApi:
         """
 
         try:
-            self._catalog.claim_record_lease(
+            claimed = self._catalog.claim_record_lease(
                 record_id,
                 device_id,
-                lease_seconds=180,
+                lease_seconds=RECORD_LEASE_SECONDS,
             )
             with self._lease_lock:
                 if record_id in self._leased_records:
-                    self._lease_health[record_id] = {
-                        "failures": 0,
-                        "next_attempt": time.monotonic() + 45.0,
-                        "last_error": "",
-                        "state": "healthy",
-                    }
-            return False
-        except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError, TypeError):
-            pass
+                    self._lease_health[record_id] = self._healthy_lease_state(
+                        claimed
+                    )
+            return None
+        except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError, TypeError) as error:
+            if self._lease_error_is_authoritative(error):
+                return True
         try:
             record = self._catalog.get_record(record_id)
         except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError, TypeError):
@@ -2478,15 +2596,20 @@ class StoryForgeApi:
         with self._lease_lock:
             self._leased_records.discard(record_id)
             self._lease_health.pop(record_id, None)
+            # Install the marker before cancelling.  The active processor can
+            # finish on another thread at any point after ownership is known
+            # to be lost, including while this method is enumerating jobs.
+            self._superseded_lease_records.add(record_id)
             for draft_id, (gate_id, batch_id) in tuple(
                 self._draft_gate_leases.items()
             ):
                 if gate_id == record_id:
                     lost_batch_id = batch_id
                     self._draft_gate_leases.pop(draft_id, None)
+        queue_items = list(self._queue.list_jobs())
         job_ids = [
             str(item.get("id") or "")
-            for item in self._queue.list_jobs()
+            for item in queue_items
             if (
                 str(item.get("production_record_id") or "") == record_id
                 or (
@@ -2496,6 +2619,14 @@ class StoryForgeApi:
             )
             and str(item.get("id") or "")
         ]
+        if not any(
+            str(item.get("production_record_id") or "") == record_id
+            for item in queue_items
+        ):
+            # Draft-gate lease loss can cancel a whole batch, but no render job
+            # publishes a terminal state into the gate record itself.
+            with self._lease_lock:
+                self._superseded_lease_records.discard(record_id)
         if job_ids:
             message = "任务租约已由其他电脑接管，本机已安全停止，避免重复生成。"
             if detail:
@@ -2504,19 +2635,15 @@ class StoryForgeApi:
 
     def _claim_record_lease(self, record_id: str) -> None:
         device_id = self._current_device_id()
-        self._catalog.claim_record_lease(
+        claimed = self._catalog.claim_record_lease(
             record_id,
             device_id,
-            lease_seconds=180,
+            lease_seconds=RECORD_LEASE_SECONDS,
         )
         with self._lease_lock:
+            self._superseded_lease_records.discard(record_id)
             self._leased_records.add(record_id)
-            self._lease_health[record_id] = {
-                "failures": 0,
-                "next_attempt": time.monotonic() + 45.0,
-                "last_error": "",
-                "state": "healthy",
-            }
+            self._lease_health[record_id] = self._healthy_lease_state(claimed)
         self._ensure_lease_heartbeat()
 
     def _release_record_lease(self, record_id: str) -> None:
@@ -2526,6 +2653,7 @@ class StoryForgeApi:
         except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError, TypeError):
             pass
         with self._lease_lock:
+            self._superseded_lease_records.discard(record_id)
             self._leased_records.discard(record_id)
             self._lease_health.pop(record_id, None)
 
@@ -3494,13 +3622,32 @@ class StoryForgeApi:
     ) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
-            result = self._library.generate_voice_candidates(
-                str(novel_id),
-                str(mood),
-                narration_wpm=narration_wpm,
-                persist=False,
-            )
-            return self._share_voice_candidates(str(novel_id), result)
+            if self._queue.is_rendering_busy():
+                raise RuntimeError(
+                    "当前电脑正在制作视频，为避免配音模型与 FFmpeg 同时占用内存，"
+                    "请在当前视频完成后再生成候选配音。已加入队列的后续批次不受影响。"
+                )
+            if not self._voice_preview_lock.acquire(blocking=False):
+                raise RuntimeError(
+                    "候选配音正在生成，请等待当前试听完成，不要重复提交。"
+                )
+            try:
+                # Close the check/acquire race between two browser requests.
+                # A render already active here is authoritative; do not load
+                # Kokoro into the same 16 GB workstation process.
+                if self._queue.is_rendering_busy():
+                    raise RuntimeError(
+                        "当前电脑正在制作视频，请在当前视频完成后再生成候选配音。"
+                    )
+                result = self._library.generate_voice_candidates(
+                    str(novel_id),
+                    str(mood),
+                    narration_wpm=narration_wpm,
+                    persist=False,
+                )
+                return self._share_voice_candidates(str(novel_id), result)
+            finally:
+                self._voice_preview_lock.release()
 
         return self._guard(operation)
 
@@ -3945,7 +4092,9 @@ class StoryForgeApi:
         return self._ok(self._queue_jobs())
 
     def get_jobs(self) -> dict[str, Any]:
-        self._sync_job_records()
+        # Queue reads are deliberately side-effect free. The Worker publishes
+        # terminal states through its callback, so closing the browser cannot
+        # strand a completed record and rapid polling cannot create Hub writes.
         return self._ok(self._queue_jobs())
 
     def get_queue_connection(self) -> dict[str, Any]:
@@ -4772,13 +4921,56 @@ class StoryForgeApi:
         if projected_status in {"completed", "failed", "cancelled", "interrupted"}:
             self._release_record_lease(job.production_record_id)
 
-    def _sync_streamed_job_record(self, job: RenderJob) -> None:
-        """Persist one terminal streamed job before its card is evicted."""
+    def _sync_terminal_job_record(self, job: RenderJob) -> None:
+        """Persist one terminal Worker result without relying on UI polling."""
 
         if self._shutdown_in_progress.is_set():
             return
-        self._sync_one_job_record(job)
+        try:
+            self._sync_one_job_record(job)
+        except CatalogConflictError:
+            with self._lease_lock:
+                superseded = (
+                    job.production_record_id in self._superseded_lease_records
+                )
+                if superseded:
+                    self._superseded_lease_records.discard(job.production_record_id)
+                    self._leased_records.discard(job.production_record_id)
+                    self._lease_health.pop(job.production_record_id, None)
+            if not superseded:
+                raise
+        except CatalogNotFoundError:
+            # An administrator may intentionally delete a historical batch
+            # while the originating workstation is finishing its local
+            # process. The missing record is authoritative; retrying forever
+            # would freeze every younger batch without anything to update.
+            with self._lease_lock:
+                self._leased_records.discard(job.production_record_id)
+                self._lease_health.pop(job.production_record_id, None)
+        except HubRemoteError as error:
+            status = int(error.status)
+            if status == 409:
+                with self._lease_lock:
+                    superseded = (
+                        job.production_record_id in self._superseded_lease_records
+                    )
+                    if superseded:
+                        self._superseded_lease_records.discard(job.production_record_id)
+                        self._leased_records.discard(job.production_record_id)
+                        self._lease_health.pop(job.production_record_id, None)
+                if superseded:
+                    self._release_finished_draft_gates()
+                    return
+            if status != 404:
+                raise
+            with self._lease_lock:
+                self._leased_records.discard(job.production_record_id)
+                self._lease_health.pop(job.production_record_id, None)
         self._release_finished_draft_gates()
+
+    # Kept for older tests/extensions which used the pre-unified callback name.
+    def _sync_streamed_job_record(self, job: RenderJob) -> None:
+        self._sync_terminal_job_record(job)
 
     def _sync_job_records(self) -> None:
         """Best-effort queue-to-catalog projection used by local UI and Hub."""

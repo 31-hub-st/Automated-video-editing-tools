@@ -1802,13 +1802,23 @@ def build_ffmpeg_plan(
             "22" if render_mode == "speed" else "20",
         ]
 
-    bounded_thread_options = (
-        ["-filter_threads", "1", "-filter_complex_threads", "1"]
-        if render_mode == "compatibility"
-        else []
+    # FFmpeg otherwise derives worker counts from every logical CPU.  On
+    # employee PCs that can create dozens of filter and x264 threads while a
+    # 1080x1920/60 graph is holding large frame buffers.  Bound the normal
+    # path as well as compatibility mode; GPU encoders keep their own driver
+    # managed worker count.
+    filter_threads = "1" if render_mode == "compatibility" else "2"
+    bounded_thread_options = [
+        "-filter_threads",
+        filter_threads,
+        "-filter_complex_threads",
+        filter_threads,
+    ]
+    effective_video_encoder = (
+        "libx264" if render_mode == "compatibility" else video_encoder
     )
     encoder_thread_options = (
-        ["-threads", "2"] if render_mode == "compatibility" else []
+        ["-threads", "2"] if effective_video_encoder == "libx264" else []
     )
     command.extend(
         [

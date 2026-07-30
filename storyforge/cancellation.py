@@ -33,6 +33,33 @@ _CURRENT_TOKEN: ContextVar[CancellationToken | None] = ContextVar(
 )
 
 
+def _is_ffmpeg_command(command: Sequence[str | os.PathLike[str]]) -> bool:
+    if not command:
+        return False
+    executable = os.path.basename(os.fspath(command[0])).casefold()
+    stem, suffix = os.path.splitext(executable)
+    if suffix not in {"", ".exe"}:
+        return False
+    return (
+        stem in {"ffmpeg", "ffprobe"}
+        or stem.startswith("ffmpeg-")
+        or stem.startswith("ffprobe-")
+    )
+
+
+def windows_process_creation_flags(
+    command: Sequence[str | os.PathLike[str]],
+    base_flags: int = 0,
+) -> int:
+    """Return bounded Windows priority flags for a StoryForge subprocess."""
+
+    flags = int(base_flags)
+    flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    if _is_ffmpeg_command(command):
+        flags |= int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+    return flags
+
+
 class CancellationToken:
     """Thread-safe cancellation flag and registry of owned child processes."""
 
@@ -194,9 +221,10 @@ def run_cancellable_process(
         kwargs["stderr"] = subprocess.PIPE
     kwargs.setdefault("shell", False)
     if os.name == "nt":
-        flags = int(kwargs.pop("creationflags", 0))
-        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        kwargs["creationflags"] = flags
+        kwargs["creationflags"] = windows_process_creation_flags(
+            command,
+            int(kwargs.pop("creationflags", 0)),
+        )
     else:
         # A separate group lets cancellation terminate descendants as well as
         # the direct FFmpeg/TTS launcher.
@@ -238,4 +266,5 @@ __all__ = [
     "raise_if_cancelled",
     "run_cancellable_process",
     "terminate_process_tree",
+    "windows_process_creation_flags",
 ]

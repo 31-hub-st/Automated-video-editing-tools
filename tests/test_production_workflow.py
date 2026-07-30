@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from storyforge.api import StoryForgeApi
-from storyforge.catalog import CatalogRepository
+from storyforge.catalog import CatalogConflictError, CatalogRepository
 from storyforge.config import SettingsRepository
+from storyforge.hub import HubRemoteError
 from storyforge.jobs import JobQueue
 from storyforge.models import JobStatus, PlatformProfile, RenderJob
 
@@ -755,6 +756,190 @@ class ProductionWorkflowTests(unittest.TestCase):
                     )
             finally:
                 api._shutdown()
+
+    def test_successful_lease_reclaim_preserves_the_renewed_deadline(self) -> None:
+        class RecoverableCatalog:
+            def heartbeat_record_lease(self, *_args, **_kwargs):
+                raise OSError("heartbeat route unavailable")
+
+            def claim_record_lease(self, *_args, **_kwargs):
+                return {"record": {}}
+
+            def get_record(self, *_args, **_kwargs):
+                raise AssertionError("a successful re-claim must not query the record")
+
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._lease_lock = threading.RLock()
+        api._leased_records = {"record-1"}
+        original_deadline = time.monotonic() + 0.06
+        api._lease_health = {
+            "record-1": {
+                "failures": 0,
+                "next_attempt": 0.0,
+                "deadline": original_deadline,
+                "last_error": "",
+                "state": "healthy",
+            }
+        }
+        api._lease_stop = threading.Event()
+        api._catalog = RecoverableCatalog()
+        api._current_device_id = lambda: "worker-a"
+        lost: list[str] = []
+
+        def stop_for_lost_lease(record_id: str, _detail: str = "") -> None:
+            lost.append(record_id)
+            api._lease_stop.set()
+
+        api._stop_jobs_for_lost_lease = stop_for_lost_lease
+        with patch(
+            "storyforge.api.RECORD_LEASE_HEARTBEAT_SECONDS", 0.02
+        ):
+            worker = threading.Thread(target=api._lease_heartbeat_loop, daemon=True)
+            worker.start()
+            time.sleep(0.14)
+            api._lease_stop.set()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(lost, [])
+        self.assertGreater(
+            float(api._lease_health["record-1"]["deadline"]),
+            original_deadline + 60.0,
+        )
+
+    def test_lost_lease_terminal_conflict_does_not_block_younger_batch(self) -> None:
+        platform = PlatformProfile(id="platform-1", name="NovelBox")
+        processed: list[str] = []
+        queue = JobQueue(
+            lambda job, _platform, _progress: processed.append(job.id)
+            or f"{job.id}.mp4"
+        )
+        lost = RenderJob(
+            id="lost-job",
+            batch_id="lost-batch",
+            platform_id=platform.id,
+            source_file=__file__,
+            title="Lost lease",
+            code="LOST001",
+            video_folder=".",
+            music_folder=".",
+            output_folder=".",
+            production_record_id="lost-record",
+        )
+        younger = RenderJob(
+            id="younger-job",
+            batch_id="younger-batch",
+            platform_id=platform.id,
+            source_file=__file__,
+            title="Younger batch",
+            code="NEXT001",
+            video_folder=".",
+            music_folder=".",
+            output_folder=".",
+        )
+
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._queue = queue
+        api._lease_lock = threading.RLock()
+        api._leased_records = {lost.production_record_id}
+        api._lease_health = {lost.production_record_id: {"state": "healthy"}}
+        api._superseded_lease_records = set()
+        api._draft_gate_leases = {}
+        api._shutdown_in_progress = threading.Event()
+        api._job_materials = {}
+        api._job_media_selection = {}
+        api._recorded_media_jobs = set()
+        api._recorded_artifacts = set()
+        api._current_device_id = lambda: "worker-a"
+        api._release_finished_draft_gates = lambda: None
+        api._catalog = Mock()
+        api._catalog.save_production_record.side_effect = CatalogConflictError(
+            "production record lease belongs to another device"
+        )
+        queue.set_terminal_callback(api._sync_terminal_job_record)
+        queue.enqueue_jobs([lost, younger], platform)
+
+        api._stop_jobs_for_lost_lease(lost.production_record_id)
+        queue.start()
+        worker = queue._worker
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(processed, [younger.id])
+        self.assertEqual(queue.stream_status()["state"], "connected")
+        self.assertNotIn(
+            lost.production_record_id,
+            api._superseded_lease_records,
+        )
+
+        remote_lost = RenderJob(
+            id="remote-lost-job",
+            batch_id="remote-lost-batch",
+            platform_id=platform.id,
+            source_file=__file__,
+            title="Remote lost lease",
+            code="LOST002",
+            video_folder=".",
+            music_folder=".",
+            output_folder=".",
+            production_record_id="remote-lost-record",
+            status=JobStatus.CANCELLED,
+        )
+        api._catalog.save_production_record.side_effect = HubRemoteError(
+            409,
+            "catalog_conflict",
+            "production record lease belongs to another device",
+        )
+        api._superseded_lease_records.add(remote_lost.production_record_id)
+        api._sync_terminal_job_record(remote_lost)
+        self.assertNotIn(
+            remote_lost.production_record_id,
+            api._superseded_lease_records,
+        )
+
+        unmarked = RenderJob.from_dict(
+            {
+                **remote_lost.to_dict(),
+                "id": "unmarked-job",
+                "production_record_id": "unmarked-record",
+            }
+        )
+        with self.assertRaises(HubRemoteError):
+            api._sync_terminal_job_record(unmarked)
+
+    def test_voice_candidates_are_rejected_while_local_render_is_busy(self) -> None:
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._queue = Mock()
+        api._queue.is_rendering_busy.return_value = True
+        api._voice_preview_lock = threading.Lock()
+        api._library = Mock()
+        api._require_shared_catalog_online = lambda: None
+
+        response = api.generate_voice_candidates("novel-1", "suspense", 240)
+
+        self.assertFalse(response["ok"])
+        self.assertIn("正在制作视频", response["error"])
+        api._library.generate_voice_candidates.assert_not_called()
+
+    def test_voice_candidate_requests_are_serialized(self) -> None:
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._queue = Mock()
+        api._queue.is_rendering_busy.return_value = False
+        api._voice_preview_lock = threading.Lock()
+        api._voice_preview_lock.acquire()
+        api._library = Mock()
+        api._require_shared_catalog_online = lambda: None
+
+        try:
+            response = api.generate_voice_candidates("novel-1", "suspense", 240)
+        finally:
+            api._voice_preview_lock.release()
+
+        self.assertFalse(response["ok"])
+        self.assertIn("候选配音正在生成", response["error"])
+        api._library.generate_voice_candidates.assert_not_called()
 
 
 if __name__ == "__main__":

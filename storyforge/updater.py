@@ -12,7 +12,7 @@ import tempfile
 import threading
 import zipfile
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -21,6 +21,9 @@ UPDATE_PACKAGE_METADATA = "storyforge-update.json"
 UPDATE_MANIFEST_SCHEMA = 1
 MAX_UPDATE_ENTRIES = 20_000
 MAX_UPDATE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+UPDATE_ROLLBACK_RETENTION = timedelta(days=3)
+UPDATE_INSTALLING_GRACE = timedelta(minutes=10)
+UPDATE_SPACE_HEADROOM_BYTES = 512 * 1024 * 1024
 _VERSION_PATTERN = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
     r"(?P<suffix>-(?:[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
@@ -58,9 +61,13 @@ def version_key(value: Any) -> tuple[int, int, int, int, tuple[tuple[int, Any], 
         final = 1
     else:
         final = 0
+        # Desktop prereleases historically use compact labels such as ``rc7``.
+        # Split every alpha/numeric run so rc10 correctly sorts after rc7
+        # instead of being compared as the lexical strings "rc10" < "rc7".
+        identifiers = re.findall(r"[A-Za-z]+|\d+", suffix[1:])
         prerelease = tuple(
             (0, int(item)) if item.isdecimal() else (1, item.casefold())
-            for item in suffix[1:].split(".")
+            for item in identifiers
         )
     return (
         int(matched.group("major")),
@@ -331,9 +338,26 @@ class UpdateRepository:
                 stat.st_size,
                 stat.st_mtime_ns,
             )
+            # The atomic manifest replacement above is the release commit
+            # point. Only then is it safe to discard packages referenced by
+            # older manifests. Cleanup remains best-effort because antivirus
+            # or a concurrent client download can briefly lock a ZIP on
+            # Windows; that must not make a valid publication fail.
+            self._remove_superseded_packages(destination)
             if progress is not None:
                 progress(1.0, "更新已经发布。")
             return manifest
+
+    def _remove_superseded_packages(self, current_package: Path) -> None:
+        current = current_package.resolve(strict=False)
+        for candidate in self.root.glob("StoryForge-*.zip"):
+            try:
+                if candidate.resolve(strict=False) == current:
+                    continue
+                candidate.unlink()
+            except OSError:
+                # A later publication will retry cleanup of locked files.
+                continue
 
     def clear(self) -> None:
         """Stop advertising a release without deleting the verified package."""
@@ -376,10 +400,14 @@ class UpdateManager:
     ) -> None:
         self.current_version = normalize_version(current_version)
         self.data_dir = Path(data_dir).expanduser().resolve()
-        self.cache_root = self.data_dir / "updates" / "downloads"
+        self.state_root = self.data_dir / "updates"
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        self.pending_path = self.state_root / "pending-update.json"
+        self.worker_path = self.state_root / "apply-update.ps1"
+        self.result_path = self.state_root / "last-update-result.json"
+        self.storage_root = self._select_storage_root()
+        self.cache_root = self.storage_root / "downloads"
         self.cache_root.mkdir(parents=True, exist_ok=True)
-        self.pending_path = self.data_dir / "updates" / "pending-update.json"
-        self.worker_path = self.data_dir / "updates" / "apply-update.ps1"
         self._client_getter = client_getter
         self._mode_getter = mode_getter
         self._enabled_getter = enabled_getter
@@ -414,6 +442,206 @@ class UpdateManager:
         }
         self._manifest: dict[str, Any] | None = None
         self._restore_pending_marker()
+        # Antivirus and a previous interrupted updater can leave files locked.
+        # Cleanup is intentionally best-effort and must never block startup.
+        self._cleanup_update_storage()
+
+    def _select_storage_root(self) -> Path:
+        """Keep large frozen-client update data beside the installation.
+
+        Employee installations normally live on D:/E:.  Downloads, staging
+        and rollback copies therefore belong on that same volume instead of
+        filling AppData on C:.  Source/development runs deliberately retain
+        the old deterministic data-directory layout used by tests and tools.
+        """
+
+        fallback = self.state_root
+        if not bool(getattr(sys, "frozen", False)):
+            return fallback
+        try:
+            install_root = self.install_root().resolve()
+            identity = hashlib.sha256(
+                str(install_root).casefold().encode("utf-8")
+            ).hexdigest()[:10]
+            candidate = install_root.parent / f".storyforge-updates-{identity}"
+            candidate.mkdir(parents=True, exist_ok=True)
+            handle, probe_name = tempfile.mkstemp(
+                prefix=".write-probe-", dir=candidate
+            )
+            os.close(handle)
+            Path(probe_name).unlink()
+            return candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            # Program Files and managed corporate directories may reject a
+            # sibling folder. AppData remains the safe compatibility fallback.
+            return fallback
+
+    @staticmethod
+    def _parse_utc(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _path_is_within(path: Path, root: Path) -> bool:
+        try:
+            path.resolve(strict=False).relative_to(root.resolve(strict=False))
+            return True
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _remove_path_best_effort(path: Path) -> bool:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return not path.exists()
+
+    def _pending_package_path(self) -> Path | None:
+        if not self.pending_path.is_file():
+            return None
+        try:
+            marker = json.loads(self.pending_path.read_text(encoding="utf-8"))
+            return Path(str(marker["package_path"])).resolve(strict=False)
+        except (KeyError, OSError, json.JSONDecodeError, ValueError):
+            return None
+
+    def _cleanup_update_storage(self, *, now: datetime | None = None) -> None:
+        """Bound update cache and rollback retention without risking startup."""
+
+        try:
+            current_time = (now or datetime.now(timezone.utc)).astimezone(
+                timezone.utc
+            )
+            preserved_packages: set[Path] = set()
+            pending_package = self._pending_package_path()
+            if pending_package is not None:
+                preserved_packages.add(pending_package.resolve(strict=False))
+            status_package = str(self._status.get("package_path") or "").strip()
+            if status_package:
+                preserved_packages.add(Path(status_package).resolve(strict=False))
+
+            # Also sweep the legacy AppData cache after a frozen client moves
+            # its new downloads to the installation volume.
+            cache_roots = {
+                self.cache_root.resolve(strict=False),
+                (self.state_root / "downloads").resolve(strict=False),
+            }
+            for cache_root in cache_roots:
+                try:
+                    children = list(cache_root.iterdir())
+                except OSError:
+                    continue
+                for child in children:
+                    resolved = child.resolve(strict=False)
+                    if any(
+                        package == resolved or resolved in package.parents
+                        for package in preserved_packages
+                    ):
+                        continue
+                    self._remove_path_best_effort(child)
+
+            result: dict[str, Any] = {}
+            try:
+                raw_result = json.loads(self.result_path.read_text(encoding="utf-8"))
+                if isinstance(raw_result, Mapping):
+                    result = dict(raw_result)
+            except (OSError, json.JSONDecodeError, ValueError):
+                result = {}
+
+            apply_roots = {
+                self.storage_root.resolve(strict=False),
+                self.state_root.resolve(strict=False),
+            }
+            retained_apply: Path | None = None
+            # While the external installer is health-checking the newly
+            # launched process, that process also constructs UpdateManager.
+            # Preserve the installer's live rollback directory so startup
+            # cleanup cannot erase the files needed for an automatic rollback.
+            try:
+                pending_marker = json.loads(
+                    self.pending_path.read_text(encoding="utf-8")
+                )
+                active_at = self._parse_utc(pending_marker.get("installing_at"))
+                active_value = str(
+                    pending_marker.get("apply_work_root") or ""
+                ).strip()
+                if (
+                    bool(pending_marker.get("installing"))
+                    and active_at is not None
+                    and current_time - active_at <= UPDATE_INSTALLING_GRACE
+                    and active_value
+                ):
+                    active_candidate = Path(active_value).resolve(strict=False)
+                    if active_candidate.name.startswith("apply-") and any(
+                        self._path_is_within(active_candidate, root)
+                        for root in apply_roots
+                    ):
+                        retained_apply = active_candidate
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+            installed_at = self._parse_utc(result.get("installed_at"))
+            backup_value = str(result.get("backup_path") or "").strip()
+            if (
+                result.get("status") == "installed"
+                and bool(result.get("rollback_available"))
+                and installed_at is not None
+                and backup_value
+            ):
+                backup = Path(backup_value).resolve(strict=False)
+                candidate = backup.parent
+                allowed = any(
+                    candidate.name.startswith("apply-")
+                    and self._path_is_within(candidate, root)
+                    for root in apply_roots
+                )
+                age = current_time - installed_at
+                if (
+                    retained_apply is None
+                    and allowed
+                    and age <= UPDATE_ROLLBACK_RETENTION
+                ):
+                    retained_apply = candidate
+
+            for root in apply_roots:
+                try:
+                    candidates = list(root.glob("apply-*"))
+                except OSError:
+                    continue
+                for candidate in candidates:
+                    if retained_apply is not None and (
+                        candidate.resolve(strict=False) == retained_apply
+                    ):
+                        continue
+                    removed = self._remove_path_best_effort(candidate)
+                    if (
+                        removed
+                        and backup_value
+                        and Path(backup_value).resolve(strict=False).parent
+                        == candidate.resolve(strict=False)
+                    ):
+                        result["backup_path"] = ""
+                        result["rollback_available"] = False
+                        try:
+                            self._write_json_atomic(self.result_path, result)
+                        except OSError:
+                            pass
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Cleanup is maintenance, never a startup prerequisite.
+            return
 
     @staticmethod
     def _write_json_atomic(path: Path, value: Any) -> None:
@@ -440,11 +668,24 @@ class UpdateManager:
             marker = json.loads(self.pending_path.read_text(encoding="utf-8"))
             manifest = validate_update_manifest(marker["manifest"])
             package = Path(str(marker["package_path"])).resolve(strict=True)
-            if package.stat().st_size != manifest["size_bytes"]:
-                raise ValueError("已下载更新包大小不一致。")
-            if file_sha256(package) != manifest["sha256"]:
-                raise ValueError("已下载更新包摘要不一致。")
-            inspect_update_package(package, expected_version=manifest["version"])
+            installing_at = self._parse_utc(marker.get("installing_at"))
+            installing_now = bool(marker.get("installing")) and (
+                installing_at is not None
+                and datetime.now(timezone.utc) - installing_at
+                <= UPDATE_INSTALLING_GRACE
+            )
+            # The installer has already verified the archive before it writes
+            # ``installing=true``. Re-hashing a 0.7-GB package in the newly
+            # launched process would delay startup and can hold a Windows file
+            # lock while the installer is trying to remove that package.
+            if not installing_now:
+                if package.stat().st_size != manifest["size_bytes"]:
+                    raise ValueError("已下载更新包大小不一致。")
+                if file_sha256(package) != manifest["sha256"]:
+                    raise ValueError("已下载更新包摘要不一致。")
+                inspect_update_package(
+                    package, expected_version=manifest["version"]
+                )
         except (KeyError, OSError, json.JSONDecodeError, ValueError) as error:
             self._status.update(
                 {
@@ -455,6 +696,28 @@ class UpdateManager:
             )
             return
         self._manifest = manifest
+        if installing_now:
+            # The external installer launches the new binary before it removes
+            # the marker.  Suppress a second apply cycle during that health
+            # window; an abandoned marker becomes retryable after ten minutes.
+            self._pending_ready = False
+            self._pending_version = manifest["version"]
+            self._status.update(
+                {
+                    "available_version": manifest["version"],
+                    "scheduled_version": manifest["version"],
+                    "state": "applying_on_restart",
+                    "progress": 1.0,
+                    "message": "正在验证新版 StoryForge，请稍候。",
+                    "package_path": str(package),
+                    "downloaded": True,
+                    "apply_on_restart": False,
+                    "restart_required": False,
+                    "release_notes": manifest["release_notes"],
+                    "published_at": manifest["published_at"],
+                }
+            )
+            return
         self._pending_ready = True
         self._pending_version = manifest["version"]
         self._status.update(
@@ -481,7 +744,89 @@ class UpdateManager:
         result["auto_download"] = bool(self._auto_download_getter())
         result["check_interval_minutes"] = self._safe_interval_minutes()
         result["rendering_busy"] = bool(self._rendering_busy_getter())
+        result["storage_root"] = str(self.storage_root)
         return result
+
+    def _ensure_download_space(self, manifest: Mapping[str, Any]) -> None:
+        checked = validate_update_manifest(manifest)
+        required = int(checked["size_bytes"]) + UPDATE_SPACE_HEADROOM_BYTES
+        try:
+            free = int(shutil.disk_usage(self.storage_root).free)
+        except OSError as error:
+            raise OSError("无法检查更新存储盘剩余空间。") from error
+        if free < required:
+            required_gib = required / (1024**3)
+            free_gib = free / (1024**3)
+            raise OSError(
+                f"更新存储盘空间不足：至少需要 {required_gib:.1f} GB，"
+                f"当前可用 {free_gib:.1f} GB。"
+            )
+
+    def _estimate_backup_bytes(self, package: Path) -> int:
+        install_root = self.install_root().resolve()
+        total = 0
+        with zipfile.ZipFile(package) as archive:
+            for entry in archive.infolist():
+                if entry.is_dir():
+                    continue
+                relative = _safe_relative_path(
+                    entry.filename, label="压缩包文件"
+                )
+                if relative == UPDATE_PACKAGE_METADATA:
+                    continue
+                target = (install_root / Path(*PurePosixPath(relative).parts)).resolve(
+                    strict=False
+                )
+                try:
+                    target.relative_to(install_root)
+                except ValueError:
+                    continue
+                try:
+                    if target.is_file():
+                        total += int(target.stat().st_size)
+                except OSError:
+                    continue
+        return total
+
+    def _apply_space_requirements(
+        self,
+        package: Path,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, int]:
+        checked = validate_update_manifest(manifest)
+        metadata = inspect_update_package(
+            package, expected_version=checked["version"]
+        )
+        compressed = int(checked["size_bytes"])
+        uncompressed = int(metadata["uncompressed_size_bytes"])
+        backup = self._estimate_backup_bytes(package)
+        total = compressed + uncompressed + backup + UPDATE_SPACE_HEADROOM_BYTES
+        package_in_storage = self._path_is_within(package, self.storage_root)
+        required_additional = (
+            uncompressed + backup + UPDATE_SPACE_HEADROOM_BYTES
+            if package_in_storage
+            else total
+        )
+        try:
+            free = int(shutil.disk_usage(self.storage_root).free)
+        except OSError as error:
+            raise OSError("无法检查更新安装盘剩余空间。") from error
+        if free < required_additional:
+            required_gib = required_additional / (1024**3)
+            free_gib = free / (1024**3)
+            raise OSError(
+                f"更新安装空间不足：解压、回滚和安全余量至少需要 "
+                f"{required_gib:.1f} GB，当前可用 {free_gib:.1f} GB。"
+            )
+        return {
+            "compressed_bytes": compressed,
+            "uncompressed_bytes": uncompressed,
+            "backup_bytes": backup,
+            "headroom_bytes": UPDATE_SPACE_HEADROOM_BYTES,
+            "total_peak_bytes": total,
+            "required_additional_bytes": required_additional,
+            "free_bytes": free,
+        }
 
     def _safe_interval_minutes(self) -> float:
         try:
@@ -646,6 +991,7 @@ class UpdateManager:
         self, client: Any, manifest: Mapping[str, Any]
     ) -> dict[str, Any]:
         checked = validate_update_manifest(manifest)
+        self._ensure_download_space(checked)
         version_directory = (self.cache_root / checked["version"]).resolve()
         version_directory.relative_to(self.cache_root)
         version_directory.mkdir(parents=True, exist_ok=True)
@@ -667,6 +1013,9 @@ class UpdateManager:
             if file_sha256(destination) != checked["sha256"]:
                 raise ValueError("下载后的更新包 SHA-256 校验失败。")
             inspect_update_package(destination, expected_version=checked["version"])
+            space_requirements = self._apply_space_requirements(
+                destination, checked
+            )
         except BaseException:
             try:
                 destination.unlink()
@@ -685,6 +1034,8 @@ class UpdateManager:
             "manifest": checked,
             "package_path": str(destination),
             "install_root": str(self.install_root()),
+            "update_storage_root": str(self.storage_root),
+            "space_requirements": space_requirements,
         }
         self._write_json_atomic(self.pending_path, marker)
         self._pending_ready = True
@@ -715,6 +1066,7 @@ class UpdateManager:
                     "error": "",
                 }
             )
+        self._cleanup_update_storage()
         return self.status()
 
     def schedule_on_restart(self) -> dict[str, Any]:
@@ -728,13 +1080,15 @@ class UpdateManager:
             raise ValueError("更新包大小与清单不一致，请重新下载。")
         if file_sha256(package) != manifest["sha256"]:
             raise ValueError("更新包校验失败，请重新下载。")
-        inspect_update_package(package, expected_version=manifest["version"])
+        space_requirements = self._apply_space_requirements(package, manifest)
         marker = {
             "schema_version": 1,
             "scheduled_at": utc_now(),
             "manifest": manifest,
             "package_path": str(package),
             "install_root": str(self.install_root()),
+            "update_storage_root": str(self.storage_root),
+            "space_requirements": space_requirements,
         }
         self._write_json_atomic(self.pending_path, marker)
         self._pending_ready = True
@@ -805,6 +1159,20 @@ class UpdateManager:
                     }
                 )
             return False
+        with self._lock:
+            manifest = dict(self._manifest) if self._manifest else None
+            package_value = str(self._status.get("package_path") or "").strip()
+        if manifest is None or not package_value:
+            return False
+        package = Path(package_value).resolve(strict=True)
+        space_requirements = self._apply_space_requirements(package, manifest)
+        try:
+            marker = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            raise RuntimeError("待安装更新记录无法读取。") from error
+        marker["update_storage_root"] = str(self.storage_root)
+        marker["space_requirements"] = space_requirements
+        self._write_json_atomic(self.pending_path, marker)
         self._write_windows_worker()
         self._launcher(self.worker_path, self.pending_path, os.getpid())
         with self._lock:
@@ -824,17 +1192,44 @@ class UpdateManager:
   [Parameter(Mandatory=$true)][int]$ParentPid
 )
 $ErrorActionPreference = 'Stop'
+function Write-JsonUtf8NoBom([string]$Path, [object]$Value, [int]$Depth = 12) {
+  $json = $Value | ConvertTo-Json -Depth $Depth
+  [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+}
 $marker = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $package = [IO.Path]::GetFullPath([string]$marker.package_path)
 $installRoot = [IO.Path]::GetFullPath([string]$marker.install_root)
+$storageRoot = [IO.Path]::GetDirectoryName($MarkerPath)
+if ($null -ne $marker.update_storage_root -and -not [string]::IsNullOrWhiteSpace([string]$marker.update_storage_root)) {
+  $storageRoot = [IO.Path]::GetFullPath([string]$marker.update_storage_root)
+}
+$resultPath = Join-Path ([IO.Path]::GetDirectoryName($MarkerPath)) 'last-update-result.json'
 $expected = ([string]$marker.manifest.sha256).ToLowerInvariant()
 $version = [string]$marker.manifest.version
 $entrypoint = ([string]$marker.manifest.entrypoint).Replace('/', [IO.Path]::DirectorySeparatorChar)
 try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
 if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) { throw 'StoryForge is still running; update deferred.' }
+$installedEntryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
+Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+  try {
+    if ($_.Id -ne $PID -and [string]::Equals($_.Path, $installedEntryPath, [StringComparison]::OrdinalIgnoreCase)) {
+      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
+Start-Sleep -Milliseconds 500
 $actual = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'StoryForge update SHA-256 verification failed.' }
-$workRoot = Join-Path ([IO.Path]::GetDirectoryName($MarkerPath)) ('apply-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $storageRoot -Force | Out-Null
+$requiredAdditional = 0
+if ($null -ne $marker.space_requirements -and $null -ne $marker.space_requirements.required_additional_bytes) {
+  $requiredAdditional = [int64]$marker.space_requirements.required_additional_bytes
+}
+if ($requiredAdditional -gt 0) {
+  $storageDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($storageRoot))
+  if ($storageDrive.AvailableFreeSpace -lt $requiredAdditional) { throw 'Insufficient disk space to stage and roll back the StoryForge update.' }
+}
+$workRoot = Join-Path $storageRoot ('apply-' + [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $workRoot 'stage'
 $backup = Join-Path $workRoot 'backup'
 New-Item -ItemType Directory -Path $stage,$backup -Force | Out-Null
@@ -851,8 +1246,11 @@ try {
     [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
   }
 } finally { $zip.Dispose() }
+$stageEntryPath = [IO.Path]::GetFullPath((Join-Path $stage $entrypoint))
+if (-not (Test-Path -LiteralPath $stageEntryPath -PathType Leaf)) { throw 'Updated StoryForge entrypoint is missing from the staged package.' }
 $copied = New-Object System.Collections.Generic.List[string]
 $created = New-Object System.Collections.Generic.List[string]
+$launched = $null
 try {
   $stageFiles = Get-ChildItem -LiteralPath $stage -File -Recurse
   foreach ($source in $stageFiles) {
@@ -872,7 +1270,25 @@ try {
     $copied.Add($relative)
     Copy-Item -LiteralPath $source.FullName -Destination $target -Force
   }
+  $entryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
+  if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) { throw 'Updated StoryForge entrypoint is missing.' }
+  $marker | Add-Member -NotePropertyName installing -NotePropertyValue $true -Force
+  $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+  $marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue $workRoot -Force
+  Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+  if ([IO.Path]::GetExtension($entryPath).ToLowerInvariant() -eq '.py') {
+    $pythonw = Join-Path $installRoot '.build-venv\Scripts\pythonw.exe'
+    $python = Join-Path $installRoot '.build-venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $pythonw -PathType Leaf) { $launched = Start-Process -FilePath $pythonw -ArgumentList @($entryPath) -WorkingDirectory $installRoot -PassThru }
+    elseif (Test-Path -LiteralPath $python -PathType Leaf) { $launched = Start-Process -FilePath $python -ArgumentList @($entryPath) -WorkingDirectory $installRoot -PassThru }
+    else { throw 'Updated StoryForge Python runtime is missing.' }
+  } else {
+    $launched = Start-Process -FilePath $entryPath -WorkingDirectory $installRoot -PassThru
+  }
+  Start-Sleep -Seconds 4
+  if ($null -eq $launched -or $launched.HasExited) { throw 'Updated StoryForge failed its startup health check.' }
 } catch {
+  $failureMessage = [string]$_.Exception.Message
   foreach ($relative in $copied) {
     $backupTarget = Join-Path $backup $relative
     $target = Join-Path $installRoot $relative
@@ -882,23 +1298,29 @@ try {
     $target = Join-Path $installRoot $relative
     if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
   }
+  try {
+    $marker | Add-Member -NotePropertyName installing -NotePropertyValue $false -Force
+    $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue '' -Force
+    $marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue '' -Force
+    $marker | Add-Member -NotePropertyName last_error -NotePropertyValue $failureMessage -Force
+    Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+  } catch {}
+  try {
+    Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='failed'; version=$version; failed_at=[DateTime]::UtcNow.ToString('o'); error=$failureMessage; rollback_available=$false }
+  } catch {}
+  Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
   throw
 }
+Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='installed'; version=$version; installed_at=[DateTime]::UtcNow.ToString('o'); backup_path=$backup; rollback_available=$true; health='process_alive' }
 Remove-Item -LiteralPath $MarkerPath -Force
-$resultPath = Join-Path ([IO.Path]::GetDirectoryName($MarkerPath)) 'last-update-result.json'
-@{ status='installed'; version=$version; installed_at=[DateTime]::UtcNow.ToString('o'); backup_path=$backup } | ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue
+try {
+  $packageDirectory = [IO.Path]::GetDirectoryName($package)
+  if ($null -eq (Get-ChildItem -LiteralPath $packageDirectory -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+    Remove-Item -LiteralPath $packageDirectory -Force -ErrorAction SilentlyContinue
+  }
+} catch {}
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-$entryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
-if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) { throw 'Updated StoryForge entrypoint is missing.' }
-if ([IO.Path]::GetExtension($entryPath).ToLowerInvariant() -eq '.py') {
-  $pythonw = Join-Path $installRoot '.build-venv\Scripts\pythonw.exe'
-  $python = Join-Path $installRoot '.build-venv\Scripts\python.exe'
-  if (Test-Path -LiteralPath $pythonw -PathType Leaf) { Start-Process -FilePath $pythonw -ArgumentList @($entryPath) -WorkingDirectory $installRoot }
-  elseif (Test-Path -LiteralPath $python -PathType Leaf) { Start-Process -FilePath $python -ArgumentList @($entryPath) -WorkingDirectory $installRoot }
-  else { throw 'Updated StoryForge Python runtime is missing.' }
-} else {
-  Start-Process -FilePath $entryPath -WorkingDirectory $installRoot
-}
 '''
         self.worker_path.write_text(script, encoding="utf-8", newline="\n")
 

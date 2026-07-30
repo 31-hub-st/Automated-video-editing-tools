@@ -1668,6 +1668,63 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('.hub-settings-card[data-mode="client"] .hub-admin-machine-fields', css)
         self.assertIn(".hub-connection-advanced", css)
 
+    def test_job_polling_is_incremental_and_recovers_after_network_errors(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="queue-sync-status"', html)
+        self.assertIn("function jobsVisualSignature(jobs)", javascript)
+        self.assertIn("const jobsChanged = nextJobsSignature !== state.jobVisualSignature", javascript)
+        self.assertIn("scheduleJobPoll(retryDelay, pollEpoch)", javascript)
+        self.assertIn("Math.min(15000", javascript)
+        self.assertNotIn("window.setInterval(pollJobs, 1200)", javascript)
+        self.assertIn('document.body.classList.toggle("production-resource-busy"', javascript)
+        self.assertIn("body.production-resource-busy .video-preview", css)
+
+    def test_job_polling_epoch_prevents_stale_session_writes(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("pollEpoch: 0", javascript)
+        self.assertIn("async function pollJobs(pollEpoch = state.pollEpoch)", javascript)
+        self.assertIn(
+            "if (!state.pollEnabled || pollEpoch !== state.pollEpoch) return;",
+            javascript,
+        )
+        stop_start = javascript.index("  function stopPolling()")
+        stop_end = javascript.index("\n  function bindEvents()", stop_start)
+        stop_body = javascript[stop_start:stop_end]
+        self.assertIn("state.pollEpoch += 1", stop_body)
+        self.assertNotIn("state.pollInFlight = false", stop_body)
+        self.assertIn(
+            "if (state.pollEnabled && pollEpoch !== state.pollEpoch && !state.pollTimer)",
+            javascript,
+        )
+
+    def test_visible_production_records_refresh_with_throttle_and_terminal_priority(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const RECORD_POLL_INTERVAL_MS = 3000", javascript)
+        self.assertIn("function scheduleProductionRecordRefresh", javascript)
+        self.assertIn("function runScheduledProductionRecordRefresh", javascript)
+        self.assertIn(
+            "if (before !== job.status && terminalStatuses.has(job.status))",
+            javascript,
+        )
+        self.assertIn(
+            "scheduleProductionRecordRefresh({ urgent: recordRefreshNeeded });",
+            javascript,
+        )
+        self.assertIn("expectedPollEpoch !== state.pollEpoch", javascript)
+
+    def test_busy_preview_pauses_pseudo_element_animation(self) -> None:
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "body.production-resource-busy .video-preview .preview-media::before",
+            css,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

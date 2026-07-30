@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import hashlib
 import importlib.util
 import io
@@ -48,6 +49,11 @@ _SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _TTS_CACHE_SCHEMA = "storyforge-tts-wav-v1"
 _TTS_CACHE_LOCKS: dict[str, threading.RLock] = {}
 _TTS_CACHE_LOCKS_GUARD = threading.Lock()
+_TTS_CACHE_DEFAULT_MAX_BYTES = 5 * 1024 * 1024 * 1024
+_TTS_CACHE_DEFAULT_MAX_AGE_DAYS = 30.0
+_TTS_CACHE_PRUNE_INTERVAL_SECONDS = 15 * 60
+_TTS_CACHE_PRUNE_LOCK = threading.Lock()
+_TTS_CACHE_LAST_PRUNED: dict[str, float] = {}
 _KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
 _KOKORO_MODEL_FILES = ("config.json", "kokoro-v1_0.pth")
 _KOKORO_VOICE_IDS = ("af_heart", "af_bella", "af_nicole", "af_sarah")
@@ -769,6 +775,105 @@ def _default_tts_cache_dir() -> Path:
     return base / "StoryForgeStudio" / "tts"
 
 
+def prune_tts_cache(
+    cache_dir: str | Path | None = None,
+    *,
+    max_bytes: int = _TTS_CACHE_DEFAULT_MAX_BYTES,
+    max_age_days: float = _TTS_CACHE_DEFAULT_MAX_AGE_DAYS,
+) -> int:
+    """Best-effort removal of old or excess sentence WAV cache files.
+
+    Age pruning runs first, then the oldest remaining files are removed until
+    the cache fits ``max_bytes``.  The cache is only an optimization, so an
+    inaccessible directory or a file that another process currently owns is
+    skipped instead of turning synthesis or rendering into a failure.
+
+    The return value is the number of files successfully removed.
+    """
+
+    deleted = 0
+    try:
+        root = (
+            Path(cache_dir).expanduser().resolve()
+            if cache_dir is not None
+            else _default_tts_cache_dir()
+        )
+        byte_limit = max(0, int(max_bytes))
+        age_seconds = max(0.0, float(max_age_days)) * 24 * 60 * 60
+        if not root.is_dir():
+            return 0
+    except (OSError, TypeError, ValueError, OverflowError):
+        return 0
+
+    entries: list[tuple[float, int, Path]] = []
+    try:
+        for path in root.rglob("*.wav"):
+            try:
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                entries.append((float(stat.st_mtime), int(stat.st_size), path))
+            except OSError:
+                continue
+    except OSError:
+        # Keep any entries discovered before an unreadable directory.  They
+        # can still be pruned safely without making the whole pass fail.
+        pass
+
+    cutoff = time.time() - age_seconds
+    retained: list[tuple[float, int, Path]] = []
+    for modified_at, size, path in entries:
+        if modified_at < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                retained.append((modified_at, size, path))
+            else:
+                deleted += 1
+        else:
+            retained.append((modified_at, size, path))
+
+    total_bytes = sum(size for _modified_at, size, _path in retained)
+    if total_bytes <= byte_limit:
+        return deleted
+    for _modified_at, size, path in sorted(retained, key=lambda item: item[0]):
+        if total_bytes <= byte_limit:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        deleted += 1
+        total_bytes = max(0, total_bytes - size)
+    return deleted
+
+
+def _maybe_prune_tts_cache(cache_path: Path) -> None:
+    """Throttle automatic cache maintenance after successful cache writes."""
+
+    try:
+        cache_root = cache_path.parents[2]
+        cache_key = os.path.normcase(str(cache_root.resolve()))
+        now = time.monotonic()
+        with _TTS_CACHE_PRUNE_LOCK:
+            last_pruned = _TTS_CACHE_LAST_PRUNED.get(cache_key, 0.0)
+            if now - last_pruned < _TTS_CACHE_PRUNE_INTERVAL_SECONDS:
+                return
+            _TTS_CACHE_LAST_PRUNED[cache_key] = now
+            # A long-running Hub can see removable drives and per-user paths.
+            # Bound this bookkeeping independently from the disk cache itself.
+            if len(_TTS_CACHE_LAST_PRUNED) > 128:
+                oldest = sorted(
+                    _TTS_CACHE_LAST_PRUNED.items(), key=lambda item: item[1]
+                )[:64]
+                for old_key, _timestamp in oldest:
+                    if old_key != cache_key:
+                        _TTS_CACHE_LAST_PRUNED.pop(old_key, None)
+        prune_tts_cache(cache_root)
+    except (OSError, IndexError):
+        pass
+
+
 def _cache_lock(cache_key: str) -> threading.RLock:
     """Serialize identical synthesis within this process.
 
@@ -944,6 +1049,8 @@ class TTSProvider(ABC):
             # Caching is an optimization.  A read-only or full cache directory
             # must not turn a successful voice generation into a failed job.
             pass
+        else:
+            _maybe_prune_tts_cache(path)
 
     def _generate_sentence_atomically(
         self,
@@ -1716,6 +1823,59 @@ class EmbeddedKokoroProvider(TTSProvider):
     _pipelines: dict[str, Any] = {}
     _pipeline_lock = threading.RLock()
 
+    @classmethod
+    def release_cached_resources(cls) -> int:
+        """Release in-process Kokoro models before memory-heavy rendering.
+
+        Only StoryForge's class-level ownership is removed.  A synthesis that
+        is already using a pipeline keeps its own live reference and remains
+        safe; once it finishes, normal garbage collection can reclaim it too.
+        CUDA allocator cleanup is deliberately best-effort because CPU-only
+        installs and partially available PyTorch runtimes are both supported.
+        """
+
+        with cls._pipeline_lock:
+            released = len(cls._pipelines)
+            cached_pipelines = tuple(cls._pipelines.values())
+            cls._pipelines.clear()
+            # Drop every temporary strong reference before collecting cycles.
+            del cached_pipelines
+            loaded_torch = sys.modules.get("torch")
+            if released == 0 and loaded_torch is None:
+                # Edge/Deepgram/HTTP Kokoro jobs must not import the heavyweight
+                # local ML runtime merely to release a cache that never existed.
+                return released
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            if loaded_torch is None:
+                try:
+                    import torch
+                except (ImportError, OSError):
+                    return released
+            else:
+                torch = loaded_torch
+            cuda = getattr(torch, "cuda", None)
+            if cuda is None:
+                return released
+            is_available = getattr(cuda, "is_available", None)
+            if callable(is_available):
+                try:
+                    if not is_available():
+                        return released
+                except Exception:
+                    return released
+            for operation_name in ("empty_cache", "ipc_collect"):
+                operation = getattr(cuda, operation_name, None)
+                if not callable(operation):
+                    continue
+                try:
+                    operation()
+                except Exception:
+                    pass
+            return released
+
     def __init__(
         self, config: ProviderConfig, transport: HTTPTransport | None = None
     ) -> None:
@@ -1927,6 +2087,12 @@ class EmbeddedKokoroProvider(TTSProvider):
         return buffer.getvalue()
 
 
+def release_embedded_kokoro_runtime() -> int:
+    """Public rendering-boundary hook for releasing cached Kokoro models."""
+
+    return EmbeddedKokoroProvider.release_cached_resources()
+
+
 def create_tts_provider(
     config: ProviderConfig | Any = None,
     *,
@@ -1975,6 +2141,8 @@ __all__ = [
     "TTSVoiceOption",
     "create_tts_provider",
     "clear_edge_voice_cache",
+    "prune_tts_cache",
+    "release_embedded_kokoro_runtime",
     "edge_female_voice_candidates",
     "edge_tts_runtime_available",
     "female_voice_candidates",

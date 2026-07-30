@@ -60,8 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _wait_for_stop() -> None:
-    stop = threading.Event()
+def _wait_for_stop(stop: threading.Event | None = None) -> None:
+    stop = stop or threading.Event()
 
     def request_stop(_signum: int, _frame: object) -> None:
         stop.set()
@@ -92,21 +92,45 @@ def _run_local_worker_service(api: object, ui_root: Path) -> dict[str, object]:
     ).strip():
         raise RuntimeError("请先在 StoryForge 中登录员工账号并完成这台电脑的绑定。")
 
-    server = api._ensure_local_worker_server(
-        Path(ui_root).resolve(),
-        serve_ui=True,
-        use_port_override=False,
-    )
-    health = dict(server.worker_gateway.health())
-    runtime = dict(server.worker_gateway.runtime_snapshot())
-    print(
-        "StoryForge Local Worker: "
-        f"{server.base_url} | {runtime.get('ffmpeg_label', 'FFmpeg')} | "
-        f"ready={bool(health.get('ready'))}",
-        flush=True,
-    )
-    _wait_for_stop()
-    return {"url": server.base_url, "health": health, "runtime": runtime}
+    stop = threading.Event()
+    attach_exit = getattr(api, "_attach_process_exit_callback", None)
+    if callable(attach_exit):
+        attach_exit(stop.set)
+    try:
+        server = api._ensure_local_worker_server(
+            Path(ui_root).resolve(),
+            serve_ui=True,
+            use_port_override=False,
+        )
+        health = dict(server.worker_gateway.health())
+        runtime = dict(server.worker_gateway.runtime_snapshot())
+        print(
+            "StoryForge Local Worker: "
+            f"{server.base_url} | {runtime.get('ffmpeg_label', 'FFmpeg')} | "
+            f"ready={bool(health.get('ready'))}",
+            flush=True,
+        )
+
+        # A verified package may have been scheduled before Windows restarted
+        # the long-running Worker.  Do not leave that package waiting forever:
+        # once the loopback server is healthy and rendering is idle, let the
+        # Worker own the normal shutdown/apply handoff.
+        update_manager = getattr(api, "_update_manager", None)
+        if update_manager is not None:
+            try:
+                update_status = dict(update_manager.status())
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                update_status = {}
+            if bool(update_status.get("apply_on_restart")) and not bool(
+                update_status.get("rendering_busy")
+            ):
+                stop.set()
+
+        _wait_for_stop(stop)
+        return {"url": server.base_url, "health": health, "runtime": runtime}
+    finally:
+        if callable(attach_exit):
+            attach_exit(None)
 
 
 def _enforce_safe_worker_handoff(status: dict[str, object]) -> None:
@@ -191,22 +215,18 @@ def main(argv: list[str] | None = None) -> int:
             args.startup_self_test,
             ui_root=resource_path("ui"),
         )
-    if not args.local_worker:
-        # An idle background worker yields its queue to the full desktop. A
-        # busy worker keeps ownership and supplies the desktop's HTTP page, so
-        # opening the app never interrupts or restores the same task twice.
-        from .worker import pause_local_worker_autostart_for_desktop
+    if not args.local_worker and not args.web_only:
+        # The long-running local Worker is the sole owner of this computer's
+        # render queue.  The desktop executable is only a viewer/client when
+        # that Worker already exists; it must never stop an idle Worker and
+        # create a second queue owner merely because a window was opened.
+        from .worker import discover_local_production_worker
 
-        pause_status = pause_local_worker_autostart_for_desktop()
-        if (
-            not args.web_only
-            and str(pause_status.get("state") or "") == "busy"
-            and pause_status.get("endpoint")
-        ):
+        existing_worker = discover_local_production_worker()
+        if existing_worker and existing_worker.get("endpoint"):
             return _open_existing_worker_window(
-                pause_status["endpoint"], debug=args.debug
+                existing_worker["endpoint"], debug=args.debug
             )
-        _enforce_safe_worker_handoff(pause_status)
 
     from .api import StoryForgeApi
     from .pipeline import PipelineRunner
@@ -220,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             lambda: api._state.settings,
             text_provider_factory=api._runtime_text_provider_factory,
             work_root=api._repository.data_dir / "render-work",
+            heavy_resource_lock=api._heavy_resource_lock,
         )
     )
     page = resource_path("ui/index.html")

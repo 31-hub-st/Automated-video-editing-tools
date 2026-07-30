@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -11,6 +12,50 @@ from unittest.mock import patch
 
 import run
 from storyforge import main as storyforge_main
+from storyforge import system as storyforge_system
+
+
+class EncoderRuntimeTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        storyforge_system._runtime_encoder_works.cache_clear()
+        storyforge_system.available_encoders.cache_clear()
+        with storyforge_system._DISABLED_ENCODERS_LOCK:
+            storyforge_system._DISABLED_ENCODERS.clear()
+
+    def test_hardware_probe_uses_delivery_resolution_and_frame_rate(self) -> None:
+        observed: list[str] = []
+
+        def run(command, **_kwargs):
+            observed.extend(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("storyforge.system.run_cancellable_process", side_effect=run):
+            self.assertTrue(
+                storyforge_system._runtime_encoder_works(
+                    "fake-ffmpeg.exe",
+                    "h264_nvenc",
+                )
+            )
+
+        self.assertIn("color=c=black:s=1080x1920:r=60:d=0.25", observed)
+        self.assertEqual(observed[observed.index("-frames:v") + 1], "15")
+
+    def test_failed_hardware_encoder_is_disabled_for_the_session(self) -> None:
+        executable = Path("fake-ffmpeg.exe").resolve()
+        storyforge_system.mark_encoder_unavailable(executable, "h264_nvenc")
+
+        def run(command, **_kwargs):
+            self.assertIn("-encoders", command)
+            return SimpleNamespace(
+                returncode=0,
+                stdout="V..... h264_nvenc\nV..... libx264\n",
+                stderr="",
+            )
+
+        with patch("storyforge.system.run_cancellable_process", side_effect=run):
+            encoders = storyforge_system.available_encoders(executable)
+
+        self.assertEqual(encoders, ["libx264"])
 
 
 class StartupDiagnosticsTests(unittest.TestCase):
@@ -81,23 +126,75 @@ class StartupDiagnosticsTests(unittest.TestCase):
         ):
             status = storyforge_main._run_local_worker_service(FakeApi(), Path(temporary))
 
-        wait.assert_called_once_with()
+        wait.assert_called_once()
+        self.assertIsInstance(wait.call_args.args[0], threading.Event)
+        self.assertFalse(wait.call_args.args[0].is_set())
         self.assertEqual(calls, [(Path(temporary).resolve(), True, False)])
         self.assertEqual(status["url"], "http://127.0.0.1:18765")
         self.assertTrue(status["runtime"]["ffmpeg_ready"])
 
-    def test_existing_busy_worker_opens_its_ui_without_creating_second_api(self) -> None:
-        busy = {
-            "state": "busy",
-            "worker_running": True,
-            "rendering_busy": True,
-            "queue_busy": True,
+    def test_local_worker_applies_a_pending_update_on_start_when_idle(self) -> None:
+        callbacks: list[object] = []
+        gateway = SimpleNamespace(
+            health=lambda: {"ready": True},
+            runtime_snapshot=lambda: {"ffmpeg_ready": True},
+        )
+        server = SimpleNamespace(
+            base_url="http://127.0.0.1:18765",
+            worker_gateway=gateway,
+        )
+
+        class FakeApi:
+            _runtime_hub_mode = "client"
+            _state = SimpleNamespace(
+                settings=SimpleNamespace(
+                    hub=SimpleNamespace(
+                        access_token="device-token",
+                        device_id="device-1",
+                    )
+                )
+            )
+            _update_manager = SimpleNamespace(
+                status=lambda: {
+                    "apply_on_restart": True,
+                    "rendering_busy": False,
+                }
+            )
+
+            def _attach_process_exit_callback(self, callback):
+                callbacks.append(callback)
+
+            def _ensure_local_worker_server(self, *_args, **_kwargs):
+                return server
+
+        observed: list[bool] = []
+
+        def wait(stop: threading.Event) -> None:
+            observed.append(stop.is_set())
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(storyforge_main, "_wait_for_stop", side_effect=wait),
+            redirect_stdout(io.StringIO()),
+        ):
+            storyforge_main._run_local_worker_service(
+                FakeApi(), Path(temporary)
+            )
+
+        self.assertEqual(observed, [True])
+        self.assertTrue(callable(callbacks[0]))
+        self.assertIsNone(callbacks[-1])
+
+    def test_existing_worker_always_opens_its_ui_without_creating_second_api(self) -> None:
+        worker = {
+            "rendering_busy": False,
+            "queue_busy": False,
             "endpoint": "http://127.0.0.1:18765",
         }
         with (
             patch(
-                "storyforge.worker.pause_local_worker_autostart_for_desktop",
-                return_value=busy,
+                "storyforge.worker.discover_local_production_worker",
+                return_value=worker,
             ),
             patch(
                 "storyforge.api.StoryForgeApi",

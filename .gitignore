@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+.build-venv/
+build/
+dist/
+*.spec
+!StoryForge.spec
+*.log
+.storyforge/
+models/
+output/

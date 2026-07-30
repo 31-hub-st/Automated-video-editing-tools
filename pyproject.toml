@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storyforge-studio"
+dynamic = ["version"]
+description = "Local-first batch studio for narrated vertical novel videos"
+requires-python = ">=3.11"
+dependencies = [
+  "imageio-ffmpeg>=0.6,<1",
+  "pywebview>=5,<7",
+]
+
+[project.scripts]
+storyforge = "storyforge.main:main"
+
+[tool.setuptools]
+packages = ["storyforge", "storyforge.services", "storyforge.providers"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "storyforge.__version__"}

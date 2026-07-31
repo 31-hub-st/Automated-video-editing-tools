@@ -30,6 +30,10 @@
     recordPollPending: false,
     recordPollUrgent: false,
     recordPollLastAt: 0,
+    recordRefreshEpoch: 0,
+    recordLoadRequestId: 0,
+    recordManualRefreshInFlight: false,
+    productionRecordCacheAuthoritative: false,
     previousJobStates: new Map(),
     novels: [],
     publishingAccounts: [],
@@ -39,6 +43,8 @@
     softwareUsers: [],
     selectedSoftwareUserId: "",
     hubRuntimeStatus: null,
+    hubBackups: [],
+    hubBackupStatus: null,
     updateStatus: null,
     browserUpdateDownloadUrl: "",
     stylePreviewScene: "intro",
@@ -525,6 +531,19 @@
       endpoint: "http://127.0.0.1:8765",
       device_name: "Studio-PC-01",
       restart_required: false,
+    },
+    hub_backups: [
+      { id: "demo-backup-1", reason: "daily", created_at: "2026-07-31T03:00:00Z", archive_size_bytes: 12648448, content_sha256: "9e516c89752488cc9b8acbb5d12d34a14d37a2b88a514c55ef8ff18b66d675a1", valid: true },
+      { id: "demo-backup-2", reason: "manual", created_at: "2026-07-30T03:00:00Z", archive_size_bytes: 12451840, content_sha256: "48bde9f36b0888b926d8bf9d272b2b58b856d7dcda953678eb48c47fedbc56cb", valid: true },
+    ],
+    hub_backup_status: {
+      state: "ready",
+      enabled: true,
+      running: true,
+      max_snapshots: 3,
+      last_backup_at: "2026-07-31T03:00:00Z",
+      last_deduplicated_at: "",
+      last_error: "",
     },
     device_sync: {
       state: "ready",
@@ -2326,6 +2345,13 @@
           const restartRequired = (hub.mode || "local") !== publicMode;
           return { ok: true, data: { ...structuredClone(runtime), configured_mode: hub.mode || "local", runtime_mode: runtimeMode, mode: publicMode, device_name: hub.device_name || "This PC", endpoint: hub.endpoint || "", listen_port: Number(hub.listen_port || 8765), running, connected, online: ready, status: ready ? "ready" : "offline", restart_required: restartRequired, message: restartRequired ? "设置已保存，请重启 StoryForge 让模式切换生效。" : publicMode === "host" ? "本机 Hub 已准备长期运行。" : publicMode === "client" ? "已连接 StoryForge Hub。" : "本机独立运行，不同步其他电脑。" } };
         }
+        if (method === "list_hub_backups") {
+          return { ok: true, data: { items: structuredClone(browserMockState.hub_backups), total: browserMockState.hub_backups.length, status: structuredClone(browserMockState.hub_backup_status) } };
+        }
+        if (method === "create_hub_backup") {
+          Object.assign(browserMockState.hub_backup_status, { state: "ready", last_deduplicated_at: new Date().toISOString(), last_error: "" });
+          return { ok: true, data: { snapshot: { ...structuredClone(browserMockState.hub_backups[0]), created: false, deduplicated: true }, status: structuredClone(browserMockState.hub_backup_status) } };
+        }
         if (method === "connect_hub_with_password") {
           const [endpoint, username, password, deviceName] = args;
           if (!endpoint || !username || !password || !deviceName) return { ok: false, error: "请输入员工账号和密码；连接设置会自动使用预设值。" };
@@ -2464,6 +2490,7 @@
       renderManagedDeviceWorkspace();
       renderDeviceSyncStatus();
       void refreshHubDeviceWorkspace({ silent: true });
+      void loadHubBackups({ silent: true });
       startManagedDeviceFleetPolling();
     }
     if (window.matchMedia("(max-width: 980px)").matches) window.scrollTo({ top: 0, behavior: "smooth" });
@@ -3032,7 +3059,9 @@
     const root = $("#library-failure-banner");
     if (!root) return;
     const failedLibrary = state.productionRecords.filter((item) => item.status === "failed");
-    const failedQueue = state.jobs.filter((item) => !item.archived && item.status === "failed");
+    const failedQueue = state.productionRecordCacheAuthoritative
+      ? []
+      : state.jobs.filter((item) => !item.archived && item.status === "failed");
     const count = failedLibrary.length + failedQueue.length;
     root.classList.toggle("is-hidden", count === 0);
     if (!count) return;
@@ -6029,7 +6058,78 @@
     }, 20_000);
   }
 
-  async function loadProductionRecordGroups({ silent = false, expectedPollEpoch = null } = {}) {
+  function syncProductionRecordCacheFromGroups(groups) {
+    const filtersAreClear = !(
+      state.recordStatusFilter
+      || state.recordNovelFilter
+      || state.recordBatchFilter
+      || state.recordMemberFilter
+      || state.recordDeviceFilter
+      || state.recordDateFrom
+      || state.recordDateTo
+      || state.recordTrashFilter
+    );
+    if (!filtersAreClear) return;
+    state.productionRecords = (groups?.items || []).flatMap((novel) =>
+      (novel.batches || []).flatMap((batch) =>
+        (batch.tasks || []).map((task) => ({ ...task })),
+      ),
+    );
+    state.productionRecordCacheAuthoritative = true;
+  }
+
+  function resetProductionRecordFilters() {
+    state.recordStatusFilter = "";
+    state.recordNovelFilter = "";
+    state.recordBatchFilter = "";
+    state.recordMemberFilter = "";
+    state.recordDeviceFilter = "";
+    state.recordDateFrom = "";
+    state.recordDateTo = "";
+    state.recordTrashFilter = false;
+    state.selectedRecordIds.clear();
+    [
+      "#record-status-filter",
+      "#record-novel-filter",
+      "#record-batch-filter",
+      "#record-member-filter",
+      "#record-device-filter",
+      "#record-date-from",
+      "#record-date-to",
+    ].forEach((selector) => {
+      const control = $(selector);
+      if (control) control.value = "";
+    });
+    if ($("#record-trash-filter")) $("#record-trash-filter").checked = false;
+    if ($("#record-select-all")) {
+      $("#record-select-all").checked = false;
+      $("#record-select-all").indeterminate = false;
+    }
+  }
+
+  function setProductionRecordRefreshProof(message, kind = "") {
+    const proof = $("#record-refresh-proof");
+    if (!proof) return;
+    proof.textContent = message;
+    proof.classList.toggle("is-success", kind === "success");
+    proof.classList.toggle("is-error", kind === "error");
+  }
+
+  function setProductionRecordFiltersBusy(busy) {
+    const root = $(".record-filter-grid");
+    root?.setAttribute("aria-busy", String(Boolean(busy)));
+    $$('select, input', root || document).forEach((control) => {
+      if (root?.contains(control)) control.disabled = Boolean(busy);
+    });
+  }
+
+  async function loadProductionRecordGroups({
+    silent = false,
+    expectedPollEpoch = null,
+    expectedRecordRefreshEpoch = null,
+    throwOnError = false,
+  } = {}) {
+    const requestId = ++state.recordLoadRequestId;
     const filters = {
       status: state.recordStatusFilter,
       novel_id: state.recordNovelFilter,
@@ -6044,15 +6144,64 @@
     };
     try {
       const groups = await checkedCall("get_production_record_groups", filters);
+      if (requestId !== state.recordLoadRequestId) return false;
       if (expectedPollEpoch !== null && expectedPollEpoch !== state.pollEpoch) return false;
+      if (expectedRecordRefreshEpoch !== null && expectedRecordRefreshEpoch !== state.recordRefreshEpoch) return false;
       state.productionRecordGroups = groups;
+      syncProductionRecordCacheFromGroups(groups);
     } catch (error) {
+      if (requestId !== state.recordLoadRequestId) return false;
       if (expectedPollEpoch !== null && expectedPollEpoch !== state.pollEpoch) return false;
-      state.productionRecordGroups = null;
+      if (expectedRecordRefreshEpoch !== null && expectedRecordRefreshEpoch !== state.recordRefreshEpoch) return false;
+      if (throwOnError) throw error;
       if (!silent && !isBrowserDemo) toast(error.message, "error");
+      return false;
     }
     renderRecords();
     return true;
+  }
+
+  async function refreshProductionRecords(button) {
+    if (state.recordManualRefreshInFlight) return;
+    state.recordManualRefreshInFlight = true;
+    state.recordRefreshEpoch += 1;
+    const refreshEpoch = state.recordRefreshEpoch;
+    if (state.recordPollTimer) window.clearTimeout(state.recordPollTimer);
+    state.recordPollTimer = null;
+    state.recordPollPending = false;
+    state.recordPollUrgent = false;
+    resetProductionRecordFilters();
+    setProductionRecordFiltersBusy(true);
+    setProductionRecordRefreshProof("正在从主电脑 Hub 重新读取…");
+    try {
+      await withBusyButton(button, "正在刷新…", async () => {
+        const loaded = await loadProductionRecordGroups({
+          silent: true,
+          expectedRecordRefreshEpoch: refreshEpoch,
+          throwOnError: true,
+        });
+        if (!loaded) throw new Error("刷新请求已被新的读取操作取代，请再试一次。");
+      });
+      state.recordPollLastAt = Date.now();
+      const total = groupedProductionTasks().length;
+      const refreshedAt = new Date().toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      setProductionRecordRefreshProof(`${refreshedAt} 已读取 ${total} 条最新记录`, "success");
+      toast("生产记录已从主电脑 Hub 刷新，旧筛选和本地旧记录已清除。", "info");
+    } catch (error) {
+      setProductionRecordRefreshProof("刷新失败，请检查主电脑 Hub 连接", "error");
+      toast(`生产记录刷新失败：${error.message}`, "error");
+    } finally {
+      setProductionRecordFiltersBusy(false);
+      state.recordManualRefreshInFlight = false;
+      if (state.recordPollPending && productionRecordsViewVisible()) {
+        scheduleProductionRecordRefresh({ urgent: state.recordPollUrgent });
+      }
+    }
   }
 
   function productionRecordsViewVisible() {
@@ -6068,15 +6217,20 @@
     }
     if (state.recordPollInFlight) return;
     const pollEpoch = state.pollEpoch;
+    const recordRefreshEpoch = state.recordRefreshEpoch;
     state.recordPollPending = false;
     state.recordPollUrgent = false;
     state.recordPollInFlight = true;
     state.recordPollLastAt = Date.now();
     try {
-      await loadProductionRecordGroups({ silent: true, expectedPollEpoch: pollEpoch });
+      await loadProductionRecordGroups({
+        silent: true,
+        expectedPollEpoch: pollEpoch,
+        expectedRecordRefreshEpoch: recordRefreshEpoch,
+      });
     } finally {
       state.recordPollInFlight = false;
-      if (state.recordPollPending && productionRecordsViewVisible()) {
+      if (!state.recordManualRefreshInFlight && state.recordPollPending && productionRecordsViewVisible()) {
         scheduleProductionRecordRefresh({ urgent: state.recordPollUrgent });
       }
     }
@@ -6086,6 +6240,7 @@
     if (!productionRecordsViewVisible()) return;
     state.recordPollPending = true;
     state.recordPollUrgent = state.recordPollUrgent || urgent;
+    if (state.recordManualRefreshInFlight) return;
     if (state.recordPollInFlight) return;
     const waitMs = state.recordPollUrgent
       ? 0
@@ -7959,6 +8114,7 @@
     $("#hub-port-field")?.classList.toggle("is-hidden", mode !== "host");
     $("#hub-account-connect-card")?.classList.toggle("is-hidden", mode !== "client");
     $("#update-host-panel")?.classList.toggle("is-hidden", mode !== "host");
+    $("#hub-backup-center")?.classList.toggle("is-hidden", mode !== "host");
     $("#managed-device-fleet")?.classList.toggle("is-hidden", mode !== "host");
     $("#device-sync-card")?.classList.toggle("is-hidden", mode !== "client");
     $("#save-hub-settings")?.classList.toggle("is-hidden", mode === "client");
@@ -8133,6 +8289,90 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function renderHubBackups() {
+    const items = Array.isArray(state.hubBackups) ? state.hubBackups : [];
+    const status = state.hubBackupStatus || {};
+    const stateRoot = $("#hub-backup-state");
+    const hasError = Boolean(status.last_error);
+    stateRoot?.classList.toggle("is-ready", !hasError && status.state !== "checking");
+    stateRoot?.classList.toggle("is-warn", hasError);
+    if (stateRoot?.querySelector("b")) {
+      stateRoot.querySelector("b").textContent = hasError
+        ? "需要检查"
+        : status.state === "checking"
+          ? "正在校验"
+          : "备份正常";
+    }
+    if ($("#hub-backup-count")) $("#hub-backup-count").textContent = `${items.filter((item) => item.valid !== false).length} 份`;
+    if ($("#hub-backup-size")) {
+      const bytes = items.reduce((sum, item) => sum + Number(item.archive_size_bytes || 0), 0);
+      $("#hub-backup-size").textContent = bytes ? formatFileSize(bytes) : "0 MB";
+    }
+    if ($("#hub-backup-limit")) $("#hub-backup-limit").textContent = `最多 ${Number(status.max_snapshots || 3)} 份`;
+    const lastChecked = status.last_deduplicated_at || status.last_backup_at || items[0]?.created_at;
+    if ($("#hub-backup-last")) $("#hub-backup-last").textContent = formatUpdateTime(lastChecked);
+    const message = $("#hub-backup-message");
+    if (message) {
+      message.classList.toggle("is-error", hasError);
+      message.textContent = hasError
+        ? `备份检查失败：${status.last_error}`
+        : items.length
+          ? "所有列出的备份都已完成完整性校验；相同内容不会重复占用硬盘。"
+          : "还没有有效备份，点击“立即检查并备份”创建第一份。";
+    }
+    const list = $("#hub-backup-list");
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = '<div class="hub-backup-empty">还没有有效备份</div>';
+      return;
+    }
+    const reasonLabels = { daily: "每日自动", manual: "手动检查", pre_upgrade: "升级前", pre_bulk_delete: "批量删除前" };
+    list.innerHTML = items.map((item, index) => `
+      <article class="hub-backup-item">
+        <span class="hub-backup-index">${String(index + 1).padStart(2, "0")}</span>
+        <div><b>${escapeHtml(reasonLabels[item.reason] || "安全备份")}</b><small>${escapeHtml(formatUpdateTime(item.created_at))} · ${escapeHtml(formatFileSize(item.archive_size_bytes))}</small></div>
+        <code>${escapeHtml(String(item.content_sha256 || item.manifest_sha256 || "").slice(0, 10) || "已校验")}</code>
+        <em>${item.valid === false ? "损坏" : "有效"}</em>
+      </article>
+    `).join("");
+  }
+
+  async function loadHubBackups({ silent = false } = {}) {
+    const configuredMode = $("#hub-mode")?.value || state.settings?.hub?.mode || "local";
+    if (configuredMode !== "host") return false;
+    try {
+      const data = await checkedCall("list_hub_backups");
+      state.hubBackups = Array.isArray(data?.items) ? data.items : [];
+      state.hubBackupStatus = data?.status || null;
+      renderHubBackups();
+      return true;
+    } catch (error) {
+      state.hubBackupStatus = { ...(state.hubBackupStatus || {}), state: "error", last_error: error.message };
+      renderHubBackups();
+      if (!silent) toast(`备份列表读取失败：${error.message}`, "error");
+      return false;
+    }
+  }
+
+  async function createHubBackup(button) {
+    try {
+      await withBusyButton(button, "正在校验…", async () => {
+        const data = await checkedCall("create_hub_backup");
+        state.hubBackupStatus = data?.status || state.hubBackupStatus;
+        await loadHubBackups({ silent: true });
+        toast(
+          data?.snapshot?.deduplicated
+            ? "资料内容没有变化，已复用现有备份，没有新增重复文件。"
+            : "主电脑备份已创建并完成完整性校验。",
+          "info",
+        );
+      });
+    } catch (error) {
+      toast(`备份失败：${error.message}`, "error");
+      await loadHubBackups({ silent: true });
+    }
   }
 
   function renderUpdateStatus(data = state.updateStatus || {}) {
@@ -8966,6 +9206,7 @@
     state.recordPollTimer = null;
     state.recordPollPending = false;
     state.recordPollUrgent = false;
+    state.recordRefreshEpoch += 1;
   }
 
   function bindEvents() {
@@ -9643,6 +9884,9 @@
     $("#record-trash-selected")?.addEventListener("click", (event) => void runSelectedRecordAction("trash", event.currentTarget));
     $("#record-restore-selected")?.addEventListener("click", (event) => void runSelectedRecordAction("restore", event.currentTarget));
     $("#record-delete-selected")?.addEventListener("click", (event) => void runSelectedRecordAction("delete", event.currentTarget));
+    $("#record-refresh")?.addEventListener("click", (event) => void refreshProductionRecords(event.currentTarget));
+    $("#refresh-hub-backups")?.addEventListener("click", (event) => void withBusyButton(event.currentTarget, "正在刷新…", () => loadHubBackups()));
+    $("#create-hub-backup")?.addEventListener("click", (event) => void createHubBackup(event.currentTarget));
     $("#safe-zone-toggle").addEventListener("change", (event) => {
       $("#safe-zone").classList.toggle("is-hidden", !event.target.checked);
     });

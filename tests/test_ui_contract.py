@@ -1734,6 +1734,47 @@ class StyleSettingsContractTests(unittest.TestCase):
         )
         self.assertIn("expectedPollEpoch !== state.pollEpoch", javascript)
 
+    def test_production_records_offer_authoritative_manual_refresh(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="record-refresh"', html)
+        self.assertIn('id="record-refresh-proof" role="status" aria-live="polite"', html)
+        self.assertIn("async function refreshProductionRecords(button)", javascript)
+        self.assertIn("resetProductionRecordFilters();", javascript)
+        self.assertIn("syncProductionRecordCacheFromGroups(groups);", javascript)
+        self.assertIn("state.recordRefreshEpoch += 1", javascript)
+        self.assertIn("const requestId = ++state.recordLoadRequestId;", javascript)
+        self.assertIn("requestId !== state.recordLoadRequestId", javascript)
+        self.assertIn(
+            "expectedRecordRefreshEpoch !== state.recordRefreshEpoch",
+            javascript,
+        )
+        self.assertIn("if (state.recordManualRefreshInFlight) return;", javascript)
+        self.assertIn(
+            '$("#record-refresh")?.addEventListener("click"',
+            javascript,
+        )
+        self.assertIn(".record-refresh-actions", css)
+        self.assertIn(".record-refresh-button", css)
+
+    def test_hub_backup_ui_explains_deduplication_and_three_copy_limit(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="hub-backup-center"', html)
+        self.assertIn("内容没变化就不重复备份", html)
+        self.assertIn('id="create-hub-backup"', html)
+        self.assertIn('id="refresh-hub-backups"', html)
+        self.assertIn('id="hub-backup-list"', html)
+        self.assertIn('checkedCall("list_hub_backups")', javascript)
+        self.assertIn('checkedCall("create_hub_backup")', javascript)
+        self.assertIn("data?.snapshot?.deduplicated", javascript)
+        self.assertIn("function renderHubBackups()", javascript)
+        self.assertIn(".hub-backup-center", css)
+
     def test_busy_preview_pauses_pseudo_element_animation(self) -> None:
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 

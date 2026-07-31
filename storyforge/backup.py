@@ -19,6 +19,7 @@ from uuid import uuid4
 
 BACKUP_SCHEMA_VERSION = 1
 DEFAULT_RETENTION = timedelta(hours=72)
+DEFAULT_MAX_SNAPSHOTS = 3
 PARTIAL_RETENTION = timedelta(hours=24)
 DEFAULT_DAILY_CHECK_SECONDS = 15 * 60
 BACKUP_EXTENSION = ".sfbak"
@@ -112,6 +113,42 @@ def _manifest_digest(value: Mapping[str, Any]) -> str:
     payload = dict(value)
     payload.pop("manifest_sha256", None)
     return hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def _content_digest(entries: list[dict[str, Any]]) -> str:
+    """Hash only validated restorable payloads, excluding snapshot metadata."""
+
+    if not isinstance(entries, list):
+        raise BackupValidationError("backup manifest files must be an array")
+    normalized: list[dict[str, Any]] = []
+    seen_casefold: set[str] = set()
+    for item in entries:
+        if not isinstance(item, Mapping):
+            raise BackupValidationError("backup manifest file entry is invalid")
+        member = _safe_archive_member(str(item.get("path") or ""))
+        name = member.as_posix()
+        folded = name.casefold()
+        if not _allowed_payload_member(member) or folded in seen_casefold:
+            raise BackupSecurityError(
+                f"backup manifest file is outside the allowlist or duplicated: {name}"
+            )
+        try:
+            size = int(item.get("size_bytes"))
+        except (TypeError, ValueError) as error:
+            raise BackupValidationError(
+                f"backup manifest size is invalid: {name}"
+            ) from error
+        digest = str(item.get("sha256") or "")
+        if size < 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise BackupValidationError(
+                f"backup manifest checksum is invalid: {name}"
+            )
+        seen_casefold.add(folded)
+        normalized.append(
+            {"path": name, "size_bytes": size, "sha256": digest}
+        )
+    normalized.sort(key=lambda item: str(item["path"]))
+    return hashlib.sha256(_canonical_json(normalized)).hexdigest()
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -339,6 +376,7 @@ class HubBackupManager:
         *,
         backup_dir: str | Path | None = None,
         retention: timedelta = DEFAULT_RETENTION,
+        max_snapshots: int = DEFAULT_MAX_SNAPSHOTS,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).expanduser().resolve()
@@ -349,7 +387,10 @@ class HubBackupManager:
         )
         if retention.total_seconds() <= 0:
             raise ValueError("retention must be positive")
+        if int(max_snapshots) <= 0:
+            raise ValueError("max_snapshots must be positive")
         self.retention = retention
+        self.max_snapshots = int(max_snapshots)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
         self._daily_stop = threading.Event()
@@ -365,6 +406,7 @@ class HubBackupManager:
             "last_backup_at": "",
             "last_backup_reason": "",
             "last_daily_at": "",
+            "last_deduplicated_at": "",
             "last_error": "",
             "next_check_at": "",
         }
@@ -389,6 +431,7 @@ class HubBackupManager:
                 "enabled": bool(self._daily_enabled),
                 "running": bool(thread is not None and thread.is_alive()),
                 "retention_hours": round(self.retention.total_seconds() / 3600, 3),
+                "max_snapshots": self.max_snapshots,
             }
         if not include_error:
             result["has_error"] = bool(result.pop("last_error", ""))
@@ -477,10 +520,17 @@ class HubBackupManager:
                 }
 
             snapshot = self.create_snapshot("daily", cleanup=True)
+            if snapshot.get("deduplicated"):
+                with self._lock:
+                    self._daily_date = current_date
+                    self._daily_snapshot_id = str(snapshot["id"])
+                    self._daily_snapshot_path = str(snapshot.get("path") or "")
+                    self._status["last_daily_at"] = _iso_utc(current)
             return {
-                "created": True,
+                "created": bool(snapshot.get("created", True)),
+                "deduplicated": bool(snapshot.get("deduplicated", False)),
                 "snapshot_id": str(snapshot["id"]),
-                "created_at": str(snapshot["created_at"]),
+                "created_at": str(snapshot.get("created_at") or ""),
             }
 
     def _daily_loop(self) -> None:
@@ -638,6 +688,7 @@ class HubBackupManager:
         *,
         metadata: Mapping[str, Any] | None = None,
         cleanup: bool = True,
+        deduplicate: bool = True,
     ) -> dict[str, Any]:
         reason = self._clean_reason(reason)
         created_at = self._now()
@@ -658,6 +709,43 @@ class HubBackupManager:
                     staging_root = Path(temporary)
                     catalog_schema, settings_schema = self._stage_sources(staging_root)
                     entries = self._staged_entries(staging_root)
+                    content_sha256 = _content_digest(entries)
+                    if deduplicate:
+                        for existing in self.list_snapshots(validate=True):
+                            if (
+                                existing.get("valid") is True
+                                and existing.get("content_sha256") == content_sha256
+                            ):
+                                result = dict(existing)
+                                result.update(
+                                    {
+                                        # The archive is reused, but the result still
+                                        # describes the operation the caller requested.
+                                        # Keep the physical archive reason separately so
+                                        # admin activity remains understandable.
+                                        "stored_reason": str(existing.get("reason") or ""),
+                                        "reason": reason,
+                                        "created": False,
+                                        "deduplicated": True,
+                                        "duplicate_of": str(existing.get("id") or ""),
+                                    }
+                                )
+                                if cleanup:
+                                    result["cleanup"] = self.cleanup(
+                                        now=created_at,
+                                        protected_content_sha256=content_sha256,
+                                    )
+                                    if not Path(str(result.get("path") or "")).is_file():
+                                        raise BackupError(
+                                            "deduplicated backup was removed during cleanup"
+                                        )
+                                with self._lock:
+                                    self._status["last_deduplicated_at"] = _iso_utc(
+                                        created_at
+                                    )
+                                    self._status["state"] = "ready"
+                                    self._status["last_error"] = ""
+                                return result
                     clean_metadata: dict[str, Any] = {}
                     if metadata is not None:
                         try:
@@ -679,6 +767,7 @@ class HubBackupManager:
                         "total_size_bytes": sum(
                             int(item["size_bytes"]) for item in entries
                         ),
+                        "content_sha256": content_sha256,
                         "files": entries,
                         "metadata": clean_metadata,
                     }
@@ -716,6 +805,8 @@ class HubBackupManager:
             result = self._validate_path(final_path, expected_id=backup_id)
             result["path"] = str(final_path)
             result["archive_size_bytes"] = final_path.stat().st_size
+            result["created"] = True
+            result["deduplicated"] = False
             if cleanup:
                 result["cleanup"] = self.cleanup(now=created_at)
             self._record_snapshot_success(result)
@@ -874,6 +965,27 @@ class HubBackupManager:
                 if declared_count != len(expected_entries) or declared_total != total_verified:
                     raise BackupValidationError("backup manifest totals do not match")
 
+                content_sha256 = _content_digest(
+                    [
+                        {
+                            "path": name,
+                            "size_bytes": expected["size_bytes"],
+                            "sha256": expected["sha256"],
+                        }
+                        for name, expected in expected_entries.items()
+                    ]
+                )
+                declared_content_sha256 = str(
+                    manifest.get("content_sha256") or content_sha256
+                )
+                if (
+                    not re.fullmatch(r"[0-9a-f]{64}", declared_content_sha256)
+                    or declared_content_sha256 != content_sha256
+                ):
+                    raise BackupValidationError(
+                        "backup content SHA-256 does not match"
+                    )
+
                 with tempfile.TemporaryDirectory(
                     prefix=".validate-", dir=self.backup_dir
                 ) as temporary:
@@ -898,6 +1010,7 @@ class HubBackupManager:
                     "file_count": len(expected_entries),
                     "total_size_bytes": total_verified,
                     "manifest_sha256": str(manifest["manifest_sha256"]),
+                    "content_sha256": content_sha256,
                     "metadata": dict(raw_metadata),
                     "valid": True,
                 }
@@ -982,12 +1095,19 @@ class HubBackupManager:
                             "file_count": manifest.get("file_count"),
                             "total_size_bytes": manifest.get("total_size_bytes"),
                             "manifest_sha256": manifest.get("manifest_sha256"),
+                            "content_sha256": _content_digest(manifest.get("files")),
                             "metadata": dict(raw_metadata),
                             "valid": None,
                         }
                     item["path"] = str(path)
                     item["archive_size_bytes"] = path.stat().st_size
-                except (BackupError, OSError, zipfile.BadZipFile) as error:
+                except (
+                    BackupError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    zipfile.BadZipFile,
+                ) as error:
                     item = {
                         "id": "",
                         "path": str(path),
@@ -1009,7 +1129,12 @@ class HubBackupManager:
             items.sort(key=sort_key, reverse=True)
             return items
 
-    def cleanup(self, *, now: datetime | None = None) -> dict[str, Any]:
+    def cleanup(
+        self,
+        *,
+        now: datetime | None = None,
+        protected_content_sha256: str = "",
+    ) -> dict[str, Any]:
         with self._lock:
             current = _utc(now) if now is not None else self._now()
             cutoff = current - self.retention
@@ -1071,10 +1196,27 @@ class HubBackupManager:
                         pass
 
             valid.sort(key=lambda item: (item[0], item[1].name), reverse=True)
-            newest_path = valid[0][1] if valid else None
+            retained_paths: set[Path] = set()
+            protected_hash = str(protected_content_sha256 or "").strip().lower()
+            if protected_hash:
+                if not re.fullmatch(r"[0-9a-f]{64}", protected_hash):
+                    raise ValueError("protected backup content SHA-256 is invalid")
+                for _created_at, path, inspected in valid:
+                    if inspected.get("content_sha256") == protected_hash:
+                        retained_paths.add(path)
+                        break
+
+            for index, (created_at, path, _inspected) in enumerate(valid):
+                if path in retained_paths:
+                    continue
+                if len(retained_paths) >= self.max_snapshots:
+                    break
+                if index == 0 or created_at >= cutoff:
+                    retained_paths.add(path)
+
             retained: list[str] = []
-            for created_at, path, _inspected in valid:
-                if path == newest_path or created_at >= cutoff:
+            for _created_at, path, _inspected in valid:
+                if path in retained_paths:
                     retained.append(str(path))
                     continue
                 try:
@@ -1101,6 +1243,7 @@ __all__ = [
     "BackupSecurityError",
     "BackupValidationError",
     "DEFAULT_DAILY_CHECK_SECONDS",
+    "DEFAULT_MAX_SNAPSHOTS",
     "DEFAULT_RETENTION",
     "HubBackupManager",
     "file_sha256",

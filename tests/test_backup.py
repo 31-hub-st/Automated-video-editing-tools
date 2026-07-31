@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -272,6 +273,9 @@ class HubBackupTests(unittest.TestCase):
         connection.close()
         self.clock.value = datetime(2026, 7, 20, 1, tzinfo=timezone.utc)
         first = self.manager.create_snapshot("daily", cleanup=False)
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Changed')")
+            changed.commit()
         self.clock.value = datetime(2026, 7, 21, 1, tzinfo=timezone.utc)
         second = self.manager.create_snapshot("pre_upgrade", cleanup=False)
         cleanup_time = datetime(2026, 7, 28, 1, tzinfo=timezone.utc)
@@ -289,8 +293,14 @@ class HubBackupTests(unittest.TestCase):
         now = datetime(2026, 7, 28, 12, tzinfo=timezone.utc)
         self.clock.value = now - timedelta(hours=73)
         expired = self.manager.create_snapshot("daily", cleanup=False)
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Recent')")
+            changed.commit()
         self.clock.value = now - timedelta(hours=71)
         recent = self.manager.create_snapshot("manual", cleanup=False)
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Newest')")
+            changed.commit()
         self.clock.value = now - timedelta(hours=1)
         newest = self.manager.create_snapshot("pre_bulk_delete", cleanup=False)
 
@@ -306,6 +316,9 @@ class HubBackupTests(unittest.TestCase):
         connection.close()
         first = self.manager.create_snapshot("daily", cleanup=False)
         self.clock.value += timedelta(hours=1)
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Edited')")
+            changed.commit()
         second = self.manager.create_snapshot(
             "manual", metadata={"note": "before edit"}, cleanup=False
         )
@@ -333,12 +346,79 @@ class HubBackupTests(unittest.TestCase):
         self.clock.value += timedelta(days=1)
         next_day = self.manager.ensure_daily_snapshot()
 
-        self.assertTrue(next_day["created"])
-        self.assertEqual(len(self.manager.list_snapshots(validate=True)), 2)
+        self.assertFalse(next_day["created"])
+        self.assertTrue(next_day["deduplicated"])
+        self.assertEqual(next_day["snapshot_id"], first["snapshot_id"])
+        self.assertEqual(len(self.manager.list_snapshots(validate=True)), 1)
         status = self.manager.status()
-        self.assertEqual(status["last_backup_id"], next_day["snapshot_id"])
+        self.assertEqual(status["last_backup_id"], first["snapshot_id"])
         self.assertEqual(status["last_backup_reason"], "daily")
+        self.assertTrue(status["last_deduplicated_at"])
         self.assertFalse(status["last_error"])
+
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Next day change')")
+            changed.commit()
+        self.clock.value += timedelta(days=1)
+        changed_day = self.manager.ensure_daily_snapshot()
+        self.assertTrue(changed_day["created"])
+        self.assertFalse(changed_day["deduplicated"])
+        self.assertEqual(len(self.manager.list_snapshots(validate=True)), 2)
+
+    def test_cleanup_never_keeps_more_than_three_valid_snapshots(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+        paths: list[Path] = []
+        for index in range(5):
+            if index:
+                with closing(sqlite3.connect(self.database_path)) as changed:
+                    changed.execute(
+                        "INSERT INTO stories(title) VALUES (?)", (f"Change {index}",)
+                    )
+                    changed.commit()
+            self.clock.value += timedelta(hours=1)
+            snapshot = self.manager.create_snapshot("manual", cleanup=False)
+            paths.append(Path(snapshot["path"]))
+
+        result = self.manager.cleanup(now=self.clock.value)
+
+        self.assertEqual(len(result["retained"]), 3)
+        self.assertFalse(paths[0].exists())
+        self.assertFalse(paths[1].exists())
+        self.assertTrue(all(path.exists() for path in paths[2:]))
+
+    def test_deduplicated_current_content_is_protected_from_cleanup(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+        snapshots: list[dict[str, object]] = []
+        snapshots.append(self.manager.create_snapshot("manual", cleanup=False))
+        original_catalog = self.extract_catalog(
+            snapshots[0]["path"], self.root / "original-catalog.sqlite3"
+        )
+        for index in range(1, 4):
+            with closing(sqlite3.connect(self.database_path)) as changed:
+                changed.execute(
+                    "INSERT INTO stories(title) VALUES (?)", (f"Version {index}",)
+                )
+                changed.commit()
+            self.clock.value += timedelta(hours=1)
+            snapshots.append(self.manager.create_snapshot("manual", cleanup=False))
+
+        for suffix in ("-wal", "-shm"):
+            self.database_path.with_name(self.database_path.name + suffix).unlink(
+                missing_ok=True
+            )
+        os.replace(original_catalog, self.database_path)
+        self.clock.value += timedelta(days=4)
+
+        duplicate = self.manager.create_snapshot("manual", cleanup=True)
+        remaining = self.manager.list_snapshots(validate=True)
+
+        self.assertTrue(duplicate["deduplicated"])
+        self.assertEqual(duplicate["id"], snapshots[0]["id"])
+        self.assertTrue(Path(str(duplicate["path"])).is_file())
+        self.assertLessEqual(len(remaining), 3)
+        self.assertIn(snapshots[0]["id"], {item["id"] for item in remaining})
 
     def test_daily_scheduler_starts_and_stops_cleanly(self) -> None:
         connection = self.create_catalog()

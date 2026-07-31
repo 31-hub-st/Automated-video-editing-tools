@@ -335,6 +335,12 @@
           <section class="panel record-panel">
             <div class="section-heading">
               <div><p class="section-kicker">ALL RUNS</p><h2>按小说归类的制作记录</h2></div>
+              <div class="record-refresh-actions">
+                <span id="record-refresh-proof" role="status" aria-live="polite">数据来自主电脑 Hub</span>
+                <button type="button" class="button button-primary record-refresh-button" id="record-refresh">
+                  <span aria-hidden="true">↻</span>刷新最新记录
+                </button>
+              </div>
             </div>
             <div class="record-filter-grid" aria-label="生产记录筛选">
               <label class="field record-filter"><span>状态</span><select id="record-status-filter"><option value="">全部状态</option><option value="active">制作中</option><option value="completed">成功</option><option value="failed">失败 / 中断</option><option value="cancelled">已取消</option></select></label>
@@ -1086,6 +1092,34 @@
                 <div class="update-host-actions"><span>发布后，已连接的制作电脑会在下一次检查时收到新版。</span><button type="button" class="button button-secondary" id="clear-published-update">撤回更新</button><button type="button" class="button button-primary" id="publish-update">发布给团队</button></div>
               </div>
             </div>
+          </section>
+          <section class="panel hub-backup-center hub-host-only settings-admin-only" id="hub-backup-center" aria-labelledby="hub-backup-title">
+            <div class="hub-backup-head">
+              <div>
+                <p class="section-kicker">SAFE BACKUP / 主机备份</p>
+                <h2 id="hub-backup-title">内容没变化就不重复备份</h2>
+                <p>小说库、平台、口令、成员和团队预设保存在主电脑；素材、成片和员工本机文件不会进入备份。</p>
+              </div>
+              <span class="hub-backup-state" id="hub-backup-state"><i></i><b>正在读取</b></span>
+            </div>
+            <div class="hub-backup-facts">
+              <div><small>有效备份</small><b id="hub-backup-count">—</b></div>
+              <div><small>本地占用</small><b id="hub-backup-size">—</b></div>
+              <div><small>保留上限</small><b id="hub-backup-limit">最多 3 份</b></div>
+              <div><small>最近检查</small><b id="hub-backup-last">尚未检查</b></div>
+            </div>
+            <div class="hub-backup-body">
+              <div class="hub-backup-policy">
+                <span aria-hidden="true">✓</span>
+                <div><b>自动去重与限量保留</b><small>只在资料内容改变时新增；始终保护当前有效版本，校验成功后才清理旧备份。</small></div>
+              </div>
+              <div class="hub-backup-actions">
+                <button type="button" class="button button-secondary" id="refresh-hub-backups">刷新列表</button>
+                <button type="button" class="button button-primary" id="create-hub-backup">立即检查并备份</button>
+              </div>
+            </div>
+            <p class="hub-backup-message" id="hub-backup-message" role="status" aria-live="polite">正在读取主电脑备份状态…</p>
+            <div class="hub-backup-list" id="hub-backup-list"><div class="hub-backup-empty">正在读取有效备份…</div></div>
           </section>
         </section>
       </main>

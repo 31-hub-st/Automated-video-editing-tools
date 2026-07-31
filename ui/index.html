@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>StoryForge Studio</title>
+    <link rel="stylesheet" href="styles.css?v=32" />
+  </head>
+  <body>
+    <section class="web-login is-hidden" id="web-login" aria-labelledby="web-login-title">
+      <div class="web-login-atmosphere" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="web-login-card">
+        <div class="web-login-brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+          <div><strong>StoryForge</strong><small>WEB PRODUCTION CONSOLE</small></div>
+        </div>
+        <div class="web-login-copy">
+          <p class="section-kicker">STORYFORGE TEAM / 成员登录</p>
+          <h1 id="web-login-title">登录后直接制作</h1>
+          <p>输入管理员分配的账号和密码。小说库与制作记录会自动连接，无需填写主机地址或电脑名称。</p>
+        </div>
+        <form id="web-login-form" autocomplete="on">
+          <label class="field"><span>成员账号</span><input id="web-login-username" name="username" autocomplete="username" required placeholder="输入成员账号" /></label>
+          <label class="field"><span>密码</span><input id="web-login-password" name="password" type="password" autocomplete="current-password" required placeholder="输入成员密码" /></label>
+          <input id="web-login-remember" type="checkbox" class="is-hidden" checked tabindex="-1" aria-hidden="true" />
+          <p class="web-login-status" id="web-login-status" role="alert" aria-live="polite"></p>
+          <button type="submit" class="button button-primary web-login-submit" id="web-login-submit">进入制作台</button>
+        </form>
+        <div class="web-login-foot"><span><i></i> 首次登录后会自动记住这台电脑</span><small>本机制作服务随 StoryForge 自动启动，以后直接登录即可；网页关闭不会中断已开始的任务。</small></div>
+      </div>
+    </section>
+
+    <div class="app-shell">
+      <aside class="rail" aria-label="主导航">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div>
+            <strong>StoryForge</strong>
+            <small>LOCAL NOVEL STUDIO</small>
+          </div>
+        </div>
+
+        <nav class="nav-stack">
+          <button class="nav-item is-active" data-view-target="queue">
+            <span class="nav-glyph">P</span>
+            <span><b>制作台</b><small>选择小说 · 配置 · 生成</small></span>
+          </button>
+          <button class="nav-item" data-view-target="library">
+            <span class="nav-glyph">L</span>
+            <span><b>资料库</b><small>小说 · 平台 · 口令 · 账号</small></span>
+          </button>
+          <button class="nav-item" data-view-target="records">
+            <span class="nav-glyph">R</span>
+            <span><b>生产记录</b><small>成功 · 失败 · 素材复用</small></span>
+          </button>
+          <button class="nav-item" data-view-target="settings">
+            <span class="nav-glyph">S</span>
+            <span><b>设置</b><small id="settings-nav-copy">服务 · 团队 · 多电脑</small></span>
+          </button>
+        </nav>
+
+        <div class="rail-status">
+          <span class="status-light" id="system-light"></span>
+          <div>
+            <b id="system-title">正在检查本机（通常 3–6 秒）</b>
+            <small id="system-copy">并行检测 FFmpeg 与硬件编码器</small>
+          </div>
+        </div>
+        <div class="rail-version">V2 · ENGLISH PIPELINE</div>
+      </aside>
+
+      <main class="workspace">
+        <div class="web-session-bar is-hidden" id="web-session-bar" role="status">
+          <span class="web-session-mode"><i></i><b>网页控制台</b><small id="web-session-host">已连接 StoryForge Hub</small><small class="queue-sync-status is-ready" id="queue-sync-status" aria-live="polite">任务同步正常</small></span>
+          <span class="web-session-user"><button type="button" class="employee-update-trigger" id="open-employee-update" aria-label="打开软件更新"><i aria-hidden="true"></i><span><b>软件更新</b><small id="employee-update-trigger-label">检查版本</small></span></button><small>当前账号</small><b id="web-session-name">—</b><button type="button" id="web-change-password">设置密码</button><button type="button" id="web-logout">退出</button></span>
+        </div>
+        <section class="view is-visible" data-view="queue">
+          <header class="page-head">
+            <div>
+              <p class="eyebrow">PRODUCTION WORKBENCH / 一页制作台</p>
+              <h1>新建一个视频批次</h1>
+              <p>固定资料从资料库读取；本页只设置这一次要怎样生成。</p>
+            </div>
+            <div class="head-actions">
+              <button class="button button-ghost" id="cancel-queue" disabled>安全停止</button>
+              <button class="button button-primary" id="start-queue" disabled>
+                <span class="button-spark" aria-hidden="true"></span><span id="start-queue-label">没有待办</span>
+              </button>
+            </div>
+          </header>
+
+          <section class="production-command is-compact" aria-label="制作状态">
+            <div class="command-status">
+              <span class="tally-light" id="queue-tally" aria-hidden="true"></span>
+              <div>
+                <p class="section-kicker">PRODUCTION STATUS</p>
+                <strong id="queue-status-title">制作台已就绪</strong>
+                <small id="queue-status-copy" role="status" aria-live="polite" aria-atomic="true">选择小说并完成本批设置，右侧即时确认后直接生成完整视频。</small>
+              </div>
+            </div>
+            <div class="metric-strip" aria-label="队列统计">
+              <div><span>待处理</span><b id="metric-queued">0</b></div>
+              <div><span>制作中</span><b id="metric-active">0</b></div>
+              <div><span>已中断</span><b id="metric-approval">0</b></div>
+              <div><span>已完成</span><b id="metric-completed">0</b></div>
+              <div><span>失败</span><b id="metric-failed">0</b></div>
+            </div>
+          </section>
+
+          <div class="production-ribbon workbench-recipe" id="production-ribbon" aria-label="本批制作步骤">
+            <div class="ribbon-node is-current" data-stage="script"><span>01</span><b>选择内容</b><small>小说 · 分集 · 口令</small></div>
+            <i></i>
+            <div class="ribbon-node" data-stage="voice"><span>02</span><b>本批设置</b><small>配音 · 字幕 · 素材</small></div>
+            <i></i>
+            <div class="ribbon-node" data-stage="visual"><span>03</span><b>即时预览</b><small>开头 · 字幕 · 封面结尾</small></div>
+            <i></i>
+            <div class="ribbon-node" data-stage="output"><span>04</span><b>完整生成</b><small>直接全自动执行</small></div>
+          </div>
+
+          <div class="production-local-toolbar">
+            <div class="production-local-tabs" role="tablist" aria-label="制作台页面">
+              <button id="production-local-tab-create" type="button" class="is-active" role="tab" aria-selected="true" aria-controls="production-local-panel-create" tabindex="0" data-production-local-tab="create">
+                <span>新建批次</span><small>选择内容并生成</small>
+              </button>
+              <button id="production-local-tab-tasks" type="button" role="tab" aria-selected="false" aria-controls="production-local-panel-tasks" tabindex="-1" data-production-local-tab="tasks">
+                <span>任务进度</span><small id="production-local-task-count">0 个任务</small>
+              </button>
+            </div>
+            <button type="button" class="production-preview-drawer-trigger" data-open-production-preview-drawer aria-controls="production-preview-drawer" aria-expanded="false">
+              <span aria-hidden="true">▣</span>查看画面预览
+            </button>
+          </div>
+
+          <div class="studio-grid" data-production-local-view="create">
+            <div class="studio-main">
+              <section id="production-local-panel-create" class="panel production-workbench production-local-panel" role="tabpanel" aria-labelledby="production-local-tab-create" data-production-local-panel="create">
+                <div class="panel-heading workbench-heading">
+                  <div>
+                    <p class="section-kicker">ONE-PAGE RECIPE / 本次制作方案</p>
+                    <h2 id="production-workbench-title">内容、声音与画面一次设好</h2>
+                  </div>
+                  <span class="panel-note" id="production-autosave-proof">配置随草稿保存，不修改小说固定资料</span>
+                </div>
+                <div id="production-workbench-content" class="production-workbench-content" aria-live="polite">
+                  <div class="workbench-empty">
+                    <span class="workbench-empty-mark">01</span>
+                    <div><h3>先选择本批要制作的小说</h3><p>选择后会在本页展开分集、配音、字幕、素材、音乐和输出设置。</p></div>
+                    <button type="button" class="production-novel-launch" data-open-production-picker>
+                      <span class="production-novel-launch-mark">N</span>
+                      <span><b>打开小说库选择</b><small>看封面并搜索书名、标签或口令</small></span>
+                      <em>进入 →</em>
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section id="production-local-panel-tasks" class="queue-section production-local-panel" role="tabpanel" aria-labelledby="production-local-tab-tasks" data-production-local-panel="tasks" hidden>
+                <div class="section-heading queue-heading">
+                  <div>
+                    <p class="section-kicker">STORY TAPE</p>
+                    <h2>任务胶片带</h2>
+                    <p class="queue-heading-note">每批视频收在一张批次卡里；展开后才显示单条任务。归档只收起已结束任务，不会删除成片和错误日志。</p>
+                  </div>
+                  <div class="section-tools queue-tools">
+                    <div class="queue-view-switch" role="tablist" aria-label="任务胶片带视图">
+                      <button type="button" class="is-active" role="tab" aria-selected="true" data-job-view="active">进行中 <span id="job-active-count">0批 · 0条</span></button>
+                      <button type="button" role="tab" aria-selected="false" data-job-view="archived">已归档 <span id="job-archived-count">0批 · 0条</span></button>
+                    </div>
+                    <button type="button" class="text-button archive-finished-button" id="clear-finished" disabled>归档已结束</button>
+                    <span class="queue-count" id="queue-count" aria-live="polite">0 个批次 · 0 个视频</span>
+                  </div>
+                </div>
+                <div class="job-list" id="job-list">
+                  <div class="empty-state">
+                    <div class="empty-reel" aria-hidden="true"><i></i><i></i><i></i></div>
+                    <h3>队列还是空的</h3>
+                    <p>从小说库选择一部小说，在右侧确认即时预览后，整批视频会依次生成。</p>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <aside id="production-preview-drawer" class="preview-dock production-preview-drawer" aria-label="竖屏预览" data-production-local-panel="create">
+              <div class="preview-heading">
+                <div><p class="section-kicker">LIVE FRAME</p><h2>安全区预览</h2></div>
+                <div class="preview-heading-actions">
+                  <label class="mini-toggle"><input id="safe-zone-toggle" type="checkbox" checked /><span></span>安全区</label>
+                  <button type="button" class="preview-drawer-close" data-close-production-preview-drawer aria-label="关闭画面预览">×</button>
+                </div>
+              </div>
+              <div class="production-preview-scenes" role="tablist" aria-label="制作画面预览">
+                <button type="button" class="is-active" role="tab" aria-selected="true" data-production-preview-scene="intro"><b>开头</b><small>简介与口令</small></button>
+                <button type="button" role="tab" aria-selected="false" data-production-preview-scene="subtitle"><b>正文字幕</b><small>入场与逐词</small></button>
+                <button type="button" role="tab" aria-selected="false" data-production-preview-scene="outro"><b>封面结尾</b><small>旁白与字幕引导</small></button>
+              </div>
+              <div class="phone-stage">
+                <div class="video-preview production-preview" id="video-preview" data-video-template="classic" data-preview-scene="intro">
+                  <div class="preview-media" aria-hidden="true">
+                    <div class="media-orbit orbit-one"></div>
+                    <div class="media-orbit orbit-two"></div>
+                    <div class="media-block block-one"></div>
+                    <div class="media-block block-two"></div>
+                  </div>
+                  <div class="outro-cover-preview" id="preview-outro-cover" data-cover-animation="gentle_push" aria-label="小说封面全屏结尾">
+                    <img alt="" hidden />
+                    <span class="outro-cover-placeholder"><b>S</b><small>STORYFORGE · NOVEL COVER</small></span>
+                    <i class="outro-cover-shade" aria-hidden="true"></i>
+                  </div>
+                  <div class="safe-zone" id="safe-zone"><span>SAFE FRAME</span></div>
+                  <div class="code-card" id="preview-code" lang="en-US">Search Platform: 123456</div>
+                  <div class="preview-hook" lang="en-US">THE CALL CAME<br />AT 10:00 PM.</div>
+                  <div class="story-template-intro" aria-label="平台简介卡开场预览">
+                    <h3 class="story-preview-title" id="preview-story-title" lang="en-US">THE CALL AT TEN</h3>
+                    <div class="story-summary-card">
+                      <div class="story-card-ticket"><span class="story-card-platform-mark" id="preview-story-platform-mark" aria-hidden="true"><span class="platform-logo-fallback">P</span></span><b id="preview-story-search">Platform · Search “123456”</b></div>
+                      <p id="preview-story-copy" lang="en-US">Select a novel to preview its saved synopsis. When AI copy is enabled, it may tighten the wording without changing story facts.</p>
+                      <strong class="story-card-label">STORY BRIEF</strong>
+                    </div>
+                  </div>
+                  <div class="preview-subtitle" id="preview-subtitle" lang="en-US">
+                    I thought it was a prank—until she said my husband's name.
+                  </div>
+                  <div class="preview-subtitle outro-caption-preview" id="preview-outro-caption" lang="en-US">Download the novel app and search 123456 to continue reading.</div>
+                  <div class="outro-style-preview production-outro-preview" id="preview-outro" lang="en-US" hidden aria-hidden="true"><span class="outro-kicker">KEEP READING</span><h3>The truth was only beginning.</h3><p id="preview-outro-copy">Download the novel app to discover what happened next.</p><strong id="preview-outro-code">Search “123456”</strong></div>
+                  <div class="tiktok-ghost" aria-hidden="true"><i></i><i></i><i></i></div>
+                </div>
+              </div>
+              <dl class="frame-specs">
+                <div><dt>当前平台</dt><dd id="preview-platform">尚未选择</dd></div>
+                <div><dt>本批模板</dt><dd id="preview-template">经典模板</dd></div>
+                <div><dt>输出</dt><dd id="preview-output">1080 × 1920 · 60 FPS</dd></div>
+                <div><dt>文案</dt><dd>AI 目标 85–90%·无重复可更高</dd></div>
+                <div><dt>章节</dt><dd>不朗读 · 0.8s 停顿</dd></div>
+              </dl>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" data-view="library">
+          <header class="page-head compact-head library-head">
+            <div>
+              <p class="eyebrow">RESOURCE LIBRARY / 固定资料</p>
+              <h1>小说、平台、口令和发布账号集中管理</h1>
+              <p>这里只维护长期资料；配音、字幕、素材和音乐在制作台按批次选择，不会锁死在小说里。</p>
+            </div>
+            <button class="button button-primary" id="open-novel-import">＋ 添加小说</button>
+          </header>
+
+          <nav class="resource-tabs" aria-label="资料库分类">
+            <button type="button" class="is-active" data-resource-view="library" aria-current="page"><span>N</span><b>小说资料</b><small>正文、封面、简介与章节</small></button>
+            <button type="button" data-resource-view="platforms"><span>P</span><b>平台与口令</b><small>平台模板和小说口令</small></button>
+            <button type="button" data-resource-view="publishing"><span>A</span><b>发布账号</b><small>人工发布账号资料</small></button>
+          </nav>
+
+          <div class="library-failure-banner is-hidden" id="library-failure-banner" role="status">
+            <span class="failure-pulse" aria-hidden="true"></span>
+            <div><b id="library-failure-title">有失败任务需要处理</b><small id="library-failure-copy">其余视频仍会继续制作。</small></div>
+            <button type="button" class="button button-danger" data-open-view="records">查看失败记录</button>
+          </div>
+
+          <section class="library-production-picker is-hidden" id="library-production-picker" aria-live="polite">
+            <span class="library-production-picker-mark">制作台</span>
+            <div><b>请选择本批要制作的小说</b><small>可按封面浏览，也可搜索书名、标签、口令或语种；点击小说即可带回制作台。</small></div>
+            <button type="button" class="button button-secondary" data-cancel-production-picker>返回制作台</button>
+          </section>
+
+          <section class="library-toolbar panel" aria-label="小说库筛选">
+            <label class="library-search">
+              <span class="sr-only">搜索小说</span>
+              <input id="library-search" type="search" placeholder="搜索书名、标签或口令" autocomplete="off" />
+            </label>
+            <label class="field library-filter">
+              <span class="sr-only">按平台筛选</span>
+              <select id="library-platform-filter"><option value="">全部平台</option></select>
+            </label>
+            <div class="layout-switch" role="group" aria-label="小说库布局">
+              <button type="button" class="is-active" data-library-layout="cards" aria-pressed="true">封面</button>
+              <button type="button" data-library-layout="table" aria-pressed="false">表格</button>
+            </div>
+            <span class="library-count" id="library-count">0 部小说</span>
+            <div class="language-filter-strip">
+              <span class="language-filter-label">语种</span>
+              <div class="language-filter-options" id="library-language-filter" role="group" aria-label="按自动识别语种筛选">
+                <button type="button" class="is-active" data-language-filter="" aria-pressed="true">全部</button>
+              </div>
+            </div>
+          </section>
+
+          <div class="library-content" id="novel-list" aria-live="polite">
+            <div class="empty-state library-empty">
+              <div class="empty-book" aria-hidden="true"><i></i><i></i><i></i></div>
+              <h3>小说库还没有内容</h3>
+              <p>添加粘贴文本、TXT 或 DOCX，建立第一部连续小说。</p>
+              <button type="button" class="button button-secondary" data-open-import>添加第一部小说</button>
+            </div>
+          </div>
+
+          <div class="drawer-scrim is-hidden" id="novel-drawer-scrim" aria-hidden="true"></div>
+          <aside class="novel-drawer is-hidden" id="novel-detail-drawer" aria-hidden="true" aria-labelledby="novel-detail-title" tabindex="-1">
+            <header class="drawer-head">
+              <div><p class="section-kicker">NOVEL PROFILE / 固定资料</p><h2 id="novel-detail-title">小说详情</h2></div>
+              <button type="button" class="icon-button" id="close-novel-detail" aria-label="关闭小说详情">×</button>
+            </header>
+            <div class="drawer-body" id="novel-detail-content"></div>
+            <footer class="drawer-save-bar" aria-label="小说操作">
+              <div class="drawer-save-copy"><b>固定资料确认完成</b><small>本批配音、字幕和素材在制作台设置。</small></div>
+              <div class="drawer-save-actions"><button type="button" class="button button-primary" data-start-production-from-novel>用这部小说开始制作</button></div>
+            </footer>
+          </aside>
+        </section>
+
+        <section class="view" data-view="records">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">PRODUCTION LEDGER / 生产记录</p>
+              <h1>失败说清楚，成功可追溯</h1>
+              <p>失败任务会跳过并保留原因；这里同时展示各视频素材的累计使用次数。</p>
+            </div>
+            <button type="button" class="button button-secondary" data-open-view="queue">返回制作中心</button>
+          </header>
+
+          <section class="record-summary" aria-label="生产汇总">
+            <div class="record-failure-card" id="record-failure-summary">
+              <span class="failure-pulse" aria-hidden="true"></span>
+              <div><small>失败任务</small><b id="record-failed-count">0</b><p id="record-failed-copy">暂无失败</p></div>
+            </div>
+            <div><small>已完成</small><b id="record-completed-count">0</b><p>可打开输出目录</p></div>
+            <div><small>制作中</small><b id="record-active-count">0</b><p>队列自动继续</p></div>
+            <div><small>素材最高使用</small><b id="record-max-usage">0次</b><p id="record-usage-copy">累计使用最高值</p></div>
+          </section>
+
+          <section class="panel record-panel">
+            <div class="section-heading">
+              <div><p class="section-kicker">ALL RUNS</p><h2>按小说归类的制作记录</h2></div>
+            </div>
+            <div class="record-filter-grid" aria-label="生产记录筛选">
+              <label class="field record-filter"><span>状态</span><select id="record-status-filter"><option value="">全部状态</option><option value="active">制作中</option><option value="completed">成功</option><option value="failed">失败 / 中断</option><option value="cancelled">已取消</option></select></label>
+              <label class="field record-filter"><span>小说</span><select id="record-novel-filter"><option value="">全部小说</option></select></label>
+              <label class="field record-filter"><span>批次</span><select id="record-batch-filter"><option value="">全部批次</option></select></label>
+              <label class="field record-filter"><span>成员</span><select id="record-member-filter"><option value="">全部成员</option></select></label>
+              <label class="field record-filter"><span>电脑</span><select id="record-device-filter"><option value="">全部电脑</option></select></label>
+              <label class="field record-filter"><span>开始日期</span><input type="date" id="record-date-from"></label>
+              <label class="field record-filter"><span>结束日期</span><input type="date" id="record-date-to"></label>
+              <label class="record-trash-toggle"><input type="checkbox" id="record-trash-filter"><span>查看回收站</span></label>
+            </div>
+            <div class="record-bulk-bar" id="record-bulk-bar">
+              <label><input type="checkbox" id="record-select-all"> <span>全选当前结果</span></label>
+              <b id="record-selected-count">已选 0 项</b>
+              <div>
+                <button type="button" class="button button-secondary" id="record-retry-selected" disabled>重试失败项</button>
+                <button type="button" class="button button-secondary" id="record-cancel-selected" disabled>立即取消</button>
+                <button type="button" class="button button-secondary" id="record-trash-selected" disabled>移入回收站</button>
+                <button type="button" class="button button-secondary is-hidden" id="record-restore-selected" disabled>恢复</button>
+                <button type="button" class="button button-danger is-hidden" id="record-delete-selected" disabled>彻底删除记录</button>
+              </div>
+            </div>
+            <div class="record-list" id="record-list"></div>
+          </section>
+        </section>
+
+        <section class="view" data-view="settings">
+          <header class="page-head compact-head" id="settings-page-head">
+            <div>
+              <p class="eyebrow">STUDIO SETTINGS / 设置</p>
+              <h1 id="settings-page-title">按工作顺序设置，不用记技术名词</h1>
+              <p id="settings-page-copy">先完成首次使用三步，其他选项按需调整；已经保存的设置不会丢失。</p>
+            </div>
+          </header>
+          <section class="settings-start settings-admin-only panel" aria-labelledby="settings-start-title">
+            <div class="settings-start-head">
+              <div><p class="section-kicker">FIRST TIME / 首次使用</p><h2 id="settings-start-title">只需完成这三步</h2></div>
+              <button type="button" class="button button-secondary" data-open-view="hub">开始连接电脑</button>
+            </div>
+            <ol class="setup-steps setup-steps-compact">
+              <li><span>1</span><div><b>选一台主电脑</b><small>长期运行，集中保存小说、任务和记录。</small></div></li>
+              <li><span>2</span><div><b>建立成员账号</b><small>只需选择管理员或员工。</small></div></li>
+              <li><span>3</span><div><b>连接制作电脑</b><small>员工输入账号和密码即可开始，其他内容自动配置。</small></div></li>
+            </ol>
+          </section>
+          <div class="settings-hub">
+            <button type="button" class="settings-entry panel" data-open-view="styles" data-settings-entry="styles">
+              <span class="settings-entry-mark coral">S</span>
+              <span><small>PRODUCTION DEFAULTS</small><b>制作默认值</b><em id="settings-style-entry-copy">设置新任务的初始语速、音乐、字幕和安全区。</em></span>
+              <i>进入 →</i>
+            </button>
+            <button type="button" class="settings-entry panel" data-open-view="providers" data-settings-entry="local-maintenance">
+              <span class="settings-entry-mark mint">AI</span>
+              <span><small id="settings-local-entry-kicker">LOCAL &amp; CLOUD</small><b id="settings-local-entry-title">服务与本机运行环境</b><em id="settings-local-entry-copy">配置润色、配音、额度和硬件编码器。</em></span>
+              <i>进入 →</i>
+            </button>
+            <button type="button" class="settings-entry settings-admin-only panel" data-open-view="hub" data-settings-entry="hub">
+              <span class="settings-entry-mark hub">H</span>
+              <span><small>STORYFORGE HUB</small><b>多电脑协同</b><em>一台主电脑连接多台制作电脑，可按需要继续增加。</em></span>
+              <i>进入 →</i>
+            </button>
+            <button type="button" class="settings-entry settings-admin-only panel" data-open-view="accounts" data-settings-entry="accounts">
+              <span class="settings-entry-mark account">U</span>
+              <span><small>TEAM ACCESS</small><b>成员账号与权限</b><em>管理员管全局，员工专注制作；特殊权限默认收起。</em></span>
+              <i>进入 →</i>
+            </button>
+          </div>
+        </section>
+
+        <section class="view" data-view="accounts">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">TEAM ACCESS / 成员权限</p>
+              <h1>成员只分管理员和员工</h1>
+              <p>管理员负责团队资料与全部生产，员工专注制作自己的视频。特殊情况再展开高级权限；电脑接入统一在“多电脑协同”管理。</p>
+            </div>
+            <div class="head-actions"><button type="button" class="button button-secondary" data-open-view="settings">返回设置</button><button type="button" class="button button-primary" id="new-software-user">新建账号</button></div>
+          </header>
+          <div class="account-layout">
+            <section class="panel account-list-panel">
+              <div class="panel-heading"><div><p class="section-kicker">TEAM MEMBERS</p><h2>成员账号</h2></div><span class="panel-note" id="software-user-count">0 个</span></div>
+              <div class="software-user-list" id="software-user-list"><div class="empty-state compact-empty"><h3>正在读取账号</h3></div></div>
+            </section>
+            <section class="panel account-editor-panel">
+              <div class="panel-heading"><div><p class="section-kicker">MEMBER SETUP</p><h2 id="software-user-editor-title">新建账号</h2></div><span class="role-proof" id="software-user-role-proof">员工</span></div>
+              <form id="software-user-form" class="stack-form">
+                <input type="hidden" name="id" />
+                <div class="account-meta-grid">
+                  <label class="field"><span>登录账号</span><input name="username" autocomplete="off" maxlength="120" placeholder="例如 zhangsan" required /></label>
+                  <label class="field"><span>成员名称</span><input name="display_name" maxlength="200" placeholder="例如 张三" /></label>
+                  <label class="switch-row account-active"><span><b>允许使用</b><small>关闭后，该成员会立即无法登录。</small></span><input name="active" type="checkbox" checked /><i></i></label>
+                </div>
+                <section class="account-password-card" aria-labelledby="software-user-password-title">
+                  <div class="account-password-heading"><span aria-hidden="true">K</span><div><b id="software-user-password-title">初始密码</b><small id="software-user-password-state">设置后，成员可直接用账号密码连接主电脑。</small></div></div>
+                  <label class="field"><span id="software-user-password-label">设置初始密码</span><input name="initial_password" type="password" autocomplete="new-password" minlength="8" maxlength="8" pattern="[!-~]{8}" placeholder="8 位字母、数字或标点" /><small>新员工留空时默认为 xs123456；编辑已有账号时留空表示不修改。</small></label>
+                </section>
+                <div class="account-upgrade-notice is-hidden" id="software-user-upgrade-notice" role="alert">
+                  <span aria-hidden="true">!</span><div><b>先升级并重启主电脑</b><small>这个账号来自旧版“主管”角色。升级主电脑后，原权限会安全转换为员工的特殊权限，再继续编辑。</small></div>
+                </div>
+                <fieldset class="role-picker role-picker-two" id="software-role-picker">
+                  <legend><b>选择账号类型</b><small>按成员是否需要管理团队来选择，之后仍可修改。</small></legend>
+                  <label class="role-card role-card-admin">
+                    <input type="radio" name="role" value="admin" />
+                    <span class="role-card-mark">管</span>
+                    <span class="role-card-copy"><b>管理员</b><small>管理小说、平台、口令、成员账号和全部生产记录，也能设置多电脑协同。</small><em>管理全局</em></span>
+                    <span class="role-card-check" aria-hidden="true"></span>
+                  </label>
+                  <label class="role-card role-card-employee">
+                    <input type="radio" name="role" value="producer" checked />
+                    <span class="role-card-mark">员</span>
+                    <span class="role-card-copy"><b>员工</b><small>制作、查看和重试自己的任务；不能修改团队资料、成员账号或系统设置。</small><em>专注制作</em></span>
+                    <span class="role-card-check" aria-hidden="true"></span>
+                  </label>
+                </fieldset>
+                <details class="permission-editor" id="advanced-permissions">
+                  <summary><span><b>高级权限（一般不用设置）</b><small>只有个别成员需要例外时，才在这里额外开放或禁止功能。</small></span><em id="permission-override-count">0 项特殊设置</em></summary>
+                  <div class="permission-editor-body">
+                    <div class="permission-head"><div><b>特殊权限设置</b><span>不确定时，保持“按账号类型默认”即可。</span></div><button type="button" class="text-button" id="reset-permission-overrides">全部恢复默认</button></div>
+                    <div class="permission-grid" id="software-user-permissions"></div>
+                  </div>
+                </details>
+                <p class="dialog-status" id="software-user-status" role="status">新账号默认使用员工权限。</p>
+                <div class="form-actions"><button type="button" class="button button-danger is-hidden" id="delete-software-user">删除这个账号</button><button type="submit" class="button button-primary" id="save-software-user">保存成员账号</button></div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="platforms">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">RESOURCE LIBRARY / 平台与口令</p>
+              <h1>平台话术集中维护，小说口令长期绑定</h1>
+              <p>平台模板决定悬浮口令卡和结尾旁白；小说的历史口令在小说详情中维护。</p>
+            </div>
+          </header>
+          <nav class="resource-tabs" aria-label="资料库分类">
+            <button type="button" data-resource-view="library"><span>N</span><b>小说资料</b><small>正文、封面、简介与章节</small></button>
+            <button type="button" class="is-active" data-resource-view="platforms" aria-current="page"><span>P</span><b>平台与口令</b><small>平台模板和小说口令</small></button>
+            <button type="button" data-resource-view="publishing"><span>A</span><b>发布账号</b><small>人工发布账号资料</small></button>
+          </nav>
+          <div class="settings-grid platform-grid">
+            <section class="panel platform-list-panel">
+              <div class="panel-heading"><h2>已有平台</h2><button class="text-button" id="new-platform">＋ 新平台</button></div>
+              <div id="platform-list" class="platform-list"></div>
+            </section>
+            <section class="panel editor-panel">
+              <div class="panel-heading"><div><p class="section-kicker">PROFILE EDITOR</p><h2 id="platform-editor-title">新建平台</h2></div></div>
+              <form id="platform-form" class="stack-form">
+                <input type="hidden" name="id" />
+                <div class="platform-brand-editor" id="platform-brand-editor" style="--platform-brand: #315bd8">
+                  <div class="platform-logo-preview" id="platform-logo-preview" aria-label="当前平台 Logo 预览"><span class="platform-logo-fallback">P</span></div>
+                  <div class="platform-brand-copy">
+                    <span>平台品牌标识</span>
+                    <b id="platform-logo-title">使用平台首字母</b>
+                    <small id="platform-logo-file" aria-live="polite">尚未选择 Logo；不会使用小说封面代替。</small>
+                    <div class="platform-brand-actions">
+                      <button type="button" class="button button-secondary" id="choose-platform-logo">选择 Logo 图片</button>
+                      <button type="button" class="text-button" id="clear-platform-logo" disabled>清除</button>
+                    </div>
+                  </div>
+                  <label class="field platform-color-field"><span>平台品牌色</span><input type="color" name="brand_color" value="#315bd8" /><small>用于 Logo 缺失时的首字母底色。</small></label>
+                  <input type="hidden" name="logo_path" id="platform-logo-path" />
+                </div>
+                <label class="field"><span>平台英文名称</span><input name="name" placeholder="例如 GoodNovel" required /></label>
+                <label class="field"><span>屏幕口令模板</span><input name="search_template" value="Search {platform}: {code}" required /><small>可用变量：{platform}、{code}</small></label>
+                <label class="field"><span>结尾旁白模板</span><textarea name="ending_template" rows="4" required>Download {platform} and search code {code} to continue reading.</textarea><small>这段话会由女声朗读，并同步显示字幕。</small></label>
+                <div class="template-proof">
+                  <span>实际效果</span>
+                  <b id="platform-template-preview">Search Platform: 123456</b>
+                </div>
+                <div class="form-actions"><button type="button" class="button button-danger is-hidden" id="delete-platform">删除平台</button><button type="submit" class="button button-primary">保存平台</button></div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="publishing">
+          <header class="page-head compact-head publishing-page-head">
+            <div>
+              <p class="eyebrow">RESOURCE LIBRARY / 发布账号</p>
+              <h1>发布账号库</h1>
+              <p>按小说平台统一登记，制作批次时直接选择；这里只管理资料，不登录 TikTok，也不自动发布。</p>
+            </div>
+            <button type="button" class="button button-primary" id="new-publishing-account">＋ 新发布账号</button>
+          </header>
+          <nav class="resource-tabs" aria-label="资料库分类">
+            <button type="button" data-resource-view="library"><span>N</span><b>小说资料</b><small>正文、封面、简介与章节</small></button>
+            <button type="button" data-resource-view="platforms"><span>P</span><b>平台与口令</b><small>平台模板和小说口令</small></button>
+            <button type="button" class="is-active" data-resource-view="publishing" aria-current="page"><span>A</span><b>发布账号</b><small>人工发布账号资料</small></button>
+          </nav>
+          <div class="publishing-grid publishing-workspace">
+            <aside class="publishing-list-panel publishing-directory">
+              <div class="panel-heading"><div><p class="section-kicker">ACCOUNT LIBRARY</p><h2>账号目录</h2></div><span class="publishing-count" id="publishing-account-count">0 个账号</span></div>
+              <label class="field compact-filter"><span>按小说平台筛选</span><select id="publishing-platform-filter"><option value="">全部平台</option></select></label>
+              <div id="publishing-account-list" class="publishing-account-list"></div>
+            </aside>
+            <section class="publishing-editor-panel publishing-profile">
+              <div class="panel-heading"><div><p class="section-kicker">ACCOUNT PROFILE</p><h2 id="publishing-editor-title">新建发布账号</h2></div><span class="publishing-mode-tag">人工发布</span></div>
+              <form id="publishing-account-form" class="stack-form">
+                <input type="hidden" name="id" />
+                <label class="field"><span>所属小说平台</span><select name="platform_id" required><option value="">选择平台</option></select></label>
+                <div class="form-two-columns">
+                  <label class="field"><span>内部名称</span><input name="name" placeholder="例如 US Romance 01" required /></label>
+                  <label class="field"><span>账号标识</span><input name="handle" placeholder="例如 @story.after.dark" /></label>
+                </div>
+                <div class="form-two-columns">
+                  <label class="field"><span>地区</span><input name="region" placeholder="例如 US" /></label>
+                  <label class="field"><span>内容定位</span><input name="positioning" placeholder="例如 Romance / Suspense" /></label>
+                </div>
+                <label class="field"><span>备注</span><textarea name="notes" rows="3" placeholder="记录发布偏好或账号注意事项"></textarea></label>
+                <label class="switch-row"><span><b>允许在制作台选择</b><small>停用后保留历史记录，但不会出现在新批次中。</small></span><input name="active" type="checkbox" checked /><i></i></label>
+                <div class="form-actions"><button type="submit" class="button button-primary">保存发布账号</button></div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="styles">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">STYLE STUDIO / 样式工作室</p>
+              <h1 id="style-page-title">把常用效果保存成方案，制作台一键套用</h1>
+              <p id="style-page-copy">先选画面类型和预设，需要精调时再展开高级设置；右侧预览会始终跟随。</p>
+            </div>
+            <div class="head-actions"><button type="button" class="button button-secondary" id="style-back">返回设置</button><button class="button button-primary" id="save-style">保存为团队默认</button></div>
+          </header>
+          <section class="style-scope-bar panel" id="style-scope-bar" aria-label="样式生效范围">
+            <span class="style-scope-mark" id="style-scope-mark">GLOBAL</span>
+            <div><b id="style-scope-title">正在编辑团队默认模板</b><small id="style-scope-copy">只有管理员可以覆盖团队默认；保存后只影响新建批次。</small></div>
+            <span class="style-scope-flow"><i data-style-scope-step="global" class="is-current">团队默认</i><b>→</b><i data-style-scope-step="personal">我的方案</i><b>→</b><i data-style-scope-step="batch">本批覆盖</i></span>
+          </section>
+          <div class="settings-grid style-grid">
+            <div class="setting-column">
+              <section class="panel setting-block visual-style-studio" aria-labelledby="visual-style-title">
+                <div class="panel-heading style-studio-heading">
+                  <div><p class="section-kicker">VISUAL SYSTEM</p><h2 id="visual-style-title">四类画面分别设置</h2><small>先选预设，再展开自由编辑；右侧可切换对应画面实时查看。</small></div>
+                  <span class="panel-note">所有位置都受 TikTok 安全区限制</span>
+                </div>
+                <nav class="style-editor-tabs" aria-label="选择要编辑的画面">
+                  <button type="button" class="is-active" data-style-panel="intro" aria-pressed="true"><span>INTRO</span><b>简介卡</b><small>前几秒交代故事</small></button>
+                  <button type="button" data-style-panel="subtitle" aria-pressed="false"><span>CAPTION</span><b>正文字幕</b><small>与旁白同步阅读</small></button>
+                  <button type="button" data-style-panel="code" aria-pressed="false"><span>SEARCH</span><b>搜索口令</b><small>稳定展示平台口令</small></button>
+                  <button type="button" data-style-panel="outro" aria-pressed="false"><span>OUTRO</span><b>封面结尾</b><small>全屏封面与字幕引导</small></button>
+                </nav>
+
+                <div class="style-editor-panel is-active" data-style-editor-panel="intro">
+                  <div class="style-editor-intro"><div><h3>简介卡样式</h3><p>小说简介会自动压缩成清晰、居中的故事摘要；AI 只能增强吸引力，不能编造剧情。</p></div><span>开场 5.5 秒</span></div>
+                  <label class="field intro-structure-select"><span>开场结构</span><select id="video-template"><option value="classic">经典模板</option><option value="platform_story_card">平台简介卡（推荐）</option></select><small>关闭简介卡时仍保留顶部搜索口令和正文字幕。</small></label>
+                  <label class="field intro-structure-select"><span>全片画面色调</span><select id="color-grade"><option value="neutral">自然原色（推荐）</option><option value="suspense_cool">悬疑冷调</option><option value="romance_warm">浪漫暖柔</option><option value="sad_muted">悲伤低饱和</option><option value="revenge_contrast">爽文高对比</option><option value="night_lift">夜景提亮</option></select><small>使用 FFmpeg 内建参数，不依赖来源不明的 LUT 文件。</small></label>
+                  <label class="field intro-structure-select"><span>简介卡入场</span><select id="intro-animation"><option value="fade_rise">淡入上浮（推荐）</option><option value="soft_scale">柔和缩放</option><option value="side_reveal">侧向揭示</option><option value="layered_story">分层故事</option><option value="paper_drop">纸张落入</option><option value="none">无动画</option></select><small>预览与成片使用同一动画编号，口令保持固定显示。</small></label>
+                  <select id="intro-card-preset" class="visually-hidden" aria-label="简介卡预设"><option value="editorial_white">杂志白卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select>
+                  <div class="style-preset-gallery" data-style-preset-group="intro">
+                    <button type="button" class="style-preset-card is-active" data-style-preset-target="intro-card-preset" data-style-preset-value="editorial_white"><i class="preset-swatch intro-editorial"></i><span><b>杂志白卡</b><small>清晰、可信，适合大多数题材</small></span><em>推荐</em></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="cinematic_dark"><i class="preset-swatch intro-cinematic"></i><span><b>电影暗卡</b><small>高反差，适合悬疑与复仇</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="romance_soft"><i class="preset-swatch intro-romance"></i><span><b>柔光浪漫</b><small>柔和暖色，适合情感故事</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="minimal_clean"><i class="preset-swatch intro-minimal"></i><span><b>纯净极简</b><small>低干扰，突出简介文字</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="social_post"><i class="preset-swatch intro-social"></i><span><b>社交帖卡</b><small>信息流原生感，适合剧情简介</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="paper_note"><i class="preset-swatch intro-paper"></i><span><b>纸张便笺</b><small>亲切叙事，适合第一人称</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="golden_luxe"><i class="preset-swatch intro-gold"></i><span><b>金色质感</b><small>豪门、逆袭与高冲突题材</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="suspense_red"><i class="preset-swatch intro-red"></i><span><b>悬疑红卡</b><small>危险感更强，但保持可读</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="blue_glass"><i class="preset-swatch intro-blue"></i><span><b>蓝色玻璃</b><small>冷静现代，适合都市故事</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="intro-card-preset" data-style-preset-value="warm_story"><i class="preset-swatch intro-warm"></i><span><b>暖调故事</b><small>温柔克制，适合情感题材</small></span></button>
+                  </div>
+                  <details class="style-free-editor">
+                    <summary><span><b>自由编辑简介卡</b><small>字体、颜色、透明度、位置与宽度都可调整</small></span><em>收起 / 展开</em></summary>
+                    <div class="style-free-editor-body">
+                      <div class="style-control-group"><h4>文字</h4><div class="style-control-grid">
+                        <label class="field"><span>字体</span><select id="intro-font"><option>Arial</option><option>Segoe UI</option><option>Georgia</option><option>Bahnschrift</option></select></label>
+                        <label class="field"><span>标题字号</span><input id="intro-headline-size" type="number" min="38" max="96" value="66" /></label>
+                        <label class="field color-field"><span>标题颜色</span><input id="intro-headline-color" type="color" value="#FFE06A" /></label>
+                        <label class="field"><span>简介字号</span><input id="intro-body-size" type="number" min="22" max="54" value="32" /></label>
+                        <label class="field color-field"><span>简介颜色</span><input id="intro-body-color" type="color" value="#263247" /></label>
+                        <label class="field"><span>标签字号</span><input id="intro-label-size" type="number" min="18" max="38" value="24" /></label>
+                        <label class="field color-field"><span>标签颜色</span><input id="intro-label-color" type="color" value="#315BD8" /></label>
+                        <label class="field"><span>对齐</span><select id="intro-alignment"><option value="center">居中</option><option value="left">左对齐</option><option value="right">右对齐</option></select></label>
+                        <label class="field"><span>最多行数</span><input id="intro-max-lines" type="number" min="2" max="8" value="5" /></label>
+                      </div></div>
+                      <div class="style-control-group"><h4>卡片</h4><div class="style-control-grid">
+                        <label class="field color-field"><span>背景颜色</span><input id="intro-background" type="color" value="#FFFFFF" /></label>
+                        <label class="field"><span>背景透明度 <output id="intro-opacity-value">98%</output></span><input id="intro-opacity" type="range" min="35" max="100" value="98" /></label>
+                        <label class="field color-field"><span>边框颜色</span><input id="intro-border" type="color" value="#FFFFFF" /></label>
+                        <label class="field"><span>边框宽度</span><input id="intro-border-width" type="number" min="0" max="12" value="2" /></label>
+                        <label class="field"><span>阴影强度 <output id="intro-shadow-value">28%</output></span><input id="intro-shadow-opacity" type="range" min="0" max="70" value="28" /></label>
+                        <label class="field"><span>内边距</span><input id="intro-padding" type="number" min="16" max="80" value="40" /></label>
+                        <label class="field"><span>圆角</span><input id="intro-radius" type="number" min="0" max="72" value="32" /></label>
+                      </div></div>
+                      <div class="style-control-group"><h4>位置与宽度</h4><div class="style-control-grid">
+                        <label class="field"><span>卡片宽度 <output id="intro-width-value">65%</output></span><input id="intro-width" type="range" min="48" max="78" value="65" /></label>
+                        <label class="field"><span>水平位置 <output id="intro-x-value">50%</output></span><input id="intro-x" type="range" min="30" max="70" value="50" /></label>
+                        <label class="field"><span>垂直位置 <output id="intro-y-value">27%</output></span><input id="intro-y" type="range" min="16" max="46" value="27" /></label>
+                      </div></div>
+                    </div>
+                  </details>
+                </div>
+
+                <div class="style-editor-panel" data-style-editor-panel="subtitle" hidden>
+                  <div class="style-editor-intro"><div><h3>正文字幕样式</h3><p>字幕与旁白按语义同步；位置与宽度始终限制在安全区内。</p></div><span>全程显示</span></div>
+                  <select id="subtitle-preset" class="visually-hidden" aria-label="字幕预设"><option value="clear_outline">清晰描边</option><option value="cinematic_shadow">电影阴影</option><option value="clean_minimal">极简阅读</option><option value="bold_drama">强力戏剧</option><option value="reader_focus">阅读聚焦</option><option value="soft_box">柔和底板</option><option value="word_pop_sync">逐词弹出</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="midnight_reader">午夜阅读</option><option value="minimal_bottom">底部极简</option></select>
+                  <div class="style-preset-gallery style-preset-gallery-six" data-style-preset-group="subtitle">
+                    <button type="button" class="style-preset-card is-active" data-style-preset-target="subtitle-preset" data-style-preset-value="clear_outline"><i class="preset-swatch caption-outline">Aa</i><span><b>清晰描边</b><small>通用稳定</small></span><em>推荐</em></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="cinematic_shadow"><i class="preset-swatch caption-cinema">Aa</i><span><b>电影阴影</b><small>克制立体</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="clean_minimal"><i class="preset-swatch caption-minimal">Aa</i><span><b>极简阅读</b><small>轻底板</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="bold_drama"><i class="preset-swatch caption-drama">AA</i><span><b>强力戏剧</b><small>冲突感强</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="reader_focus"><i class="preset-swatch caption-reader">Aa</i><span><b>阅读聚焦</b><small>长文舒适</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="soft_box"><i class="preset-swatch caption-soft">Aa</i><span><b>柔和底板</b><small>复杂画面</small></span></button>
+                    <button type="button" class="style-preset-card style-preset-featured" data-style-preset-target="subtitle-preset" data-style-preset-value="word_pop_sync"><i class="preset-swatch caption-word-pop"><span>She</span><b>OPENED</b><span>it</span></i><span><b>逐词弹出</b><small>跟随配音变色</small></span><em>同步</em></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="romance_glow"><i class="preset-swatch caption-romance">Aa</i><span><b>浪漫柔光</b><small>粉金强调，情感剧情</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="suspense_noir"><i class="preset-swatch caption-noir">Aa</i><span><b>悬疑黑金</b><small>冷暗画面仍然清楚</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="confession_clean"><i class="preset-swatch caption-confession">Aa</i><span><b>对白清透</b><small>自然对话与第一人称</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="golden_hook"><i class="preset-swatch caption-gold">AA</i><span><b>金色钩子</b><small>仅在强冲突段落使用</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="midnight_reader"><i class="preset-swatch caption-midnight">Aa</i><span><b>午夜阅读</b><small>深色底板，长文舒适</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="subtitle-preset" data-style-preset-value="minimal_bottom"><i class="preset-swatch caption-bottom">Aa</i><span><b>底部极简</b><small>更低干扰，保留主体画面</small></span></button>
+                  </div>
+                  <details class="style-free-editor"><summary><span><b>自由编辑正文字幕</b><small>预设只是起点，所有常用参数都可以改</small></span><em>收起 / 展开</em></summary><div class="style-free-editor-body">
+                    <div class="style-control-group"><h4>文字与节奏</h4><div class="style-control-grid">
+                      <label class="field"><span>字幕切分</span><select id="caption-mode"><option value="semantic">按语义停顿</option><option value="sentence">按完整句子</option></select></label>
+                      <label class="field"><span>字幕入场</span><select id="subtitle-animation"><option value="none">无动画（默认）</option><option value="fade">轻柔淡入</option><option value="soft_pop">轻微弹出</option><option value="rise">柔和上浮</option><option value="mask_reveal">遮罩揭示</option><option value="typewriter">逐字显现</option></select></label>
+                      <label class="field"><span>字体</span><select id="subtitle-font"><option>Arial</option><option>Segoe UI</option><option>Georgia</option><option>Bahnschrift</option></select></label>
+                      <label class="field"><span>字号</span><input id="subtitle-size" type="number" min="32" max="80" value="52" /></label>
+                      <label class="field"><span>每行最多字符</span><input id="subtitle-chars" type="number" min="16" max="40" value="28" /></label>
+                      <label class="field"><span>最多行数</span><input id="subtitle-max-lines" type="number" min="1" max="4" value="3" /></label>
+                      <label class="option-toggle"><input id="subtitle-bold" type="checkbox" checked /><span><b>粗体</b><small>提高小屏可读性</small></span><i></i></label>
+                      <label class="option-toggle"><input id="subtitle-italic" type="checkbox" /><span><b>斜体</b><small>仅特殊语气使用</small></span><i></i></label>
+                    </div></div>
+                    <div class="style-control-group"><h4>颜色与轮廓</h4><div class="style-control-grid">
+                      <label class="field color-field"><span>文字颜色</span><input id="subtitle-color" type="color" value="#FFFFFF" /></label>
+                      <label class="field color-field"><span>描边颜色</span><input id="subtitle-outline" type="color" value="#101828" /></label>
+                      <label class="field"><span>描边宽度</span><input id="subtitle-outline-width" type="number" min="0" max="10" value="4" /></label>
+                      <label class="field"><span>阴影宽度</span><input id="subtitle-shadow-width" type="number" min="0" max="8" step="0.5" value="4" /></label>
+                      <label class="field color-field"><span>底板颜色</span><input id="subtitle-background" type="color" value="#101828" /></label>
+                      <label class="field"><span>底板透明度 <output id="subtitle-background-opacity-value">0%</output></span><input id="subtitle-background-opacity" type="range" min="0" max="90" value="0" /></label>
+                    </div></div>
+                    <div class="style-control-group word-sync-controls"><div class="style-control-heading"><div><h4>逐词配音同步</h4><p>在真实配音句段时长内依次切换“已读 / 当前 / 未读”，当前词轻微弹出；关闭后仍使用普通整句字幕。</p></div><label class="mini-toggle"><input id="subtitle-word-sync" type="checkbox" /><span></span>启用</label></div><div class="style-control-grid">
+                      <label class="field color-field"><span>未读文字</span><input id="subtitle-unread-color" type="color" value="#FFFFFF" /></label>
+                      <label class="field color-field"><span>当前文字</span><input id="subtitle-active-color" type="color" value="#FFE06A" /></label>
+                      <label class="field color-field"><span>已读文字</span><input id="subtitle-read-color" type="color" value="#FFFFFF" /></label>
+                      <label class="field"><span>弹出强度 <output id="subtitle-pop-intensity-value">65%</output></span><input id="subtitle-pop-intensity" type="range" min="0" max="100" value="65" /></label>
+                      <label class="field"><span>当前词缩放 <output id="subtitle-pop-scale-value">112%</output></span><input id="subtitle-pop-scale" type="range" min="100" max="135" value="112" /></label>
+                      <label class="field"><span>弹出速度 <output id="subtitle-pop-duration-value">160 ms</output></span><input id="subtitle-pop-duration" type="range" min="80" max="320" step="10" value="160" /></label>
+                    </div></div>
+                    <div class="style-control-group"><h4>位置与宽度</h4><div class="style-control-grid">
+                      <label class="field"><span>对齐</span><select id="subtitle-alignment"><option value="center">居中</option><option value="left">左对齐</option><option value="right">右对齐</option></select></label>
+                      <label class="field"><span>水平位置 <output id="subtitle-position-x-value">50%</output></span><input id="subtitle-position-x" type="range" min="30" max="70" value="50" /></label>
+                      <label class="field"><span>底部安全距离</span><input id="subtitle-margin" type="number" min="220" max="600" value="310" /></label>
+                      <label class="field"><span>左右安全距离</span><input id="subtitle-horizontal-margin" type="number" min="160" max="300" value="180" /></label>
+                    </div></div>
+                  </div></details>
+                </div>
+
+                <div class="style-editor-panel" data-style-editor-panel="code" hidden>
+                  <div class="style-editor-intro"><div><h3>搜索口令样式</h3><p>平台与口令全程稳定展示，默认放在顶部安全区，不遮挡 TikTok 操作按钮。</p></div><span>固定展示</span></div>
+                  <select id="code-card-preset" class="visually-hidden" aria-label="口令卡预设"><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select>
+                  <div class="style-preset-gallery" data-style-preset-group="code">
+                    <button type="button" class="style-preset-card is-active" data-style-preset-target="code-card-preset" data-style-preset-value="brand_pill"><i class="preset-swatch code-brand"></i><span><b>品牌胶囊</b><small>使用平台主色，识别最快</small></span><em>推荐</em></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="dark_glass"><i class="preset-swatch code-glass"></i><span><b>深色玻璃</b><small>适合高亮复杂素材</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="light_chip"><i class="preset-swatch code-light"></i><span><b>浅色标签</b><small>干净、低干扰</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="outline_only"><i class="preset-swatch code-outline"></i><span><b>纯描边</b><small>尽量保留素材画面</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="warning_red"><i class="preset-swatch code-red"></i><span><b>醒目红条</b><small>悬疑和冲突题材识别强</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="golden_ticket"><i class="preset-swatch code-gold"></i><span><b>金色票签</b><small>豪门、复仇与逆袭题材</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="romance_blush"><i class="preset-swatch code-blush"></i><span><b>浪漫粉签</b><small>柔和明亮，不盖住画面</small></span></button>
+                    <button type="button" class="style-preset-card" data-style-preset-target="code-card-preset" data-style-preset-value="minimal_dark"><i class="preset-swatch code-minimal-dark"></i><span><b>极简暗条</b><small>适合复杂高亮素材</small></span></button>
+                  </div>
+                  <details class="style-free-editor"><summary><span><b>自由编辑搜索口令</b><small>调整字体、颜色、透明度、宽度和位置</small></span><em>收起 / 展开</em></summary><div class="style-free-editor-body">
+                    <div class="style-control-group"><h4>外观</h4><div class="style-control-grid">
+                      <label class="field"><span>字体</span><select id="code-font"><option>Arial</option><option>Segoe UI</option><option>Georgia</option><option>Bahnschrift</option></select></label>
+                      <label class="field"><span>字号</span><input id="code-size" type="number" min="28" max="64" value="42" /></label>
+                      <label class="option-toggle"><input id="code-bold" type="checkbox" checked /><span><b>粗体</b><small>保持口令清晰</small></span><i></i></label>
+                      <label class="field color-field"><span>文字颜色</span><input id="code-color" type="color" value="#FFFFFF" /></label>
+                      <label class="field color-field"><span>背景颜色</span><input id="code-background" type="color" value="#2446C8" /></label>
+                      <label class="field"><span>背景透明度 <output id="code-opacity-value">92%</output></span><input id="code-opacity" type="range" min="15" max="100" value="92" /></label>
+                      <label class="field color-field"><span>描边颜色</span><input id="code-outline" type="color" value="#FFFFFF" /></label>
+                      <label class="field"><span>描边宽度</span><input id="code-outline-width" type="number" min="0" max="10" value="1" /></label>
+                      <label class="field"><span>内边距</span><input id="code-padding" type="number" min="8" max="44" value="20" /></label>
+                      <label class="field"><span>圆角</span><input id="code-radius" type="number" min="0" max="48" value="12" /></label>
+                    </div></div>
+                    <div class="style-control-group"><h4>位置与宽度</h4><div class="style-control-grid">
+                      <label class="field"><span>对齐</span><select id="code-alignment"><option value="center">居中</option><option value="left">左对齐</option><option value="right">右对齐</option></select></label>
+                      <label class="field"><span>卡片宽度 <output id="code-width-value">62%</output></span><input id="code-width" type="range" min="36" max="82" value="62" /></label>
+                      <label class="field"><span>水平位置 <output id="code-x-value">50%</output></span><input id="code-x" type="range" min="28" max="72" value="50" /></label>
+                      <label class="field"><span>垂直位置 <output id="code-y-value">9%</output></span><input id="code-y" type="range" min="5" max="26" value="9" /></label>
+                      <input id="code-margin" type="hidden" value="180" />
+                      <input id="code-horizontal-margin" type="hidden" value="150" />
+                    </div></div>
+                  </div></details>
+                </div>
+
+                <div class="style-editor-panel" data-style-editor-panel="outro" hidden>
+                  <div class="style-editor-intro"><div><h3>封面全屏结尾</h3><p>小说真实封面铺满 9:16 画面，旁白朗读下载与搜索引导，CTA 使用当前字幕样式同步显示；顶部搜索口令全程保留。</p></div><span>无需平台白卡</span></div>
+                  <label class="option-toggle cover-outro-toggle"><input id="cover-outro-enabled" type="checkbox" checked /><span><b>使用小说封面结尾</b><small>关闭后不插入封面，结尾旁白与字幕仍在正文画面完成。</small></span><i></i></label>
+                  <label class="field cover-animation-select"><span>封面动效</span><select id="cover-animation"><option value="gentle_push">舒缓推进（推荐）</option><option value="gentle_pull">缓慢拉远</option><option value="slow_pan">横向慢移</option><option value="soft_parallax">轻柔视差</option><option value="vertical_drift">纵向漂移</option><option value="focus_reveal">聚焦揭示</option><option value="cinematic_push">电影推进</option><option value="ken_burns_left">左向运镜</option><option value="ken_burns_right">右向运镜</option><option value="soft_flash">柔光闪现</option><option value="fade">柔和淡入</option><option value="none">静态封面</option></select><small>选择后右侧会自动切到封面结尾并立即演示。</small></label>
+                  <div class="style-preset-gallery cover-motion-gallery" data-cover-animation-presets>
+                    <button type="button" class="style-preset-card is-active" data-cover-animation-value="gentle_push"><i class="preset-swatch cover-swatch cover-push"></i><span><b>舒缓推进</b><small>由远至近，聚焦人物</small></span><em>推荐</em></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="gentle_pull"><i class="preset-swatch cover-swatch cover-pull"></i><span><b>缓慢拉远</b><small>从细节回到完整封面</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="slow_pan"><i class="preset-swatch cover-swatch cover-pan"></i><span><b>横向慢移</b><small>适合双人或横向构图</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="soft_parallax"><i class="preset-swatch cover-swatch cover-parallax"></i><span><b>轻柔视差</b><small>细微漂移，更有层次</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="vertical_drift"><i class="preset-swatch cover-swatch cover-vertical"></i><span><b>纵向漂移</b><small>由上至下浏览完整封面</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="focus_reveal"><i class="preset-swatch cover-swatch cover-focus"></i><span><b>聚焦揭示</b><small>由柔焦逐渐进入清晰</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="cinematic_push"><i class="preset-swatch cover-swatch cover-cinematic"></i><span><b>电影推进</b><small>更明显但不突兀的推进</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="ken_burns_left"><i class="preset-swatch cover-swatch cover-left"></i><span><b>左向运镜</b><small>适合人物位于画面右侧</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="ken_burns_right"><i class="preset-swatch cover-swatch cover-right"></i><span><b>右向运镜</b><small>适合人物位于画面左侧</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="soft_flash"><i class="preset-swatch cover-swatch cover-flash"></i><span><b>柔光闪现</b><small>适合高潮与悬念收尾</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="fade"><i class="preset-swatch cover-swatch cover-fade"></i><span><b>柔和淡入</b><small>克制、舒适、不抢字幕</small></span></button>
+                    <button type="button" class="style-preset-card" data-cover-animation-value="none"><i class="preset-swatch cover-swatch cover-still"></i><span><b>静态封面</b><small>零运动，渲染最快</small></span></button>
+                  </div>
+                  <div class="cover-outro-proof"><span>01</span><div><b>封面铺满全屏</b><small>使用真实小说封面；无封面时显示统一的高质感占位画面。</small></div><span>02</span><div><b>旁白 + 当前字幕样式</b><small>不再叠加平台白卡，画面更干净。</small></div></div>
+                  <div class="visually-hidden" aria-hidden="true" data-legacy-outro-controls>
+                  <select id="outro-card-preset" hidden aria-hidden="true" tabindex="-1"><option value="editorial_white">杂志白卡</option><option value="cinematic_dark">电影暗卡</option><option value="brand_focus">品牌聚焦</option><option value="minimal_clean">纯净极简</option></select>
+                  <div class="style-free-editor-body">
+                    <div class="style-control-group"><h4>文字</h4><div class="style-control-grid">
+                      <label class="field"><span>字体</span><select id="outro-font"><option>Arial</option><option>Segoe UI</option><option>Georgia</option><option>Bahnschrift</option></select></label>
+                      <label class="field"><span>悬念标题字号</span><input id="outro-title-size" type="number" min="36" max="96" value="62" /></label>
+                      <label class="field color-field"><span>标题颜色</span><input id="outro-title-color" type="color" value="#17243C" /></label>
+                      <label class="field"><span>引导文案字号</span><input id="outro-body-size" type="number" min="22" max="54" value="32" /></label>
+                      <label class="field color-field"><span>引导文案颜色</span><input id="outro-body-color" type="color" value="#53627A" /></label>
+                      <label class="field"><span>口令字号</span><input id="outro-code-size" type="number" min="28" max="68" value="42" /></label>
+                      <label class="field color-field"><span>口令颜色</span><input id="outro-code-color" type="color" value="#315BD8" /></label>
+                      <label class="field"><span>对齐</span><select id="outro-alignment"><option value="center">居中</option><option value="left">左对齐</option><option value="right">右对齐</option></select></label>
+                    </div></div>
+                    <div class="style-control-group"><h4>卡片</h4><div class="style-control-grid">
+                      <label class="field color-field"><span>背景颜色</span><input id="outro-background" type="color" value="#FFFFFF" /></label>
+                      <label class="field"><span>背景透明度 <output id="outro-opacity-value">98%</output></span><input id="outro-opacity" type="range" min="35" max="100" value="98" /></label>
+                      <label class="field color-field"><span>边框颜色</span><input id="outro-border" type="color" value="#D0DAE7" /></label>
+                      <label class="field"><span>边框宽度</span><input id="outro-border-width" type="number" min="0" max="12" value="2" /></label>
+                      <label class="field"><span>内边距</span><input id="outro-padding" type="number" min="16" max="80" value="42" /></label>
+                      <label class="field"><span>圆角</span><input id="outro-radius" type="number" min="0" max="72" value="32" /></label>
+                    </div></div>
+                    <div class="style-control-group"><h4>位置与尺寸</h4><div class="style-control-grid">
+                      <label class="field"><span>宽度 <output id="outro-width-value">70%</output></span><input id="outro-width" type="range" min="50" max="82" value="70" /></label>
+                      <label class="field"><span>高度 <output id="outro-height-value">38%</output></span><input id="outro-height" type="range" min="28" max="58" value="38" /></label>
+                      <label class="field"><span>水平位置 <output id="outro-x-value">50%</output></span><input id="outro-x" type="range" min="30" max="70" value="50" /></label>
+                      <label class="field"><span>垂直位置 <output id="outro-y-value">31%</output></span><input id="outro-y" type="range" min="16" max="52" value="31" /></label>
+                    </div></div>
+                  </div></div>
+                </div>
+
+                <div class="custom-style-shelf">
+                  <div><b id="custom-style-shelf-title">制作方案</b><small id="custom-style-shelf-copy">保存后立即出现在制作台；方案不会携带小说、口令或本机文件夹。</small></div>
+                  <label class="field"><span>方案名称</span><input id="custom-style-name" maxlength="40" placeholder="例如 美式悬疑 · 高对比" /></label>
+                  <button type="button" class="button button-secondary" id="save-custom-style-preset">保存到制作台</button>
+                  <label class="field"><span>管理已保存方案</span><select id="custom-style-presets"><option value="">选择已保存方案</option></select></label>
+                  <button type="button" class="text-button" id="delete-custom-style-preset" disabled>删除</button>
+                </div>
+              </section>
+              <div class="visually-hidden settings-admin-only" id="default-template-proof" data-template="platform_story_card"><b>当前默认：平台简介卡</b><small>前 5.5 秒展示标题、平台口令与故事简介。</small></div>
+              <details class="panel setting-block settings-admin-only settings-defaults-fold">
+                <summary>
+                  <span><b>其他团队默认</b><small>文案、旁白、背景音乐与渲染参数；日常制作无需反复调整。</small></span>
+                  <em>按需展开</em>
+                </summary>
+                <div class="settings-defaults-content">
+                  <section class="settings-defaults-group" aria-labelledby="settings-script-default-title">
+                    <div class="settings-defaults-heading"><div><p class="section-kicker">SCRIPT</p><h3 id="settings-script-default-title">文案策略</h3></div><span>保留剧情，增强吸引力</span></div>
+                    <div class="choice-grid">
+                      <label class="choice-card"><input type="radio" name="adult_mode" value="direct" /><span><b>原意直述</b><small>保留直接表达，只修复英文和翻译腔。</small></span></label>
+                      <label class="choice-card"><input type="radio" name="adult_mode" value="engaging" checked /><span><b>吸引力增强</b><small>强化冲突、情绪与悬念，不编造关键剧情。</small></span></label>
+                    </div>
+                    <div class="script-rules">
+                      <span><b>85–90%</b> 目标剧情保留</span>
+                      <span><b>自动</b> 删除重复句</span>
+                      <span><b>隐藏</b> 章节标题</span>
+                    </div>
+                    <label class="field compact-control"><span>章节切换停顿（秒）</span><input id="setting-chapter-pause" type="number" min="0" max="3" step="0.1" value="0.8" /><small>章节标题不朗读、不显示，只保留短暂停顿。</small></label>
+                  </section>
+
+                  <section class="settings-defaults-group" aria-labelledby="settings-voice-default-title">
+                    <div class="settings-defaults-heading"><div><p class="section-kicker">VOICE &amp; MUSIC</p><h3 id="settings-voice-default-title">旁白与背景音乐</h3></div><span>题材自动匹配一个女声</span></div>
+                    <div class="inline-settings audio-controls">
+                      <label class="field"><span>目标语速（WPM）</span><input id="setting-wpm" type="number" min="140" max="230" value="210" /><small>建议 200–220；最终会按声音模型做安全校准。</small></label>
+                      <label class="field"><span>背景音乐音量：<output id="setting-bgm-volume-value">28%</output></span><input id="setting-bgm-volume" type="range" min="5" max="50" step="1" value="28" /><small>旁白出现时会自动压低音乐，不遮盖人声。</small></label>
+                    </div>
+                    <div class="speed-presets" role="group" aria-label="语速快捷选项">
+                      <span>快捷语速</span>
+                      <button type="button" data-wpm="190">自然 190</button>
+                      <button type="button" data-wpm="210">推荐 210</button>
+                      <button type="button" data-wpm="225">紧凑 225</button>
+                    </div>
+                    <div class="voice-settings">
+                      <label class="field"><span>悬疑女声</span><select id="voice-suspense"><option value="dramatic">戏剧张力</option><option value="warm">温暖亲密</option><option value="calm">冷静低沉</option><option value="confident">清晰强势</option></select></label>
+                      <label class="field"><span>浪漫女声</span><select id="voice-romance"><option value="warm">温暖亲密</option><option value="dramatic">戏剧张力</option><option value="calm">冷静低沉</option><option value="confident">清晰强势</option></select></label>
+                      <label class="field"><span>悲伤女声</span><select id="voice-sad"><option value="calm">冷静低沉</option><option value="warm">温暖亲密</option><option value="dramatic">戏剧张力</option><option value="confident">清晰强势</option></select></label>
+                      <label class="field"><span>爽文女声</span><select id="voice-revenge"><option value="confident">清晰强势</option><option value="dramatic">戏剧张力</option><option value="warm">温暖亲密</option><option value="calm">冷静低沉</option></select></label>
+                    </div>
+                    <p class="setting-hint">声音档案会按小说语种映射到 Kokoro、Edge TTS 或 Deepgram 的真实女声；每批试听后固定一个声音。</p>
+                  </section>
+
+                  <section class="settings-defaults-group settings-defaults-render" aria-labelledby="settings-render-default-title">
+                    <div class="settings-defaults-heading"><div><p class="section-kicker">RENDER &amp; COVER</p><h3 id="settings-render-default-title">渲染与封面动效</h3></div><span>单批仍可覆盖</span></div>
+                    <div class="render-strategy-grid">
+                      <label class="field"><span>渲染模式</span><select id="render-mode"><option value="speed">速度优先</option><option value="quality">质量优先</option><option value="compatibility">兼容模式</option></select><small>速度优先适合多台电脑并行；异常素材可改用兼容模式。</small></label>
+                      <label class="field"><span>输出帧率</span><select id="output-fps"><option value="60">60 FPS（推荐，更流畅）</option><option value="30">30 FPS（生成更快）</option></select><small>60 FPS 是成片默认值；配置较低或赶批量时可选 30 FPS。</small></label>
+                    </div>
+                    <p class="strategy-proof" id="style-strategy-proof" role="status">语义切分 · 清晰描边 · 字幕无动画 · 60 FPS · 速度优先 · 封面舒缓推进</p>
+                  </section>
+                </div>
+              </details>
+            </div>
+            <aside class="preview-dock preview-settings">
+              <div class="preview-heading"><div><p class="section-kicker">LIVE STYLE PROOF</p><h2>实时预览</h2></div><span class="preview-live-badge"><i></i> LIVE</span></div>
+              <div class="style-preview-scenes" role="group" aria-label="切换预览画面">
+                <button type="button" class="is-active" data-style-preview-scene="intro">简介卡</button>
+                <button type="button" data-style-preview-scene="subtitle">字幕</button>
+                <button type="button" data-style-preview-scene="code">口令</button>
+                <button type="button" data-style-preview-scene="outro">封面结尾</button>
+              </div>
+              <div class="phone-stage"><div class="video-preview style-preview" id="style-preview" data-video-template="platform_story_card" data-preview-scene="intro">
+                <div class="preview-media"><div class="media-orbit orbit-one"></div><div class="media-orbit orbit-two"></div><div class="media-block block-one"></div></div>
+                <div class="outro-cover-preview" id="style-outro-cover" data-cover-animation="gentle_push" aria-label="小说封面全屏结尾">
+                  <img alt="" hidden />
+                  <span class="outro-cover-placeholder"><b>S</b><small>STORYFORGE · NOVEL COVER</small></span>
+                  <i class="outro-cover-shade" aria-hidden="true"></i>
+                </div>
+                <div class="safe-zone"><span>SAFE FRAME</span></div>
+                <div class="code-card">Search GoodNovel: B56826</div>
+                <div class="story-template-intro" aria-label="平台简介卡开场预览"><h3 class="story-preview-title" lang="en-US">HER HUSBAND HAD ANOTHER LIFE</h3><div class="story-summary-card"><div class="story-card-ticket"><span class="story-card-platform-mark" id="style-story-platform-mark" aria-hidden="true"><span class="platform-logo-fallback">G</span></span><b id="style-story-search">GoodNovel · Search “B56826”</b></div><p lang="en-US">A late-night message exposes the secret he kept for years. She must decide whether revenge is worth the price.</p><strong class="story-card-label">STORY BRIEF</strong></div></div>
+                <div class="preview-subtitle" lang="en-US"><span class="caption-word is-read">She</span> <span class="caption-word is-read">opened</span> <span class="caption-word is-current">the</span> <span class="caption-word">message</span> <span class="caption-word">and</span> <span class="caption-word">realized</span> <span class="caption-word">her</span> <span class="caption-word">husband</span> <span class="caption-word">had</span> <span class="caption-word">another</span> <span class="caption-word">life.</span></div>
+                <div class="preview-subtitle outro-caption-preview" lang="en-US">Download GoodNovel and search B56826 to continue reading.</div>
+                <div class="outro-style-preview" hidden aria-hidden="true"><span class="outro-kicker">KEEP READING</span><h3>The truth was only beginning.</h3><p>Download GoodNovel to uncover what she did next.</p><strong>Search “B56826”</strong></div>
+                <div class="tiktok-ghost"><i></i><i></i><i></i></div>
+              </div></div>
+              <div class="style-preview-status"><span><b id="style-preview-scene-title">简介卡</b><small id="style-preview-preset-title">杂志白卡 · 团队默认</small></span><button type="button" class="text-button" id="toggle-style-safe-zone">隐藏安全区</button></div>
+              <p class="preview-caption">按 9:16 等比例预览。位置超出安全区时，最终渲染会自动拉回；逐词效果按真实配音句段时长同步。</p>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" data-view="providers">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">SERVICE CONNECTIONS / 服务连接</p>
+              <h1 id="providers-page-title">本地可长期使用，云端按需加速</h1>
+              <p id="providers-page-copy">Kokoro 可离线运行；Edge TTS 无需密钥但生成时需联网；软件不会自动开通付费服务或产生扣费。</p>
+            </div>
+            <div class="head-actions"><button type="button" class="button button-secondary" data-open-view="settings">返回设置</button><button class="button button-primary" id="save-providers">保存连接</button></div>
+          </header>
+          <div class="provider-layout" id="provider-layout">
+            <section class="panel provider-card provider-local-maintenance-card provider-employee-local" id="employee-local-maintenance" aria-labelledby="employee-local-maintenance-title">
+              <div class="provider-title"><span class="provider-badge local">PC</span><div><h2 id="employee-local-maintenance-title">这台电脑的配音服务</h2><p>只切换当前制作电脑，不修改团队服务、API Key 或其他电脑。</p></div><span class="connection-state" id="employee-local-tts-state">正在检查</span></div>
+              <label class="field"><span>免费配音方式</span><select id="employee-local-tts-provider"><option value="" disabled>选择当前电脑使用的免费配音</option><option value="local_kokoro">Kokoro 本地配音</option><option value="edge_tts">Edge TTS 多语种（需联网）</option></select><small>Kokoro 适合离线英语制作；Edge TTS 支持更多语种且无需 API Key。</small></label>
+              <div class="local-tts-readiness-grid" aria-label="本机免费配音状态">
+                <span id="employee-kokoro-readiness"><i></i><b>Kokoro</b><small>正在读取本机组件</small></span>
+                <span id="employee-edge-readiness"><i></i><b>Edge TTS</b><small>正在读取本机组件</small></span>
+              </div>
+              <div class="local-maintenance-actions"><button type="button" class="button button-secondary" id="open-local-maintenance-update">打开软件更新</button><small>软件更新是独立功能，不会开放管理员设置。</small></div>
+            </section>
+            <section class="panel provider-card provider-admin-config">
+              <div class="provider-title"><span class="provider-badge">TEXT</span><div><h2>英文润色</h2><p>乱码修复在本地完成，AI 负责钩子、润色和结尾。</p></div><span class="connection-state" id="text-provider-state">本地可用</span></div>
+              <label class="field"><span>服务</span><select id="text-provider"><option value="local">本地规则模式</option><option value="groq">Groq 免费层 API</option><option value="cloudflare">Cloudflare Workers AI</option><option value="ollama">Ollama 本地模型</option></select></label>
+              <label class="field"><span>模型</span><input id="text-model" placeholder="留空使用推荐模型" /></label>
+              <label class="field"><span>API 地址</span><input id="text-endpoint" placeholder="服务默认地址" /><small id="text-endpoint-help">仅使用自定义服务时需填写。</small></label>
+              <label class="field"><span>API Key</span><input id="text-api-key" type="password" autocomplete="off" placeholder="未填写" /></label>
+            </section>
+            <section class="panel provider-card provider-admin-config">
+              <div class="provider-title"><span class="provider-badge voice">VOICE</span><div><h2>女声旁白</h2><p>同一视频只用一个声音，根据故事题材选择女声。</p></div><span class="connection-state" id="voice-provider-state">检查配置</span></div>
+              <label class="field"><span>服务</span><select id="tts-provider"><option value="local_kokoro">Kokoro 本地（需安装 / HTTP）</option><option value="edge_tts">Edge TTS 多语种（无需 Key，需联网）</option><option value="deepgram">Deepgram Aura（需 API Key）</option></select><small>Edge 候选会在当前电脑实时读取上游女声；取不到时不会显示虚构声线。</small></label>
+              <label class="field"><span>云端自定义 API 地址</span><input id="tts-endpoint" placeholder="留空使用 Deepgram 默认地址" /></label>
+              <label class="field"><span>API Key</span><input id="tts-api-key" type="password" autocomplete="off" placeholder="本地模式不需要" /></label>
+              <label class="field"><span>Kokoro 本地地址</span><input id="kokoro-endpoint" placeholder="使用独立 Kokoro 服务时填写 HTTP 地址" /><small>当前电脑已安装内置 Kokoro 时可以留空。</small></label>
+              <label class="field"><span>硬性月字符上限</span><input id="character-limit" type="number" min="0" step="1000" value="0" /><small>0 表示不设本地上限；实际免费额度和付款要求以供应商账号页为准。</small></label>
+            </section>
+            <section class="panel health-panel provider-local-maintenance-card">
+              <div class="panel-heading"><div><p class="section-kicker">THIS MACHINE</p><h2>当前制作电脑自检</h2></div><button type="button" class="button button-secondary" id="run-worker-self-check">重新自检</button></div>
+              <div class="worker-health-summary" id="worker-health-summary" role="status">正在读取当前电脑的制作环境…</div>
+              <div class="health-list" id="health-list"><div class="health-row"><span class="health-dot pending"></span><div><b>正在检测</b><small>读取本机编码器与运行时</small></div></div></div>
+              <details class="worker-health-details" id="worker-health-details">
+                <summary>查看技术详情</summary>
+                <pre id="worker-health-technical">等待自检结果</pre>
+              </details>
+              <aside class="local-worker-setup-guide" aria-label="本机制作服务说明">
+                <span class="local-worker-setup-mark" aria-hidden="true">PC</span>
+                <div>
+                  <b>网页端与软件使用同一套制作能力</b>
+                  <small>登录后本机制作服务会自动启动，网页直接调用这台电脑的素材、配音、FFmpeg/GPU 与输出目录。</small>
+                </div>
+              </aside>
+              <label class="switch-row provider-admin-config"><span><b>服务失败时切换</b><small>记录失败原因，再转入已配置的本地 Kokoro。</small></span><input id="provider-fallback" type="checkbox" checked /><i></i></label>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="hub">
+          <header class="page-head compact-head">
+            <div>
+              <p class="eyebrow">STORYFORGE HUB / 多电脑协同</p>
+              <h1>一台主电脑，连接多台制作电脑</h1>
+              <p>设备数量不再固定；主电脑保持 StoryForge 运行，其他电脑可使用客户端接入，也可直接在浏览器登录。</p>
+            </div>
+            <div class="head-actions"><button type="button" class="button button-secondary" data-open-view="settings">返回设置</button><button type="button" class="button button-primary" id="save-hub-settings">保存协同设置</button></div>
+          </header>
+          <section class="hub-setup-guide panel" aria-labelledby="hub-guide-title">
+            <div class="hub-guide-heading"><div><p class="section-kicker">QUICK GUIDE / 简化流程</p><h2 id="hub-guide-title">员工只需账号密码</h2></div><button type="button" class="text-button" data-open-view="accounts">去建立成员账号 →</button></div>
+            <ol class="setup-steps">
+              <li><span>1</span><div><b>主电脑选“设为主电脑”</b><small>保存并重启后，主电脑必须保持 StoryForge 运行。</small></div></li>
+              <li><span>2</span><div><b>管理员为成员设置初始密码</b><small>账号与密码可在任意数量的制作电脑上完成首次连接。</small></div></li>
+              <li><span>3</span><div><b>员工输入账号和密码</b><small>主电脑地址与电脑名称自动使用已配置内容；只在连接失败时打开高级设置。</small></div></li>
+            </ol>
+          </section>
+          <div class="hub-layout">
+            <section class="panel hub-settings-card">
+              <div class="panel-heading"><div><p class="section-kicker">THIS COMPUTER</p><h2>这台电脑的用途</h2></div><span class="panel-note">用途保存后重启软件生效；账号连接立即生效</span></div>
+              <label class="field"><span>选择用途</span><select id="hub-mode"><option value="local">单机使用（不与其他电脑共享）</option><option value="host">设为主电脑（长期运行）</option><option value="client">接入主电脑（制作电脑）</option></select><small id="hub-mode-help">适合单台电脑使用，所有记录和文件都留在本机。</small></label>
+              <div class="hub-field-grid hub-admin-machine-fields">
+                <label class="field"><span>这台电脑的名称</span><input id="hub-host-device-name" placeholder="例如 主电脑" /></label>
+                <label class="field hub-host-only" id="hub-port-field"><span>连接端口</span><input id="hub-listen-port" type="number" min="1" max="65535" value="8765" /><small>通常保持默认即可。</small></label>
+              </div>
+              <section class="hub-account-connect-card hub-client-only" id="hub-account-connect-card">
+                <div class="hub-account-connect-heading"><span aria-hidden="true">→</span><div><b>登录这台制作电脑</b><small>首次成功后自动登记电脑并启动本机制作服务。</small></div></div>
+                <div class="hub-account-connect-grid">
+                  <label class="field"><span>员工账号</span><input id="hub-account-username" autocomplete="username" maxlength="200" placeholder="输入管理员分配的账号" /></label>
+                  <label class="field"><span>密码</span><input id="hub-account-password" type="password" autocomplete="current-password" maxlength="512" placeholder="输入账号密码" /></label>
+                </div>
+                <div class="hub-connect-actions"><p id="hub-account-connect-status" role="status">输入账号和密码即可登录。</p><button type="button" class="button button-primary" id="connect-hub-password">登录并开始制作</button></div>
+                <details class="hub-connection-advanced" id="hub-connection-advanced">
+                  <summary><span><b>连接设置（高级）</b><small>预设地址无法连接时再修改</small></span></summary>
+                  <div class="hub-connection-advanced-body">
+                    <label class="field" id="hub-endpoint-field"><span>主电脑地址</span><input id="hub-endpoint" autocomplete="url" placeholder="例如 http://192.168.1.20:8765" /><small>默认使用软件中已保存的地址。</small></label>
+                    <label class="field"><span>电脑名称</span><input id="hub-device-name" placeholder="自动识别当前电脑" /><small>已自动识别；只在需要区分多台电脑时修改。</small></label>
+                  </div>
+                </details>
+              </section>
+              <div class="hub-media-boundary-note hub-host-only">
+                <b>成片与旁白只保存在制作电脑</b>
+                <small>主电脑只记录小说、批次、进度、结果和本机文件引用，不上传视频、配音、预览或字幕对齐文件。</small>
+              </div>
+              <p class="hub-restart-note">同一局域网先按上方三步连接。不同地点的电脑可独立运行一套 StoryForge，暂不自动同步记录。</p>
+            </section>
+            <aside class="panel hub-status-card">
+              <div class="hub-status-mark" id="hub-status-mark" aria-hidden="true">H</div>
+              <p class="section-kicker">CONNECTION CHECK / 状态</p>
+              <h2 id="hub-status-title">等待检查</h2>
+              <p id="hub-status-copy" role="status">保存并重启后，点击检查即可确认连接是否正常。主电脑必须保持 StoryForge 运行。</p>
+              <dl><div><dt>电脑名称</dt><dd id="hub-status-device">—</dd></div><div><dt>当前用途</dt><dd id="hub-status-mode">—</dd></div></dl>
+              <div class="hub-connection-proof is-hidden" id="hub-host-connection">
+                <span>团队访问地址</span>
+                <code id="hub-host-endpoint">—</code>
+                <button type="button" class="button button-secondary" id="copy-hub-endpoint" disabled>复制访问地址</button>
+                <small>客户端可填写此地址，浏览器也可直接打开登录。主电脑关闭 StoryForge 后，其他电脑会断开。</small>
+              </div>
+              <div class="hub-connection-proof is-hidden" id="hub-client-web-connection">
+                <span>这台电脑的制作网页</span>
+                <code id="hub-client-web-endpoint">—</code>
+                <button type="button" class="button button-secondary" id="copy-hub-client-web-endpoint" disabled>复制制作网址</button>
+                <small>只在这台制作电脑打开。候选配音、素材、字幕、队列和成片都由本机处理，主电脑只提供共享资料和文本 AI。</small>
+              </div>
+              <section class="device-sync-card is-hidden" id="device-sync-card" aria-labelledby="device-sync-title">
+                <div class="device-sync-heading">
+                  <span class="device-sync-pulse" id="device-sync-pulse" aria-hidden="true"></span>
+                  <div><small>本机制作设置</small><b id="device-sync-title">等待同步</b></div>
+                  <em id="device-sync-badge">未连接</em>
+                </div>
+                <p id="device-sync-copy">连接主电脑后，这台电脑会自动接收管理员下发的字幕、语速和输出设置。</p>
+                <div class="device-sync-facts">
+                  <span><small>已应用版本</small><b id="device-sync-revision">本机默认</b></span>
+                  <span><small>最近同步</small><b id="device-sync-time">尚未同步</b></span>
+                </div>
+                <p class="device-sync-error is-hidden" id="device-sync-error" role="alert"></p>
+                <button type="button" class="button button-secondary" id="sync-device-config-now">立即同步设置</button>
+              </section>
+              <button type="button" class="button button-secondary" id="check-hub-status">检查连接</button>
+            </aside>
+          </div>
+          <section class="panel managed-device-fleet is-hidden" id="managed-device-fleet" aria-labelledby="managed-device-title">
+            <header class="managed-device-head">
+              <div>
+                <p class="section-kicker">WORKSTATION FLEET / 制作电脑</p>
+                <h2 id="managed-device-title">真实设备与下发状态</h2>
+                <p>制作电脑使用账号密码首次登录后会自动出现，无需管理员单独授权。</p>
+              </div>
+              <button type="button" class="button button-secondary" id="refresh-managed-devices">刷新设备</button>
+            </header>
+            <div class="managed-device-stat-rail" role="status" aria-live="polite">
+              <span><small>已登记</small><b id="managed-device-total">0</b></span>
+              <span><small>当前在线</small><b id="managed-device-online">0</b></span>
+              <span><small>已停用</small><b id="managed-device-disabled">0</b></span>
+              <span class="managed-device-stat-copy" id="managed-device-refresh-proof">等待读取主电脑设备</span>
+            </div>
+            <div class="managed-device-workspace">
+              <section class="managed-device-directory" aria-label="制作电脑列表">
+                <div class="managed-device-toolbar">
+                  <div><b>选择接收设置的电脑</b><small id="managed-device-selection">尚未选择</small></div>
+                  <button type="button" class="text-button" id="select-all-managed-devices">全选可用设备</button>
+                </div>
+                <div class="managed-device-list" id="managed-device-list">
+                  <div class="hub-device-empty"><span aria-hidden="true">PC</span><b>还没有登记的制作电脑</b><small>让员工在自己的电脑输入主电脑地址、账号、密码和电脑名，连接成功后会自动出现在这里。</small></div>
+                </div>
+              </section>
+              <aside class="managed-config-composer" aria-labelledby="managed-config-title">
+                <div class="managed-config-heading">
+                  <span aria-hidden="true">CFG</span>
+                  <div><small>SAFE SETTINGS</small><b id="managed-config-title">下发制作默认值</b></div>
+                </div>
+                <p>只同步跨电脑安全的制作参数；不会覆盖模型密钥、本机路径、编码器或服务地址。</p>
+                <fieldset class="managed-target-picker">
+                  <legend>发送范围</legend>
+                  <label><input type="radio" name="managed-config-target" value="selected" checked /><span><b>所选电脑</b><small id="managed-target-selected-copy">请先选择设备</small></span></label>
+                  <label><input type="radio" name="managed-config-target" value="all" /><span><b>全部可用电脑</b><small>包含当前离线但仍启用的设备</small></span></label>
+                </fieldset>
+                <div class="managed-config-fields">
+                  <label class="field"><span>旁白语速</span><input id="managed-config-wpm" type="number" min="100" max="400" step="5" value="210" /><small>每分钟单词数</small></label>
+                  <label class="field"><span>背景音乐</span><div class="managed-config-volume"><input id="managed-config-bgm" type="range" min="0" max="100" value="28" /><output id="managed-config-bgm-value">28%</output></div></label>
+                  <label class="field"><span>输出帧率</span><select id="managed-config-fps"><option value="60">60 FPS（推荐）</option><option value="30">30 FPS</option></select></label>
+                  <label class="field"><span>默认语种</span><select id="managed-config-language"><option value="en-US">美式英语</option><option value="en-GB">英式英语</option><option value="ja-JP">日语</option><option value="id-ID">印度尼西亚语</option><option value="es-ES">西班牙语</option></select></label>
+                </div>
+                <div class="managed-config-proof" id="managed-config-proof"><b>同时包含</b><span>当前团队字幕、简介卡、口令卡、封面动画和渲染策略</span></div>
+                <label class="field"><span>本次说明（可选）</span><input id="managed-config-note" maxlength="1000" placeholder="例如：统一改为 60 FPS 和新字幕样式" /></label>
+                <p class="managed-config-status" id="managed-config-status" role="status">选择目标后即可下发。</p>
+                <button type="button" class="button button-primary" id="push-managed-device-config">下发到制作电脑</button>
+                <div class="managed-config-history">
+                  <div><b>最近下发</b><small>电脑联网后会自动应用</small></div>
+                  <div id="managed-config-history"><span class="managed-config-history-empty">还没有下发记录</span></div>
+                </div>
+              </aside>
+            </div>
+          </section>
+          <section class="panel update-center" aria-labelledby="update-center-title">
+            <div class="update-center-head">
+              <div><p class="section-kicker">TEAM UPDATE / 团队更新</p><h2 id="update-center-title">主电脑发布一次，其他电脑自动更新</h2><p>默认开启自动检查与后台下载；员工无需手动复制更新包，下载完成后会在下次重启 StoryForge 时应用，也不会中断正在渲染的视频。</p></div>
+              <span class="update-state-badge" id="update-state-badge"><i></i><b id="update-state-label">正在读取状态</b></span>
+            </div>
+            <div class="update-status-strip">
+              <div><span>当前版本</span><b id="update-current-version">—</b></div>
+              <div><span>主机最新版本</span><b id="update-available-version">—</b></div>
+              <div><span>最近检查</span><b id="update-checked-at">尚未检查</b></div>
+              <div><span>安装方式</span><b id="update-apply-proof">重启后安全安装</b></div>
+            </div>
+            <div class="update-center-grid">
+              <div class="update-client-panel">
+                <div class="update-panel-heading"><span class="update-panel-mark">PC</span><div><b>这台电脑</b><small>自动检查、下载与重启安装</small></div></div>
+                <div class="update-client-options">
+                  <label class="switch-row compact-switch"><span><b>自动检查更新</b><small>连接主电脑后定时检查新版本。</small></span><input id="auto-update-enabled" type="checkbox" checked /><i></i></label>
+                  <label class="switch-row compact-switch"><span><b>自动下载并安排更新</b><small>后台下载；不会中断渲染，退出并再次打开时自动安装。</small></span><input id="auto-download-updates" type="checkbox" checked /><i></i></label>
+                  <label class="field"><span>检查间隔</span><select id="update-check-minutes"><option value="1">每 1 分钟（推荐）</option><option value="2">每 2 分钟</option><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="30">每 30 分钟</option></select></label>
+                </div>
+                <p class="update-message" id="update-message" role="status">连接主电脑后会自动读取可用版本。</p>
+                <div class="update-actions">
+                  <button type="button" class="button button-secondary" id="check-for-updates">立即检查</button>
+                  <button type="button" class="button button-secondary is-hidden" id="download-update">下载更新</button>
+                  <button type="button" class="button button-primary is-hidden" id="schedule-update">重启后安装</button>
+                  <button type="button" class="text-button is-hidden" id="cancel-scheduled-update">取消安装</button>
+                </div>
+              </div>
+              <div class="update-host-panel hub-host-only" id="update-host-panel">
+                <div class="update-panel-heading"><span class="update-panel-mark host">H</span><div><b>主电脑发布新版</b><small>仅管理员在主电脑操作</small></div></div>
+                <div class="update-publish-grid">
+                  <label class="field update-package-field"><span>更新包</span><div><input id="update-package-path" readonly placeholder="选择已测试的 StoryForge 更新包" /><button type="button" class="button button-ghost" id="choose-update-package">选择</button></div></label>
+                  <label class="field"><span>版本号</span><input id="update-publish-version" placeholder="例如 2.4.0" /></label>
+                  <label class="field update-release-notes"><span>本次更新说明</span><textarea id="update-release-notes" rows="3" placeholder="例如：新增样式工作室、修复日语分集时长…"></textarea></label>
+                </div>
+                <div class="update-host-actions"><span>发布后，已连接的制作电脑会在下一次检查时收到新版。</span><button type="button" class="button button-secondary" id="clear-published-update">撤回更新</button><button type="button" class="button button-primary" id="publish-update">发布给团队</button></div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="app-dialog" id="novel-import-dialog" aria-labelledby="novel-import-title">
+      <form method="dialog" id="novel-import-form">
+        <header class="dialog-head">
+          <div><p class="section-kicker">ADD TO LIBRARY</p><h2 id="novel-import-title">添加一部小说</h2></div>
+          <button type="button" class="icon-button" id="close-novel-import" aria-label="关闭添加小说">×</button>
+        </header>
+        <div class="dialog-body">
+          <div class="import-source-grid" role="group" aria-label="小说来源">
+            <button type="button" class="import-source is-active" data-import-source="paste" aria-pressed="true"><b>粘贴正文</b><small>直接粘贴故事或章节</small></button>
+            <button type="button" class="import-source" data-import-source="txt" aria-pressed="false"><b>选择 TXT</b><small>UTF-8 或常见文本编码</small></button>
+            <button type="button" class="import-source" data-import-source="docx" aria-pressed="false"><b>选择 DOCX</b><small>Word 文档（不含旧 DOC）</small></button>
+          </div>
+          <div class="import-file-proof is-hidden" id="import-file-proof">
+            <span id="import-file-kind">TXT</span><b id="import-file-name">尚未选择文件</b><small id="import-file-path">选择来源按钮后打开文件选择器。</small>
+          </div>
+          <label class="field import-paste-field" id="import-paste-field"><span>小说正文</span><textarea id="import-text-content" name="text" rows="8" placeholder="在这里粘贴小说正文，可包含多个章节…"></textarea><small>正文会用于内容指纹去重，并自动识别主要语种；原章节边界会保留。</small></label>
+          <div class="import-meta-grid">
+            <label class="field"><span>小说标题</span><input name="title" id="import-title" required placeholder="例如 Starting Over at Sixty Years Old" /></label>
+            <label class="field"><span>语种分类</span><select name="language" id="import-language"><option value="">自动识别（推荐）</option><option value="en">英语</option><option value="zh-Hans">简体中文</option><option value="zh-Hant">繁体中文</option><option value="es">西班牙语</option><option value="pt">葡萄牙语</option><option value="id">印度尼西亚语</option><option value="fr">法语</option><option value="de">德语</option><option value="ja">日语</option><option value="ko">韩语</option></select><small>通常保持自动识别；仅在你确定时手动指定。</small></label>
+          </div>
+          <label class="field"><span>故事简介</span><textarea name="synopsis" id="import-synopsis" rows="3" placeholder="可现在填写，也可进入小说详情后补充。"></textarea></label>
+          <p class="dialog-status" id="import-dialog-status" role="status">当前来源：粘贴正文</p>
+        </div>
+        <footer class="dialog-actions">
+          <button type="button" class="button button-ghost" id="cancel-novel-import">取消</button>
+          <button type="submit" class="button button-primary" id="submit-novel-import">导入小说</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog artifact-dialog" id="record-artifact-dialog" aria-labelledby="record-artifact-title">
+      <header class="dialog-head">
+        <div><p class="section-kicker">PRODUCTION FILES</p><h2 id="record-artifact-title">制作文件</h2></div>
+        <button type="button" class="icon-button" data-close-record-artifacts aria-label="关闭制作文件查看">×</button>
+      </header>
+      <div class="dialog-body artifact-dialog-body">
+        <section class="artifact-preview" aria-label="历史视频文件">
+          <div class="artifact-video-frame">
+            <video id="record-artifact-video" controls playsinline preload="metadata" data-duration="15"></video>
+            <div class="artifact-video-empty is-hidden" id="record-artifact-video-empty"><b>没有可播放的视频文件</b><small>旁白或对齐文件仍可在右侧检查。</small></div>
+          </div>
+          <p id="record-artifact-source">正在读取本机或 Hub 缓存文件…</p>
+        </section>
+        <section class="artifact-files">
+          <div class="artifact-files-head"><div><p class="section-kicker">AVAILABLE FILES</p><h3>旁白与字幕对齐</h3></div><span id="record-artifact-count">0 个文件</span></div>
+          <p class="artifact-status" id="record-artifact-status" role="status">载入后可直接播放视频，并核对可用的旁白与字幕对齐文件。</p>
+          <div class="artifact-list" id="record-artifact-list"></div>
+        </section>
+      </div>
+      <footer class="dialog-actions">
+        <button type="button" class="button button-secondary" data-close-record-artifacts>关闭</button>
+      </footer>
+    </dialog>
+
+    <dialog class="app-dialog managed-device-dialog" id="managed-device-dialog" aria-labelledby="managed-device-dialog-title">
+      <form method="dialog" id="managed-device-form">
+        <header class="dialog-head">
+          <div><p class="section-kicker">DEVICE NAME / 设备名称</p><h2 id="managed-device-dialog-title">修改电脑名称</h2></div>
+          <button type="button" class="icon-button" data-close-managed-device aria-label="关闭设备名称窗口">×</button>
+        </header>
+        <div class="dialog-body">
+          <input type="hidden" name="device_id" />
+          <label class="field"><span>电脑名称</span><input name="device_name" maxlength="160" placeholder="例如 剪辑电脑-02" required /></label>
+          <p class="dialog-status" id="managed-device-dialog-status" role="status">名称会同步到对应制作电脑。</p>
+        </div>
+        <footer class="dialog-actions"><button type="button" class="button button-secondary" data-close-managed-device>取消</button><button type="submit" class="button button-primary" id="save-managed-device-name">保存名称</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog web-password-dialog" id="web-password-dialog" aria-labelledby="web-password-title">
+      <form method="dialog" id="web-password-form">
+        <header class="dialog-head">
+          <div><p class="section-kicker">ACCOUNT SECURITY</p><h2 id="web-password-title">设置网页登录密码</h2></div>
+          <button type="button" class="icon-button" data-close-web-password aria-label="关闭密码设置">×</button>
+        </header>
+        <div class="dialog-body">
+          <p class="web-password-intro">修改后，网页端和软件端都使用新密码登录。</p>
+          <label class="field"><span>当前密码</span><input id="web-current-password" type="password" autocomplete="current-password" required /></label>
+          <label class="field"><span>新密码</span><input id="web-new-password" type="password" autocomplete="new-password" minlength="8" maxlength="8" pattern="[!-~]{8}" required /><small>恰好 8 位，可使用字母、数字和标点，不能包含空格。</small></label>
+          <label class="field"><span>再次输入新密码</span><input id="web-confirm-password" type="password" autocomplete="new-password" minlength="8" maxlength="8" pattern="[!-~]{8}" required /></label>
+          <p class="web-login-status" id="web-password-status" role="alert" aria-live="polite"></p>
+        </div>
+        <footer class="dialog-actions"><button type="button" class="button button-secondary" data-close-web-password>取消</button><button type="submit" class="button button-primary" id="web-password-submit">保存新密码</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog employee-update-dialog" id="employee-update-dialog" aria-labelledby="employee-update-title">
+      <section>
+        <header class="dialog-head employee-update-head">
+          <div><p class="section-kicker">SOFTWARE UPDATE</p><h2 id="employee-update-title">更新这台制作电脑</h2><small>只更新 StoryForge，不会修改素材、成片或小说资料。</small></div>
+          <button type="button" class="icon-button" data-close-employee-update aria-label="关闭软件更新">×</button>
+        </header>
+        <div class="dialog-body employee-update-body">
+          <div class="employee-update-route" aria-label="版本升级路径">
+            <article><span id="employee-update-current-label">当前版本</span><b id="employee-update-current-version">—</b><small id="employee-update-current-copy">这台电脑正在使用</small></article>
+            <i aria-hidden="true">→</i>
+            <article class="is-target"><span>主机最新版本</span><b id="employee-update-available-version">正在读取</b><small id="employee-update-checked-at">尚未检查</small></article>
+          </div>
+          <p class="update-message employee-update-message" id="employee-update-message" role="status" aria-live="polite">正在读取主电脑提供的更新。</p>
+          <section class="employee-update-release is-hidden" id="employee-update-release"><b>本次更新</b><p id="employee-update-release-notes"></p></section>
+          <div class="employee-update-safety"><span aria-hidden="true">✓</span><div><b>安全安装</b><small id="employee-update-safety-copy">更新包会先完成校验；正在生成视频时不会强制退出。</small></div></div>
+        </div>
+        <footer class="dialog-actions employee-update-actions">
+          <button type="button" class="button button-ghost" data-close-employee-update>稍后处理</button>
+          <button type="button" class="button button-secondary" id="employee-check-for-updates">检查更新</button>
+          <button type="button" class="button button-secondary is-hidden" id="employee-download-update">下载更新</button>
+          <button type="button" class="button button-secondary is-hidden" id="employee-schedule-update">下次关闭时安装</button>
+          <button type="button" class="text-button is-hidden" id="employee-cancel-scheduled-update">取消安装安排</button>
+          <button type="button" class="button button-primary is-hidden" id="employee-restart-update">立即重启安装</button>
+        </footer>
+      </section>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <input class="is-hidden" id="web-file-picker" type="file" tabindex="-1" aria-hidden="true" />
+    <script src="app.js?v=33"></script>
+  </body>
+</html>

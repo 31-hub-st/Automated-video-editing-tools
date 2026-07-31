@@ -1,0 +1,9 @@
+imageio-ffmpeg>=0.6,<1
+# Freeze the Windows desktop bridge as one tested set. A newer transitive
+# pythonnet/clr-loader combination must not silently enter an employee build.
+pywebview==6.2.1
+pythonnet==3.1.0; sys_platform == "win32"
+clr-loader==0.3.1; sys_platform == "win32"
+# Optional no-key multilingual client.  It runs on each production computer
+# and still requires internet access when discovering voices or synthesizing.
+edge-tts>=7.2,<8

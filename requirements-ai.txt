@@ -1,0 +1,18 @@
+-r requirements.txt
+kokoro==0.9.4
+misaki[en,zh]==0.9.4
+# Windows/Python 3.12 wheel; exposes the same ``pyopenjtalk`` import used by
+# Misaki without requiring Visual Studio Build Tools on every production PC.
+pyopenjtalk-plus==0.4.1.post8
+fugashi==1.5.2
+jaconv==0.5.0
+mojimoji==0.0.13
+unidic-lite==1.0.8
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4
+torch==2.13.0
+transformers==5.14.1
+spacy==3.8.14
+numpy==2.5.1
+soundfile==0.14.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

@@ -3154,6 +3154,9 @@ class HubClient:
         timeout_seconds: float = 30.0,
         text_timeout_seconds: float = 120.0,
         max_json_response_bytes: int = 32 * 1024 * 1024,
+        authentication_failure_callback: (
+            Callable[[HubAuthenticationError], None] | None
+        ) = None,
     ) -> None:
         parsed = urlsplit(str(base_url or "").strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -3171,6 +3174,7 @@ class HubClient:
         self.max_json_response_bytes = int(max_json_response_bytes)
         if self.max_json_response_bytes < 1024:
             raise ValueError("max_json_response_bytes must be at least 1024")
+        self.authentication_failure_callback = authentication_failure_callback
 
     def _request(
         self,
@@ -3232,9 +3236,25 @@ class HubClient:
                 if int(error.code) == HTTPStatus.UNAUTHORIZED
                 else HubRemoteError
             )
-            raise exception_type(
+            remote_error = exception_type(
                 int(error.code), code, str(message), request_id=request_id
-            ) from None
+            )
+            # Only an explicitly invalid device credential disconnects the
+            # workstation runtime.  Other HTTP 401 responses can describe a
+            # bad account password or an expired one-time worker ticket while
+            # the installed device token remains perfectly valid.
+            if (
+                isinstance(remote_error, HubAuthenticationError)
+                and code in {"unauthorized", "device_session_revoked"}
+                and self.authentication_failure_callback is not None
+            ):
+                try:
+                    self.authentication_failure_callback(remote_error)
+                except Exception:
+                    # Connection-state reporting must never replace the
+                    # authoritative Hub exception seen by the caller.
+                    pass
+            raise remote_error from None
         except (URLError, TimeoutError, OSError) as error:
             raise HubConnectionError(f"could not reach StoryForge Hub: {error}") from error
 

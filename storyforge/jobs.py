@@ -754,6 +754,24 @@ class JobQueue:
                 job.status in active for job in self._jobs
             )
 
+    def has_unfinished_work(self) -> bool:
+        """Whether production should take priority over background work.
+
+        This includes queued work.  A large update must not reserve disk and
+        CPU in the short gap between enqueueing a batch and FFmpeg starting.
+        """
+
+        terminal = {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
+        with self._lock:
+            return bool(self._active_job_ids) or any(
+                job.status not in terminal for job in self._jobs
+            )
+
     def active_job_ids(self) -> set[str]:
         """Return a stable snapshot of processors which currently own work."""
 

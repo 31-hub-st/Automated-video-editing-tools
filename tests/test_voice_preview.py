@@ -4,7 +4,9 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
+from storyforge import maintenance
 from storyforge.models import AppSettings
 from storyforge.providers.base import ProviderConfigurationError
 from storyforge.providers.tts import SpeechSegment, TTSResult
@@ -178,6 +180,53 @@ class VoicePreviewTests(unittest.TestCase):
             [item["cache_key"] for item in first],
             [item["cache_key"] for item in second],
         )
+
+    def test_cache_hit_survives_aggressive_size_prune_with_its_sidecar(self) -> None:
+        settings = AppSettings()
+        fake = _TimedFakeProvider()
+        story = " ".join(
+            f"word{index}{'.' if index % 12 == 0 else ''}"
+            for index in range(1, 201)
+        )
+
+        def aggressive_prune(root, *, protected_paths=()):
+            return maintenance.prune_voice_preview_cache(
+                root,
+                max_bytes=0,
+                max_age_days=0,
+                protected_paths=protected_paths,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            service = VoicePreviewService(
+                lambda: settings,
+                tts_provider_factory=lambda _config: fake,
+                cache_root=temporary,
+            )
+            with patch(
+                "storyforge.services.voice_preview.prune_voice_preview_cache",
+                side_effect=aggressive_prune,
+            ):
+                first = service.generate(
+                    story,
+                    "suspense",
+                    temporary,
+                    narration_wpm=240,
+                )
+                second = service.generate(
+                    story,
+                    "suspense",
+                    temporary,
+                    narration_wpm=240,
+                )
+
+            self.assertEqual(len(fake.voices), 3)
+            self.assertTrue(all(item["cached"] for item in second))
+            for item in (*first, *second):
+                audio = Path(item["audio_path"])
+                sidecar = audio.parent / "preview.json"
+                self.assertTrue(audio.is_file())
+                self.assertTrue(sidecar.is_file())
 
     def test_preview_wpm_rejects_values_outside_supported_custom_range(self) -> None:
         settings = AppSettings()

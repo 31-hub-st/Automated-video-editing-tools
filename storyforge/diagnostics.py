@@ -166,8 +166,15 @@ def run_startup_self_test(
             with redirect_stdout(log), redirect_stderr(log):
                 from imageio_ffmpeg import get_ffmpeg_exe
 
+                # ``webview.start(gui="edgechromium")`` imports the WinForms
+                # backend and Python.NET on Windows.  Import both explicitly in
+                # the frozen smoke test; importing edgechromium alone missed a
+                # real employee-machine failure where Windows blocked
+                # Python.Runtime.dll after ZIP extraction.
+                import clr  # noqa: F401
                 import webview
                 import webview.platforms.edgechromium
+                import webview.platforms.winforms
 
                 from .api import StoryForgeApi
                 from .catalog import SCHEMA_VERSION
@@ -212,6 +219,7 @@ def run_startup_self_test(
                     ui_root=str(ui),
                     ffmpeg_path=str(ffmpeg),
                     webview_version=str(getattr(webview, "__version__", "")),
+                    pythonnet_bridge_loaded=True,
                     worker_url=worker.base_url,
                     worker_ready=bool(health_data.get("ready")),
                 )

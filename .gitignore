@@ -12,3 +12,28 @@ dist/
 .storyforge/
 models/
 output/
+
+# Local runtime assets and user data must never be published.
+local-ai/
+backups/
+StoryForgeData/
+web-workspace/
+render-work/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite
+*.sqlite3-*
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.pth
+*.pt
+
+# Built delivery artifacts are published separately from source control.
+*.zip
+*.msi
+*.exe

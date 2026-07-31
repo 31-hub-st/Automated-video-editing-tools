@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Final
 
 
-DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 1
+DIAGNOSTIC_SCHEMA_VERSION: Final[int] = 2
 DEFAULT_MAX_READ_BYTES: Final[int] = 64 * 1024
 DEFAULT_MAX_LOG_CHARS: Final[int] = 6_000
 
@@ -21,7 +21,14 @@ _SUMMARY_BY_CODE: Final[dict[str, str]] = {
     "disk_full": "制作电脑的可用磁盘空间不足。",
     "filter_or_subtitle": "画面滤镜、字体或字幕处理失败。",
     "encoder_init": "视频编码器启动失败，可能需要切换编码方式。",
-    "out_of_memory": "制作电脑可用内存不足，无法继续渲染。",
+    "resource_exhausted": (
+        "FFmpeg 无法申请本次渲染所需的系统资源。"
+        "可能是滤镜帧积压、分页文件、线程或可用内存受限，不等同于物理内存容量不足。"
+    ),
+    "out_of_memory": (
+        "FFmpeg 报告内存申请失败。"
+        "这也可能由滤镜帧积压或分页文件限制引起，不能仅据此判定电脑物理内存不足。"
+    ),
     "unknown": "FFmpeg 渲染失败，未识别到常见原因。",
 }
 
@@ -77,6 +84,16 @@ _CLASSIFICATION_PATTERNS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
         ),
     ),
     (
+        "resource_exhausted",
+        (
+            r"resource temporarily unavailable",
+            r"pthread_create.{0,40}failed",
+            r"cannot create (?:a )?thread",
+            r"insufficient system resources",
+            r"paging file is too small",
+        ),
+    ),
+    (
         "out_of_memory",
         (
             r"cannot allocate memory",
@@ -84,11 +101,6 @@ _CLASSIFICATION_PATTERNS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
             r"failed to allocate (?:memory|buffer)",
             r"not enough (?:available )?memory",
             r"bad_alloc",
-            r"resource temporarily unavailable",
-            r"pthread_create.{0,40}failed",
-            r"cannot create (?:a )?thread",
-            r"insufficient system resources",
-            r"paging file is too small",
             r"内存不足",
         ),
     ),
@@ -213,6 +225,9 @@ def capture_failure_diagnostics(
     error_log: str | Path,
     *,
     stage: str = "render",
+    return_code: int | None = None,
+    attempt: int | None = None,
+    attempt_label: str = "",
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES,
     max_log_chars: int = DEFAULT_MAX_LOG_CHARS,
 ) -> FailureDiagnostics:
@@ -232,6 +247,9 @@ def capture_failure_diagnostics(
             log_name=log_name,
             captured_at=captured_at,
             summary="错误日志读取上限无效，未能生成技术摘要。",
+            return_code=return_code,
+            attempt=attempt,
+            attempt_label=attempt_label,
         )
 
     try:
@@ -246,6 +264,9 @@ def capture_failure_diagnostics(
             log_name=log_name,
             captured_at=captured_at,
             summary="未能读取制作电脑上的错误日志。",
+            return_code=return_code,
+            attempt=attempt,
+            attempt_label=attempt_label,
         )
 
     truncated = offset > 0
@@ -260,7 +281,7 @@ def capture_failure_diagnostics(
         safe_tail = safe_tail[-max_log_chars:]
         truncated = True
 
-    return {
+    report: FailureDiagnostics = {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "code": code,
         "summary": _SUMMARY_BY_CODE[code],
@@ -270,6 +291,13 @@ def capture_failure_diagnostics(
         "truncated": truncated,
         "captured_at": captured_at,
     }
+    _attach_attempt_context(
+        report,
+        return_code=return_code,
+        attempt=attempt,
+        attempt_label=attempt_label,
+    )
+    return report
 
 
 def _safe_character(character: str) -> str:
@@ -307,8 +335,11 @@ def _empty_diagnostics(
     log_name: str,
     captured_at: str,
     summary: str,
+    return_code: int | None = None,
+    attempt: int | None = None,
+    attempt_label: str = "",
 ) -> FailureDiagnostics:
-    return {
+    report: FailureDiagnostics = {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "code": "unknown",
         "summary": summary,
@@ -318,3 +349,36 @@ def _empty_diagnostics(
         "truncated": False,
         "captured_at": captured_at,
     }
+    _attach_attempt_context(
+        report,
+        return_code=return_code,
+        attempt=attempt,
+        attempt_label=attempt_label,
+    )
+    return report
+
+
+def _attach_attempt_context(
+    report: FailureDiagnostics,
+    *,
+    return_code: int | None,
+    attempt: int | None,
+    attempt_label: str,
+) -> None:
+    """Attach bounded process context without leaking a command or local path."""
+
+    if return_code is not None:
+        try:
+            report["return_code"] = int(return_code)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if attempt is not None:
+        try:
+            normalized_attempt = int(attempt)
+        except (TypeError, ValueError, OverflowError):
+            normalized_attempt = 0
+        if normalized_attempt > 0:
+            report["attempt"] = normalized_attempt
+    safe_label = _safe_stage(attempt_label) if str(attempt_label or "").strip() else ""
+    if safe_label:
+        report["attempt_label"] = safe_label

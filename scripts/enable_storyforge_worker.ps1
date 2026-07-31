@@ -3,6 +3,7 @@ param(
     [string]$ExecutablePath = '',
     [string]$TaskName = 'StoryForge Local Worker',
     [int]$RequiredProtocolVersion = 2,
+    [string]$RequiredAppVersion = '',
     [switch]$RunWorker,
     [switch]$NoHealthWait,
     [switch]$Quiet
@@ -51,6 +52,10 @@ if ($RunWorker) {
                 $roleProperty = $response.data.PSObject.Properties['worker_role']
                 $role = $(if ($null -ne $roleProperty) { [string]$roleProperty.Value } else { '' })
                 if ($response.ok -and $response.data.service -eq 'storyforge-local-worker' -and $role -eq 'production-workstation') {
+                    # Wait for every existing queue owner, including an older
+                    # idle release. The newly launched desktop performs the
+                    # verified stale-worker handoff; starting beside it here
+                    # would briefly create two queue owners.
                     $desktopWorkerFound = $true
                     break
                 }
@@ -82,7 +87,8 @@ $powershellPath = Join-Path $PSHOME 'powershell.exe'
 $quotedScript = '"' + $PSCommandPath + '"'
 $quotedExecutable = '"' + $resolvedExecutable + '"'
 $quotedTaskName = '"' + $TaskName + '"'
-$actionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $quotedScript -ExecutablePath $quotedExecutable -TaskName $quotedTaskName -RequiredProtocolVersion $RequiredProtocolVersion -RunWorker -Quiet"
+$quotedVersion = '"' + $RequiredAppVersion + '"'
+$actionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $quotedScript -ExecutablePath $quotedExecutable -TaskName $quotedTaskName -RequiredProtocolVersion $RequiredProtocolVersion -RequiredAppVersion $quotedVersion -RunWorker -Quiet"
 $action = New-ScheduledTaskAction `
     -Execute $powershellPath `
     -Argument $actionArguments `
@@ -132,6 +138,8 @@ for ($attempt = 0; $attempt -lt 120 -and -not $endpoint; $attempt += 1) {
                 -TimeoutSec 2
             if ($response.ok -and $response.data.service -eq 'storyforge-local-worker') {
                 $candidateEndpoint = "http://127.0.0.1:$port"
+                $versionProperty = $response.data.PSObject.Properties['version']
+                $workerVersion = $(if ($null -ne $versionProperty) { [string]$versionProperty.Value } else { '' })
                 $protocol = 0
                 $protocolProperty = $response.data.PSObject.Properties['protocol_version']
                 if ($null -ne $protocolProperty) {
@@ -142,9 +150,13 @@ for ($attempt = 0; $attempt -lt 120 -and -not $endpoint; $attempt += 1) {
                 if ($null -ne $minimumBrowserProperty) {
                     $minimumBrowser = [int]$minimumBrowserProperty.Value
                 }
-                if ($protocol -lt $RequiredProtocolVersion -or $minimumBrowser -gt $RequiredProtocolVersion) {
+                if (
+                    $protocol -lt $RequiredProtocolVersion -or
+                    $minimumBrowser -gt $RequiredProtocolVersion -or
+                    (-not [string]::IsNullOrWhiteSpace($RequiredAppVersion) -and $workerVersion -ne $RequiredAppVersion)
+                ) {
                     $incompatibleEndpoint = $candidateEndpoint
-                    $incompatibleProtocol = $(if ($protocol) { [string]$protocol } else { '旧版/未提供' })
+                    $incompatibleProtocol = $(if ($protocol) { "$protocol / $workerVersion" } else { '旧版/未提供' })
                     continue
                 }
                 $workerRoleProperty = $response.data.PSObject.Properties['worker_role']

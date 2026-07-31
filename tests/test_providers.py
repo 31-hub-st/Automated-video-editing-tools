@@ -4,6 +4,8 @@ import base64
 import builtins
 import io
 import json
+import ntpath
+import os
 import subprocess
 import sys
 import tempfile
@@ -27,12 +29,16 @@ from storyforge.providers.base import (
 from storyforge.providers.text import TextRequest, create_text_provider
 from storyforge.providers.tts import (
     EmbeddedKokoroProvider,
+    IsolatedKokoroProvider,
     KOKORO_LANGUAGE_CODES,
     TTSRequest,
     _closed_http_client_error,
+    _configure_kokoro_torch,
     _import_kokoro_runtime,
+    _kokoro_device,
     _missing_kokoro_language_modules,
     _offline_kokoro_assets,
+    _windows_espeak_cache_roots,
     create_tts_provider,
     female_voice_candidates,
     kokoro_language_code,
@@ -342,7 +348,7 @@ class TTSProviderTests(unittest.TestCase):
         model.pipeline = pipeline
         model_reference = weakref.ref(model)
         pipeline_reference = weakref.ref(pipeline)
-        pipelines = {"a": pipeline}
+        pipelines = {"a:cuda": pipeline}
         del model, pipeline
 
         fake_torch = SimpleNamespace(
@@ -363,6 +369,23 @@ class TTSProviderTests(unittest.TestCase):
         self.assertIsNone(pipeline_reference())
         self.assertIsNone(model_reference())
         self.assertEqual(events, ["empty_cache", "ipc_collect"])
+
+    def test_cpu_kokoro_runtime_release_does_not_touch_cuda(self) -> None:
+        events: list[str] = []
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: events.append("is_available") or True,
+                empty_cache=lambda: events.append("empty_cache"),
+                ipc_collect=lambda: events.append("ipc_collect"),
+            )
+        )
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {"a": object()}),
+            patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            self.assertEqual(release_embedded_kokoro_runtime(), 1)
+
+        self.assertEqual(events, [])
 
     def test_embedded_kokoro_runtime_release_is_safe_without_torch_or_cuda(self) -> None:
         with (
@@ -391,6 +414,254 @@ class TTSProviderTests(unittest.TestCase):
             patch("builtins.__import__", side_effect=reject_torch),
         ):
             self.assertEqual(release_embedded_kokoro_runtime(), 0)
+
+    def test_embedded_kokoro_defaults_to_cpu_and_safe_torch_threads(self) -> None:
+        devices: list[str] = []
+        intraop_calls: list[int] = []
+        interop_calls: list[int] = []
+        cuda_checks: list[bool] = []
+
+        class FakeModel:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            def to(self, device: str) -> FakeModel:
+                devices.append(device)
+                return self
+
+            def eval(self) -> FakeModel:
+                return self
+
+        class FakePipeline:
+            def __init__(self, **kwargs: Any) -> None:
+                self.model = kwargs["model"]
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=lambda: cuda_checks.append(True) or True,
+            ),
+            set_num_threads=intraop_calls.append,
+            set_num_interop_threads=interop_calls.append,
+        )
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {}),
+            patch.dict(sys.modules, {"torch": fake_torch}),
+            patch(
+                "storyforge.providers.tts._ensure_kokoro_language_dependencies"
+            ),
+            patch(
+                "storyforge.providers.tts._offline_kokoro_assets",
+                return_value=Path("offline-kokoro"),
+            ),
+            patch("storyforge.providers.tts._prepare_windows_espeak_loader"),
+            patch("storyforge.providers.tts._prepare_huggingface_cache"),
+            patch(
+                "storyforge.providers.tts._import_kokoro_runtime",
+                return_value=(FakeModel, FakePipeline),
+            ),
+        ):
+            pipeline = EmbeddedKokoroProvider(
+                ProviderConfig(name="local_kokoro")
+            )._pipeline("a")
+
+        self.assertIsInstance(pipeline, FakePipeline)
+        self.assertEqual(devices, ["cpu"])
+        self.assertEqual(cuda_checks, [])
+        self.assertEqual(intraop_calls, [2])
+        self.assertEqual(interop_calls, [1])
+
+    def test_embedded_kokoro_allows_cuda_and_auto_device_overrides(self) -> None:
+        def load_device(requested: str, *, cuda_available: bool) -> str:
+            devices: list[str] = []
+
+            class FakeModel:
+                def __init__(self, **_kwargs: Any) -> None:
+                    pass
+
+                def to(self, device: str) -> FakeModel:
+                    devices.append(device)
+                    return self
+
+                def eval(self) -> FakeModel:
+                    return self
+
+            class FakePipeline:
+                def __init__(self, **_kwargs: Any) -> None:
+                    pass
+
+            fake_torch = SimpleNamespace(
+                cuda=SimpleNamespace(is_available=lambda: cuda_available),
+                set_num_threads=lambda _value: None,
+                set_num_interop_threads=lambda _value: None,
+            )
+            with (
+                patch.object(EmbeddedKokoroProvider, "_pipelines", {}),
+                patch.dict(sys.modules, {"torch": fake_torch}),
+                patch(
+                    "storyforge.providers.tts._ensure_kokoro_language_dependencies"
+                ),
+                patch(
+                    "storyforge.providers.tts._offline_kokoro_assets",
+                    return_value=Path("offline-kokoro"),
+                ),
+                patch("storyforge.providers.tts._prepare_windows_espeak_loader"),
+                patch("storyforge.providers.tts._prepare_huggingface_cache"),
+                patch(
+                    "storyforge.providers.tts._import_kokoro_runtime",
+                    return_value=(FakeModel, FakePipeline),
+                ),
+            ):
+                EmbeddedKokoroProvider(
+                    ProviderConfig(
+                        name="local_kokoro",
+                        options={"device": requested},
+                    )
+                )._pipeline("a")
+            return devices[0]
+
+        self.assertEqual(load_device("cuda", cuda_available=True), "cuda")
+        self.assertEqual(load_device("auto", cuda_available=True), "cuda")
+        self.assertEqual(load_device("auto", cuda_available=False), "cpu")
+
+    def test_embedded_kokoro_thread_overrides_are_idempotent_and_tolerant(self) -> None:
+        intraop_calls: list[int] = []
+        interop_calls: list[int] = []
+
+        class FakeModel:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            def to(self, _device: str) -> FakeModel:
+                return self
+
+            def eval(self) -> FakeModel:
+                return self
+
+        class FakePipeline:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+        def reject_late_interop(value: int) -> None:
+            interop_calls.append(value)
+            raise RuntimeError("cannot set interop threads after work has started")
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True),
+            set_num_threads=intraop_calls.append,
+            set_num_interop_threads=reject_late_interop,
+        )
+        provider = EmbeddedKokoroProvider(
+            ProviderConfig(
+                name="local_kokoro",
+                options={
+                    "torch_num_threads": "6",
+                    "torch_num_interop_threads": 3,
+                },
+            )
+        )
+        with (
+            patch.object(EmbeddedKokoroProvider, "_pipelines", {}),
+            patch.dict(sys.modules, {"torch": fake_torch}),
+            patch(
+                "storyforge.providers.tts._ensure_kokoro_language_dependencies"
+            ),
+            patch(
+                "storyforge.providers.tts._offline_kokoro_assets",
+                return_value=Path("offline-kokoro"),
+            ),
+            patch("storyforge.providers.tts._prepare_windows_espeak_loader"),
+            patch("storyforge.providers.tts._prepare_huggingface_cache"),
+            patch(
+                "storyforge.providers.tts._import_kokoro_runtime",
+                return_value=(FakeModel, FakePipeline),
+            ),
+        ):
+            first = provider._pipeline("a")
+            second = provider._pipeline("a")
+
+        self.assertIs(first, second)
+        self.assertEqual(intraop_calls, [6])
+        self.assertEqual(interop_calls, [3])
+
+    def test_kokoro_environment_override_is_available_to_host_source_runs(self) -> None:
+        intraop_calls: list[int] = []
+        interop_calls: list[int] = []
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True),
+            set_num_threads=intraop_calls.append,
+            set_num_interop_threads=interop_calls.append,
+        )
+        environment = {
+            "STORYFORGE_KOKORO_DEVICE": "auto",
+            "STORYFORGE_KOKORO_TORCH_THREADS": "5",
+            "STORYFORGE_KOKORO_INTEROP_THREADS": "2",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            self.assertEqual(_kokoro_device(fake_torch, {}, "local_kokoro"), "cuda")
+            self.assertEqual(
+                _configure_kokoro_torch(fake_torch, {}, "local_kokoro"),
+                (5, 2),
+            )
+            # Per-provider options remain the highest-priority source override.
+            self.assertEqual(
+                _kokoro_device(
+                    fake_torch,
+                    {"device": "cpu"},
+                    "local_kokoro",
+                ),
+                "cpu",
+            )
+
+        self.assertEqual(intraop_calls, [5])
+        self.assertEqual(interop_calls, [2])
+
+    def test_unicode_portable_cache_never_escapes_to_a_volume_root(self) -> None:
+        unicode_cache = (
+            "D:\\小说工具\\StoryForge\\StoryForgeData\\cache\\espeak"
+        )
+        with patch(
+            "storyforge.providers.tts._windows_ascii_short_path",
+            return_value=None,
+        ):
+            first = _windows_espeak_cache_roots(
+                unicode_cache,
+                "1.0.3",
+                portable=True,
+            )
+            second = _windows_espeak_cache_roots(
+                unicode_cache,
+                "1.0.3",
+                portable=True,
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, ())
+
+    def test_portable_unicode_install_prefers_ascii_windows_short_path(self) -> None:
+        unicode_cache = (
+            "E:\\员工软件\\StoryForgeData\\cache\\espeak"
+        )
+        short_cache = Path(r"E:\\EMPLOY~1\\STORYF~1\\CACHE\\ESPEAK")
+        with patch(
+            "storyforge.providers.tts._windows_ascii_short_path",
+            return_value=short_cache,
+        ):
+            roots = _windows_espeak_cache_roots(
+                unicode_cache,
+                "bundled",
+                portable=False,
+            )
+
+        self.assertGreaterEqual(len(roots), 1)
+        self.assertTrue(all(str(path).isascii() for path in roots))
+        self.assertTrue(
+            ntpath.normcase(str(roots[0])).startswith(
+                ntpath.normcase(str(short_cache))
+            )
+        )
+        self.assertTrue(
+            all(ntpath.splitdrive(str(path))[0].casefold() == "e:" for path in roots)
+        )
 
     def test_multilingual_female_voice_catalog_keeps_english_and_adds_free_languages(self) -> None:
         self.assertEqual(KOKORO_LANGUAGE_CODES["en"], "a")
@@ -596,7 +867,7 @@ class TTSProviderTests(unittest.TestCase):
             self.assertTrue(Path(result.path).is_file())
 
     def test_kokoro_without_engine_has_clear_error(self) -> None:
-        provider = create_tts_provider(
+        provider = EmbeddedKokoroProvider(
             ProviderConfig(name="local_kokoro", options={"cache_enabled": False})
         )
 
@@ -614,6 +885,65 @@ class TTSProviderTests(unittest.TestCase):
                 self.assertRaisesRegex(ProviderConfigurationError, "No Kokoro engine"),
             ):
                 provider.synthesize("Hello.", folder)
+
+    def test_embedded_kokoro_isolated_process_returns_complete_batch(self) -> None:
+        provider = create_tts_provider(
+            ProviderConfig(name="local_kokoro", options={"cache_enabled": False})
+        )
+        self.assertIsInstance(provider, IsolatedKokoroProvider)
+        calls: list[list[str]] = []
+
+        def fake_child(
+            command: list[str], **_kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            request_path = Path(command[-2])
+            response_path = Path(command[-1])
+            request_value = json.loads(request_path.read_text(encoding="utf-8"))
+            output_root = Path(request_value["output_dir"])
+            output_root.mkdir(parents=True, exist_ok=True)
+            segments: list[dict[str, Any]] = []
+            for index, text_value in enumerate(request_value["sentences"], start=1):
+                audio_path = output_root / f"line-{index:04d}.wav"
+                audio_path.write_bytes(wav_bytes(0.05))
+                segments.append(
+                    {
+                        "index": index,
+                        "text": text_value,
+                        "path": str(audio_path),
+                        "duration_seconds": 0.05,
+                        "voice": request_value["voice"],
+                        "provider": "local_kokoro",
+                    }
+                )
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "segments": segments,
+                            "provider": "local_kokoro",
+                            "model": "kokoro",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "storyforge.providers.tts.run_cancellable_process",
+            side_effect=fake_child,
+        ):
+            result = provider.synthesize(
+                ["First sentence.", "Second sentence."],
+                folder,
+                voice="af_heart",
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result.segments), 2)
+        self.assertAlmostEqual(result.duration_seconds, 0.1, places=3)
 
     def test_kokoro_cli_is_configurable_and_runner_is_injectable(self) -> None:
         audio = wav_bytes(0.05)

@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from storyforge.providers.base import ProviderConfig
-from storyforge.providers.tts import TTSProvider, prune_tts_cache, wav_duration
+from storyforge.providers.tts import (
+    TTSProvider,
+    _TTS_CACHE_DEFAULT_MAX_AGE_DAYS,
+    _TTS_CACHE_DEFAULT_MAX_BYTES,
+    prune_tts_cache,
+    wav_duration,
+)
 
 
 def wav_bytes(duration: float = 0.1, rate: int = 16_000) -> bytes:
@@ -68,6 +74,10 @@ def config(
 
 
 class SentenceTTSCacheTests(unittest.TestCase):
+    def test_default_cache_retention_is_bounded_for_employee_hosts(self) -> None:
+        self.assertEqual(_TTS_CACHE_DEFAULT_MAX_BYTES, 1024**3)
+        self.assertEqual(_TTS_CACHE_DEFAULT_MAX_AGE_DAYS, 14.0)
+
     def test_prune_cache_removes_expired_then_oldest_excess_files(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

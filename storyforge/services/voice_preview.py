@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import unicodedata
 import wave
@@ -12,6 +13,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from ..models import AppSettings
+from ..maintenance import prune_voice_preview_cache
 from ..pipeline import UsageLedger, narration_speed_for_wpm
 from ..providers.base import ProviderConfig, ProviderConfigurationError
 from ..providers.tts import (
@@ -69,6 +71,16 @@ def _audio_duration(path: Path, fallback: Any = 0.0) -> float:
     except (TypeError, ValueError):
         return 0.0
     return duration if math.isfinite(duration) and duration >= 0 else 0.0
+
+
+def _touch_cache_pair(*paths: Path) -> None:
+    """Refresh a complete cached audition without creating missing files."""
+
+    for path in paths:
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,10 +246,16 @@ class VoicePreviewService:
         *,
         tts_provider_factory: TTSProviderFactory = create_tts_provider,
         usage_ledger: UsageLedger | None = None,
+        cache_root: str | Path | None = None,
     ) -> None:
         self._settings_getter = settings_getter
         self._tts_provider_factory = tts_provider_factory
         self._usage_ledger = usage_ledger or UsageLedger()
+        self._cache_root = (
+            Path(cache_root).expanduser().resolve()
+            if cache_root is not None
+            else None
+        )
 
     @staticmethod
     def _provider_config(settings: AppSettings, language: str = "en") -> Any:
@@ -326,6 +344,7 @@ class VoicePreviewService:
         provider: Any | None = None
         pending_character_count = 0
         candidates: list[VoiceCandidate] = []
+        protected_cache_paths: set[Path] = set()
         normalized_source = normalize_manuscript_text(text)
         source_hash = hashlib.sha256(
             normalized_source.encode("utf-8")
@@ -393,6 +412,8 @@ class VoicePreviewService:
                 ):
                     cached_duration = _audio_duration(cached_path, cached_duration)
                     path = cached_path.resolve()
+                    _touch_cache_pair(path, sidecar)
+                    protected_cache_paths.update((path, sidecar))
                     candidates.append(
                         VoiceCandidate(
                             profile=profile,
@@ -466,6 +487,7 @@ class VoicePreviewService:
                 path = Path(result.path).resolve()
                 if not path.is_file():
                     raise OSError(f"voice preview file was not created: {path}")
+                protected_cache_paths.add(path)
                 if source_can_fill_preview and not 8.0 <= duration <= 12.0:
                     raise ValueError(
                         "配音服务未能生成 8–12 秒的真实试听片段，请检查该声线后重试。"
@@ -487,6 +509,7 @@ class VoicePreviewService:
                             encoding="utf-8",
                         )
                         temporary_sidecar.replace(sidecar)
+                        protected_cache_paths.add(sidecar)
                     finally:
                         try:
                             temporary_sidecar.unlink()
@@ -512,4 +535,11 @@ class VoicePreviewService:
         finally:
             if metered_provider and pending_character_count:
                 self._usage_ledger.commit(provider_name, pending_character_count)
+            # A long-running employee worker can generate previews for many
+            # novels without restarting.  Keep that cache bounded after every
+            # audition; locked/open files are skipped by best-effort cleanup.
+            prune_voice_preview_cache(
+                self._cache_root or output,
+                protected_paths=protected_cache_paths,
+            )
         return [item.to_dict() for item in candidates]

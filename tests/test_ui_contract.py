@@ -96,6 +96,23 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn(".queue-view-switch", css)
         self.assertIn(".job-card.is-archived", css)
 
+    def test_failed_jobs_do_not_present_stale_progress_as_active_work(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'const unsuccessfulTerminalStatuses = new Set(["failed", "cancelled", "interrupted"])',
+            javascript,
+        )
+        self.assertIn(
+            "const showProgress = !unsuccessfulTerminalStatuses.has(job.status);",
+            javascript,
+        )
+        self.assertIn(
+            "const showProgress = !unsuccessfulTerminalStatuses.has(record.status);",
+            javascript,
+        )
+        self.assertIn('${showProgress ? `<div class="job-progress"', javascript)
+
     def test_job_tape_groups_videos_into_persistent_batch_dossiers(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")

@@ -9,6 +9,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+_PROCESS_WORKER_MUTEX: object | None = None
+
+
 def resource_path(relative: str) -> Path:
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     return (bundle_root / relative).resolve()
@@ -103,6 +106,11 @@ def _run_local_worker_service(api: object, ui_root: Path) -> dict[str, object]:
             use_port_override=False,
         )
         health = dict(server.worker_gateway.health())
+        if health.get("ready") is False:
+            raise RuntimeError(
+                "本机保存的 Hub 登录已失效。请打开 StoryForge，使用员工账号和密码重新登录；"
+                "登录成功后会自动重新绑定这台制作电脑。"
+            )
         runtime = dict(server.worker_gateway.runtime_snapshot())
         print(
             "StoryForge Local Worker: "
@@ -193,9 +201,12 @@ def _open_existing_worker_window(endpoint: object, *, debug: bool = False) -> in
         background_color="#E9EEF7",
         text_select=True,
     )
+    from .portable import configured_webview_storage_path
+
     webview.start(
         debug=debug,
         gui="edgechromium" if os.name == "nt" else None,
+        storage_path=configured_webview_storage_path(),
     )
     # The scheduled Worker owns both the API and render queue. Closing this
     # viewer must not call its shutdown route or interrupt its current job.
@@ -203,6 +214,7 @@ def _open_existing_worker_window(endpoint: object, *, debug: bool = False) -> in
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _PROCESS_WORKER_MUTEX
     args = build_parser().parse_args(argv)
     if args.kokoro_self_test:
         from .diagnostics import run_kokoro_self_test
@@ -215,18 +227,84 @@ def main(argv: list[str] | None = None) -> int:
             args.startup_self_test,
             ui_root=resource_path("ui"),
         )
-    if not args.local_worker and not args.web_only:
+    if not args.web_only:
         # The long-running local Worker is the sole owner of this computer's
         # render queue.  The desktop executable is only a viewer/client when
         # that Worker already exists; it must never stop an idle Worker and
         # create a second queue owner merely because a window was opened.
-        from .worker import discover_local_production_worker
+        from .worker import (
+            discover_local_production_worker,
+            pause_local_worker_autostart_for_desktop,
+        )
 
-        existing_worker = discover_local_production_worker()
+        # Lifecycle discovery includes an unhealthy listener so the desktop
+        # can retire it safely. Normal worker discovery deliberately hides
+        # ready=false endpoints from production callers.
+        existing_worker = discover_local_production_worker(include_unready=True)
+        # A running Worker remains authoritative even when it belongs to an
+        # older release.  Legacy workers do not expose an atomic
+        # drain-and-shutdown operation, so killing one after an external
+        # "idle" check could interrupt a task submitted in the meantime.  The
+        # update installer replaces the login Worker while the application is
+        # closed; a manually copied repair build takes effect after the old
+        # Worker is closed or Windows is restarted.
         if existing_worker and existing_worker.get("endpoint"):
+            if args.local_worker:
+                # Scheduled/manual background launches are viewless. The live
+                # owner keeps its queue; this process exits without importing
+                # the API or binding a second discovery port.
+                return 0
+            if existing_worker.get("ready") is False:
+                # The loopback browser intentionally has no password-login
+                # route. Yield an idle invalid Worker, then continue into the
+                # desktop bridge whose login form can re-enrol the stable
+                # installation using only account + password.
+                handoff = pause_local_worker_autostart_for_desktop()
+                if not bool(handoff.get("paused")):
+                    _enforce_safe_worker_handoff(handoff)
+                    raise SystemExit(
+                        "本机后台制作服务的 Hub 登录已失效，但暂时无法安全关闭。"
+                        "请等待当前任务结束后重新打开 StoryForge，再使用账号和密码登录。"
+                    )
+            else:
+                return _open_existing_worker_window(
+                    existing_worker["endpoint"], debug=args.debug
+                )
+
+    # Portable initialization may have deferred the legacy AppData copy while
+    # an older Worker was alive. If that owner stopped between the early probe
+    # and the loopback discovery above, finish migration now rather than
+    # constructing a queue against an empty StoryForgeData directory.
+    from .portable import ensure_deferred_migration_complete
+
+    try:
+        ensure_deferred_migration_complete()
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+
+    # Port discovery has a check-then-bind race. A scheduled Worker and the
+    # desktop can both see no listener and otherwise start two queues on
+    # adjacent ports. Acquire the per-data-directory mutex before constructing
+    # StoryForgeApi; the loser waits for and opens the sole owner.
+    from .config import default_data_dir
+    from .worker import ProductionWorkerMutex, wait_for_local_production_worker
+
+    ownership = ProductionWorkerMutex(default_data_dir())
+    if not ownership.acquire():
+        existing_worker = wait_for_local_production_worker(timeout_seconds=25.0)
+        if (
+            not args.local_worker
+            and not args.web_only
+            and existing_worker
+            and existing_worker.get("endpoint")
+        ):
             return _open_existing_worker_window(
                 existing_worker["endpoint"], debug=args.debug
             )
+        raise SystemExit(
+            "StoryForge 本机制作服务正在启动，请稍候几秒后重新打开；已有任务不会中断。"
+        )
+    _PROCESS_WORKER_MUTEX = ownership
 
     from .api import StoryForgeApi
     from .pipeline import PipelineRunner
@@ -299,9 +377,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     api._attach_window(window)
     try:
+        from .portable import configured_webview_storage_path
+
         webview.start(
             debug=args.debug,
             gui="edgechromium" if os.name == "nt" else None,
+            storage_path=configured_webview_storage_path(),
         )
     finally:
         api._shutdown()

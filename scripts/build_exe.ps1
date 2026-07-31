@@ -9,7 +9,13 @@ param(
     [string]$WorkDirectory = '',
     [string]$PythonExe = '',
     [string]$HubEndpoint = '',
-    [string]$HubSiteName = 'StoryForge Hub'
+    [string]$HubSiteName = 'StoryForge Hub',
+    [switch]$RequireStableAcceptance,
+    [double]$StableStressSeconds = 600,
+    [ValidateSet('libx264', 'h264_nvenc', 'h264_qsv', 'h264_amf')]
+    [string]$StableAcceptanceEncoder = 'libx264',
+    [string]$StableAcceptanceReport = '',
+    [string]$StableFfprobe = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +25,15 @@ $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $specPath = Join-Path $projectRoot 'StoryForge.spec'
 $buildVenv = Join-Path $projectRoot '.build-venv'
 $venvPython = Join-Path $buildVenv 'Scripts\python.exe'
+$projectPathNeedsAsciiDefaults = $projectRoot -match '[^\x00-\x7F]'
+$asciiDefaultBuildBase = $null
+if ($projectPathNeedsAsciiDefaults) {
+    $projectVolumeRoot = [System.IO.Path]::GetPathRoot($projectRoot)
+    if (-not $projectVolumeRoot) {
+        throw "Could not resolve the project volume root for ASCII build defaults: $projectRoot"
+    }
+    $asciiDefaultBuildBase = Join-Path $projectVolumeRoot 'StoryForgeBuildTemp'
+}
 if ($WorkDirectory) {
     if ([System.IO.Path]::IsPathRooted($WorkDirectory)) {
         $buildRoot = [System.IO.Path]::GetFullPath($WorkDirectory)
@@ -26,6 +41,9 @@ if ($WorkDirectory) {
     else {
         $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $WorkDirectory))
     }
+}
+elseif ($projectPathNeedsAsciiDefaults) {
+    $buildRoot = Join-Path $asciiDefaultBuildBase 'work'
 }
 else {
     $buildRoot = Join-Path $projectRoot 'build'
@@ -77,6 +95,19 @@ function Invoke-Checked {
     }
 }
 
+function Assert-AsciiBuildPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if ($PathValue -match '[^\x00-\x7F]') {
+        throw "$Label must use an ASCII-only path for the employee portable build. Use a path such as D:\StoryForgeBuildTemp. Current path: $PathValue"
+    }
+}
+
 $basePython = Resolve-BasePython -Requested $PythonExe
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     Write-Host "Creating an isolated build environment: $buildVenv"
@@ -100,7 +131,7 @@ if ($LASTEXITCODE -ne 0 -or -not $expectedAppVersion) {
 if ($SkipDependencyInstall) {
     Write-Host 'Using the existing verified build environment (dependency download skipped)...'
     Invoke-Checked -Command $venvPython -CommandArguments @('-m', 'pip', 'check')
-    $coreModules = 'imageio_ffmpeg,webview,PyInstaller,edge_tts'
+    $coreModules = 'imageio_ffmpeg,webview,PyInstaller,edge_tts,clr,clr_loader'
     $requiredModules = if ($WithLocalAI) {
         "$coreModules,kokoro,misaki,pyopenjtalk,fugashi,jaconv,mojimoji,phonemizer,espeakng_loader,torch,transformers,spacy,numpy,soundfile,en_core_web_sm"
     }
@@ -142,10 +173,15 @@ if ($OutputDirectory) {
         $distPath = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
     }
 }
+elseif ($projectPathNeedsAsciiDefaults) {
+    $distPath = Join-Path $asciiDefaultBuildBase 'dist'
+}
 else {
     $distPath = Join-Path $projectRoot 'dist'
 }
 [System.IO.Directory]::CreateDirectory($distPath) | Out-Null
+Assert-AsciiBuildPath -PathValue $distPath -Label 'OutputDirectory'
+Assert-AsciiBuildPath -PathValue $buildRoot -Label 'WorkDirectory'
 
 Write-Host "Packaging StoryForge Studio to: $distPath"
 Push-Location -LiteralPath $projectRoot
@@ -176,9 +212,29 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "PyInstaller finished but the expected executable was not found: $exePath"
 }
 
+# Windows can propagate Mark-of-the-Web from a downloaded ZIP to the bundled
+# Python.NET assemblies. .NET Framework then refuses to load Python.Runtime.dll
+# on an employee computer even though the same build starts on the build host.
+# Keep the narrowly scoped .NET switch beside the frozen executable so verified
+# portable ZIPs remain loadable after they are copied or extracted elsewhere.
+$dotNetConfigPath = Join-Path $bundleRoot 'StoryForge Studio.exe.config'
+$dotNetConfig = @'
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <runtime>
+    <loadFromRemoteSources enabled="true" />
+  </runtime>
+</configuration>
+'@
+[IO.File]::WriteAllText(
+    $dotNetConfigPath,
+    $dotNetConfig + [Environment]::NewLine,
+    (New-Object Text.UTF8Encoding($false))
+)
+
 # Employee packages carry only the public Hub location beside the EXE. The
 # account password is entered in the normal login screen and the device token
-# is issued later by Hub and protected in AppData with Windows DPAPI.
+# is issued later by Hub and protected with Windows DPAPI inside StoryForgeData.
 if (-not $HubEndpoint) {
     $HubEndpoint = [string]$env:STORYFORGE_HUB_ENDPOINT
 }
@@ -255,9 +311,9 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\disable_storyforge_worke
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\EMPLOYEE_QUICK_START.md') `
     -Destination (Join-Path $bundleRoot 'QUICK_START.md') -Force
 
-# Build success is not proof that a windowed executable can start.  Create a
+# Build success is not proof that a windowed executable can start. Create a
 # catalog with the current source schema, then make the frozen executable load
-# it, import the bundled WebView2 backend, locate FFmpeg and start its localhost
+# it, import Python.NET/WinForms/WebView2, locate FFmpeg and start its localhost
 # production worker.  This would have rejected the old schema-10 executable
 # before it was delivered against a schema-11 database.
 $smokeRoot = Join-Path $buildRoot ("startup-smoke\" + [guid]::NewGuid().ToString('N'))
@@ -336,6 +392,84 @@ assert summary['schema_version'] == SCHEMA_VERSION, summary
         }
         Copy-Item -LiteralPath $kokoroResultPath `
             -Destination (Join-Path $bundleRoot 'BUILD_KOKORO_VALIDATION.json') -Force
+    }
+
+    if ($RequireStableAcceptance) {
+        if ($StableStressSeconds -lt 600) {
+            throw '-RequireStableAcceptance requires -StableStressSeconds of at least 600.'
+        }
+        $acceptanceReportPath = if ($StableAcceptanceReport) {
+            if ([System.IO.Path]::IsPathRooted($StableAcceptanceReport)) {
+                [System.IO.Path]::GetFullPath($StableAcceptanceReport)
+            }
+            else {
+                [System.IO.Path]::GetFullPath((Join-Path $projectRoot $StableAcceptanceReport))
+            }
+        }
+        else {
+            Join-Path $bundleRoot 'BUILD_STABILITY_ACCEPTANCE.json'
+        }
+        [System.IO.Directory]::CreateDirectory(
+            [System.IO.Path]::GetDirectoryName($acceptanceReportPath)
+        ) | Out-Null
+        $acceptanceRoot = Join-Path $buildRoot 'stability-acceptance'
+        $stressSecondsText = [string]::Format(
+            [Globalization.CultureInfo]::InvariantCulture,
+            '{0}',
+            $StableStressSeconds
+        )
+        $acceptanceArguments = @(
+            '--storyforge-stability-acceptance',
+            '--stress',
+            '--stress-seconds', $stressSecondsText,
+            '--app-root', $bundleRoot,
+            '--package-artifact', $exePath,
+            '--encoder', $StableAcceptanceEncoder,
+            '--root', $acceptanceRoot,
+            '--json-report', $acceptanceReportPath
+        )
+        if ($StableFfprobe) {
+            $acceptanceArguments += @('--ffprobe', $StableFfprobe)
+        }
+        Write-Host 'Running the frozen package-bound 10-minute stable release gate...'
+        Invoke-Checked -Command $exePath -CommandArguments $acceptanceArguments
+
+        $stableReport = Get-Content -LiteralPath $acceptanceReportPath -Raw | ConvertFrom-Json
+        if (-not $stableReport.ok -or -not $stableReport.stable_release_eligible) {
+            throw "Stable acceptance did not approve this package: $acceptanceReportPath"
+        }
+        if ([string]$stableReport.storyforge_version -ne $expectedAppVersion) {
+            throw "Stable acceptance version is $($stableReport.storyforge_version), expected $expectedAppVersion."
+        }
+        if (-not $stableReport.package_artifact_bound -or [string]$stableReport.package.kind -ne 'explicit_artifact') {
+            throw 'Stable acceptance is not bound to an explicit package artifact.'
+        }
+        if ([string]$stableReport.code_under_test -ne 'frozen_executable_pipeline_runner' -or -not $stableReport.release_gate.frozen_executable_pipeline_executed) {
+            throw 'Stable acceptance did not execute the frozen StoryForge pipeline.'
+        }
+        if (-not $stableReport.package.runtime_entrypoint_matches) {
+            throw 'Stable acceptance executable does not match the running frozen entrypoint.'
+        }
+        $reportedPackagePath = [System.IO.Path]::GetFullPath([string]$stableReport.package.path)
+        if (-not [string]::Equals($reportedPackagePath, [System.IO.Path]::GetFullPath($exePath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Stable acceptance belongs to a different package: $reportedPackagePath"
+        }
+        $actualPackageHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ([string]$stableReport.package.sha256 -ne $actualPackageHash) {
+            throw 'Stable acceptance package SHA-256 does not match the executable being released.'
+        }
+        if ([int64]$stableReport.package.bytes -ne (Get-Item -LiteralPath $exePath).Length) {
+            throw 'Stable acceptance package size does not match the executable being released.'
+        }
+        foreach ($scenario in @($stableReport.scenarios)) {
+            if (-not $scenario.ok -or [string]$scenario.actual_command_encoder -ne $StableAcceptanceEncoder) {
+                throw "Stable scenario did not prove encoder $StableAcceptanceEncoder from its real FFmpeg command: $($scenario.name)"
+            }
+        }
+        $bundledAcceptanceReport = Join-Path $bundleRoot 'BUILD_STABILITY_ACCEPTANCE.json'
+        if (-not [string]::Equals($acceptanceReportPath, $bundledAcceptanceReport, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $acceptanceReportPath -Destination $bundledAcceptanceReport -Force
+        }
     }
 
     # Bind the exact frozen directory to the self-tests above. The release

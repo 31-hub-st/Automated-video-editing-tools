@@ -398,7 +398,10 @@ def _completed_failure_code(
         return_code == -12
         or (return_code & 0xFFFFFFFF) in _WINDOWS_OUT_OF_MEMORY_RETURN_CODES
     ):
-        return "out_of_memory"
+        # A process status alone cannot distinguish physical RAM pressure from
+        # filter-frame accumulation, pagefile commitment or thread/resource
+        # exhaustion.  Keep that uncertainty visible in the diagnostic code.
+        return "resource_exhausted"
     detail = completed.stderr or completed.stdout or ""
     return classify_failure(str(detail)[-3000:])
 
@@ -421,13 +424,277 @@ def _should_retry_in_low_memory_mode(
     failure_code: str,
     *,
     serial_render_prepared: bool,
-    cpu_compatibility_attempted: bool,
 ) -> bool:
-    """Avoid repeating an identical serial-source CPU compatibility render."""
+    """Use serial preparation only when it changes the failed graph.
 
-    return failure_code == "out_of_memory" and not (
-        serial_render_prepared and cpu_compatibility_attempted
+    Once the source has already been normalized into one serial clip, the old
+    "low-memory" retry rebuilds the same full-length overlay/subtitle graph.
+    Retrying that topology after resource exhaustion only repeats the costly
+    failure and can freeze an employee workstation a second time.
+    """
+
+    return (
+        failure_code in {"out_of_memory", "resource_exhausted"}
+        and not serial_render_prepared
     )
+
+
+def _ffmpeg_progress_command(
+    command: Sequence[str | os.PathLike[str]],
+) -> list[str]:
+    """Enable FFmpeg's machine-readable stdout progress stream."""
+
+    arguments = [os.fspath(item) for item in command]
+    if not arguments or "-progress" in arguments:
+        return arguments
+    progress_options = ["-progress", "pipe:1"]
+    if "-nostats" not in arguments:
+        progress_options.append("-nostats")
+    return [arguments[0], *progress_options, *arguments[1:]]
+
+
+def _ffmpeg_progress_seconds(line: str) -> float | None:
+    """Parse an FFmpeg ``-progress`` timestamp into elapsed seconds."""
+
+    key, separator, raw_value = str(line or "").strip().partition("=")
+    if not separator:
+        return None
+    value = raw_value.strip()
+    try:
+        if key in {"out_time_us", "out_time_ms"}:
+            # FFmpeg's historical out_time_ms field is also expressed in
+            # microseconds.  Newer builds additionally expose out_time_us.
+            seconds = float(value) / 1_000_000.0
+        elif key == "out_time":
+            hours, minutes, raw_seconds = value.split(":", 2)
+            seconds = (
+                float(hours) * 3600.0
+                + float(minutes) * 60.0
+                + float(raw_seconds)
+            )
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+def _ffmpeg_progress_frame(line: str) -> int | None:
+    """Parse FFmpeg's machine-readable output-frame counter."""
+
+    key, separator, raw_value = str(line or "").strip().partition("=")
+    if not separator or key != "frame":
+        return None
+    try:
+        value = int(raw_value.strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+class _FFmpegProgressTracker:
+    """Expose truthful per-attempt FFmpeg progress inside the render phase.
+
+    FFmpeg may emit ``progress=end`` even when process teardown later returns a
+    failure.  Therefore the stream callback never declares an attempt complete;
+    the caller must do that after inspecting the process return code and output.
+    A retry deliberately starts a new attempt range instead of inheriting a
+    stale 94% from the failed process.
+    """
+
+    def __init__(
+        self,
+        callback: ProgressCallback,
+        *,
+        end: float = 0.94,
+    ) -> None:
+        self._callback = callback
+        self._end = max(0.0, min(1.0, float(end)))
+        self._last = 0.0
+        self._last_label = ""
+        self._attempt_number = 0
+        self._attempt_label = ""
+        self._attempt_start = 0.0
+        self._attempt_ratio = 0.0
+        self._attempt_frames = 0
+        self._lock = threading.RLock()
+
+    @property
+    def value(self) -> float:
+        with self._lock:
+            return self._last
+
+    @property
+    def attempt_number(self) -> int:
+        with self._lock:
+            return self._attempt_number
+
+    @property
+    def attempt_label(self) -> str:
+        with self._lock:
+            return self._attempt_label
+
+    @property
+    def attempt_ratio(self) -> float:
+        with self._lock:
+            return self._attempt_ratio
+
+    @property
+    def attempt_frames(self) -> int:
+        with self._lock:
+            return self._attempt_frames
+
+    def __call__(self, status: JobStatus, value: float, label: str) -> None:
+        self.report(status, value, label)
+
+    def report(
+        self,
+        status: JobStatus,
+        value: float,
+        label: str,
+        *,
+        allow_rewind: bool = False,
+    ) -> None:
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            candidate = self.value
+        if not math.isfinite(candidate):
+            candidate = self.value
+        with self._lock:
+            lower_bound = 0.0 if allow_rewind else self._last
+            candidate = min(self._end, max(lower_bound, candidate))
+            if candidate == self._last and label == self._last_label:
+                return
+            self._last = candidate
+            self._last_label = label
+        self._callback(status, candidate, label)
+
+    def begin_attempt(
+        self,
+        duration_seconds: float,
+        label: str,
+        *,
+        minimum: float = 0.68,
+    ) -> Callable[[str], None]:
+        """Begin one numbered attempt and return its progress-line consumer."""
+
+        try:
+            duration = float(duration_seconds)
+        except (TypeError, ValueError):
+            duration = 1.0
+        if not math.isfinite(duration) or duration <= 0:
+            duration = 1.0
+        try:
+            attempt_start = float(minimum)
+        except (TypeError, ValueError):
+            attempt_start = 0.68
+        if not math.isfinite(attempt_start):
+            attempt_start = 0.68
+        attempt_start = min(self._end, max(0.0, attempt_start))
+        with self._lock:
+            self._attempt_number += 1
+            attempt_number = self._attempt_number
+            self._attempt_label = str(label or "FFmpeg 渲染")
+            self._attempt_start = attempt_start
+            self._attempt_ratio = 0.0
+            self._attempt_frames = 0
+            display_label = self._attempt_display_label_locked(0.0)
+        self.report(
+            JobStatus.RENDERING,
+            attempt_start,
+            display_label,
+            allow_rewind=True,
+        )
+
+        def consume(line: str) -> None:
+            text = str(line or "").strip()
+            frame = _ffmpeg_progress_frame(text)
+            if frame is not None:
+                with self._lock:
+                    if self._attempt_number != attempt_number:
+                        return
+                    self._attempt_frames = max(self._attempt_frames, frame)
+                return
+            if text == "progress=end":
+                # Only the CompletedProcess return code can prove success.
+                return
+            elapsed = _ffmpeg_progress_seconds(text)
+            if elapsed is None:
+                return
+            ratio = max(0.0, min(1.0, elapsed / duration))
+            with self._lock:
+                if self._attempt_number != attempt_number:
+                    return
+                # Audio timestamps can reach the end even when the video
+                # filter graph never emitted a frame.  Treating that as video
+                # progress recreates the misleading frame=0 / 94% failure.
+                if self._attempt_frames <= 0:
+                    return
+                self._attempt_ratio = max(self._attempt_ratio, ratio)
+                ratio = self._attempt_ratio
+                display_label = self._attempt_display_label_locked(ratio)
+            mapped = attempt_start + (self._end - attempt_start) * ratio
+            self.report(
+                JobStatus.RENDERING,
+                mapped,
+                display_label,
+            )
+
+        return consume
+
+    def finish_attempt(
+        self,
+        *,
+        succeeded: bool,
+        return_code: int,
+        failure_code: str = "",
+        stage: str = "ffmpeg_render",
+    ) -> dict[str, str | int | float | bool]:
+        """Close the current attempt after the child process has exited."""
+
+        with self._lock:
+            attempt = self._attempt_number
+            label = self._attempt_label or "FFmpeg 渲染"
+            start = self._attempt_start
+            ratio = self._attempt_ratio
+            frames = self._attempt_frames
+        if succeeded:
+            ratio = 1.0
+            value = self._end
+            status_label = f"尝试 {attempt} 成功 · {label} · 100%"
+        else:
+            value = start + (self._end - start) * ratio
+            failure_label = failure_code or "unknown"
+            frame_label = f"{frames} 帧" if frames else "0 帧"
+            status_label = (
+                f"尝试 {attempt} 失败 · {label} · {frame_label} · "
+                f"返回码 {int(return_code)} · {failure_label}"
+            )
+        self.report(
+            JobStatus.RENDERING,
+            value,
+            status_label,
+            allow_rewind=not succeeded,
+        )
+        return {
+            "attempt": attempt,
+            "label": label,
+            "stage": str(stage or "ffmpeg_render"),
+            "return_code": int(return_code),
+            "failure_code": str(failure_code or ""),
+            "frames": frames,
+            "ratio": round(ratio, 6),
+            "succeeded": bool(succeeded),
+        }
+
+    def _attempt_display_label_locked(self, ratio: float) -> str:
+        return (
+            f"尝试 {self._attempt_number} · {self._attempt_label} · "
+            f"{round(ratio * 100):d}%"
+        )
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> Path:
@@ -1665,11 +1932,6 @@ class PipelineRunner:
         self.heavy_resource_lock = heavy_resource_lock
         self._publish_transaction_root = self.work_root / "publish-transactions"
         self._publish_transaction_lock = threading.RLock()
-        # The queue is sequential, so once this process observes a genuine
-        # FFmpeg OOM it is safe to keep later multi-clip jobs out of the same
-        # all-input graph for the rest of the session. This prevents every
-        # item in a large employee batch from repeating the known-bad attempt.
-        self._prefer_low_memory_render = False
         # A process may be killed between the two final renames.  Recovering
         # journals here guarantees that the employee-facing folder never
         # keeps an uncommitted half-pair after StoryForge starts again.
@@ -3299,6 +3561,7 @@ class PipelineRunner:
         render_color_grade = getattr(settings, "color_grade", "neutral")
         render_transition = video_transition
         serial_render_prepared = False
+        render_progress = _FFmpegProgressTracker(progress)
         if len(segments) > 1:
             # A multi-input graph retains one decoder/filter chain per clip.
             # At 1080x1920/60 this can exhaust a normal employee workstation
@@ -3307,7 +3570,7 @@ class PipelineRunner:
             warnings.append(
                 "多素材任务已使用逐段安全渲染，避免同时解码全部素材。"
             )
-            progress(JobStatus.RENDERING, 0.64, "逐段整理视频素材")
+            render_progress(JobStatus.RENDERING, 0.64, "逐段整理视频素材")
             try:
                 serial_source, serial_completed = self._prepare_low_memory_video_source(
                     segments=segments,
@@ -3318,7 +3581,7 @@ class PipelineRunner:
                     fps=settings.output_fps,
                     color_grade=render_color_grade,
                     video_transition=video_transition,
-                    progress=progress,
+                    progress=render_progress,
                 )
             except JobCancelledError:
                 self._abort_publish_transaction(journal_path, publish_transaction)
@@ -3345,6 +3608,7 @@ class PipelineRunner:
                 diagnostics = capture_failure_diagnostics(
                     render_error_log,
                     stage="ffmpeg_serial_prepare",
+                    return_code=int(serial_completed.returncode),
                 )
                 raise PipelineError(
                     f"视频素材逐段整理失败：{diagnostics.get('summary') or 'FFmpeg 处理失败。'}",
@@ -3501,11 +3765,17 @@ class PipelineRunner:
         # Do not create employee-facing batch folders during text/TTS/media
         # preparation. A failure before rendering must not leave empty folders
         # mixed into the publishing queue.
-        progress(JobStatus.RENDERING, 0.68, "渲染 1080 × 1920")
+        render_attempts: list[dict[str, str | int | float | bool]] = []
+        progress_lines = render_progress.begin_attempt(
+            render_duration,
+            "渲染 1080 × 1920",
+            minimum=0.68,
+        )
         try:
             completed = run_cancellable_process(
-                plan.as_list(),
+                _ffmpeg_progress_command(plan.as_list()),
                 runner=self.command_runner,
+                stdout_line_callback=progress_lines,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -3524,14 +3794,21 @@ class PipelineRunner:
             completed,
             output_exists=staged_video_path.is_file(),
         )
-        # Compatibility mode always builds a libx264 compatibility plan even
-        # when the stored encoder preference still names a hardware backend.
-        cpu_compatibility_attempted = settings.render_mode == "compatibility"
+        failure_stage = "ffmpeg_render"
+        failure_attempt: dict[str, str | int | float | bool] | None = None
+        initial_attempt = render_progress.finish_attempt(
+            succeeded=not failure_code,
+            return_code=int(completed.returncode),
+            failure_code=failure_code,
+            stage="ffmpeg_render",
+        )
+        render_attempts.append(initial_attempt)
+        if failure_code:
+            failure_attempt = initial_attempt
         # A CPU retry is correct only when the selected hardware encoder could
         # not initialize. Missing files, filters, permissions and unknown
         # failures must remain visible instead of paying for a second render.
         if _should_retry_with_cpu(failure_code, encoder, encoders):
-            cpu_compatibility_attempted = True
             hardware_detail = str(
                 completed.stderr or completed.stdout or "硬件编码器未能完成渲染"
             )[-1200:]
@@ -3584,11 +3861,16 @@ class PipelineRunner:
                 encoding="utf-8",
                 newline="\n",
             )
-            progress(JobStatus.RENDERING, 0.74, "硬件编码初始化失败，CPU 安全重试")
+            progress_lines = render_progress.begin_attempt(
+                render_duration,
+                "硬件编码初始化失败，CPU 安全重试",
+                minimum=0.74,
+            )
             try:
                 completed = run_cancellable_process(
-                    fallback_plan.as_list(),
+                    _ffmpeg_progress_command(fallback_plan.as_list()),
                     runner=self.command_runner,
+                    stdout_line_callback=progress_lines,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -3606,6 +3888,15 @@ class PipelineRunner:
                 completed,
                 output_exists=staged_video_path.is_file(),
             )
+            fallback_attempt = render_progress.finish_attempt(
+                succeeded=not failure_code,
+                return_code=int(completed.returncode),
+                failure_code=failure_code,
+                stage="ffmpeg_cpu_fallback",
+            )
+            render_attempts.append(fallback_attempt)
+            failure_stage = "ffmpeg_cpu_fallback"
+            failure_attempt = fallback_attempt if failure_code else None
             if not failure_code:
                 encoder = "libx264"
                 plan = fallback_plan
@@ -3615,9 +3906,7 @@ class PipelineRunner:
         if _should_retry_in_low_memory_mode(
             failure_code,
             serial_render_prepared=serial_render_prepared,
-            cpu_compatibility_attempted=cpu_compatibility_attempted,
         ):
-            self._prefer_low_memory_render = True
             warnings.append(
                 "检测到内存、分页文件或线程资源不足，已直接改用逐段安全模式；"
                 "不会再重复高负载渲染。"
@@ -3645,7 +3934,11 @@ class PipelineRunner:
                     )
                     _remove_empty_directory(publish_dir)
                     raise
-                progress(JobStatus.RENDERING, 0.71, "资源不足，逐段整理视频素材")
+                render_progress(
+                    JobStatus.RENDERING,
+                    0.71,
+                    "资源不足，逐段整理视频素材",
+                )
                 try:
                     low_memory_source, completed = self._prepare_low_memory_video_source(
                         segments=segments,
@@ -3656,7 +3949,7 @@ class PipelineRunner:
                         fps=settings.output_fps,
                         color_grade=getattr(settings, "color_grade", "neutral"),
                         video_transition=video_transition,
-                        progress=progress,
+                        progress=render_progress,
                     )
                 except JobCancelledError:
                     self._abort_publish_transaction(journal_path, publish_transaction)
@@ -3670,6 +3963,12 @@ class PipelineRunner:
                         stderr=f"Low-memory preparation failed: {error}",
                     )
                     low_memory_source = None
+                    failure_stage = "ffmpeg_serial_prepare"
+                    failure_attempt = None
+
+                if low_memory_source is None:
+                    failure_stage = "ffmpeg_serial_prepare"
+                    failure_attempt = None
 
             if low_memory_source is not None:
                 low_memory_plan = build_ffmpeg_plan(
@@ -3709,11 +4008,16 @@ class PipelineRunner:
                     newline="\n",
                 ) as stream:
                     stream.write("\n" + low_memory_plan.readable_command + "\n")
-                progress(JobStatus.RENDERING, 0.79, "安全模式：合成字幕与配音")
+                progress_lines = render_progress.begin_attempt(
+                    render_duration,
+                    "安全模式：合成字幕与配音",
+                    minimum=0.79,
+                )
                 try:
                     completed = run_cancellable_process(
-                        low_memory_plan.as_list(),
+                        _ffmpeg_progress_command(low_memory_plan.as_list()),
                         runner=self.command_runner,
+                        stdout_line_callback=progress_lines,
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
@@ -3731,6 +4035,15 @@ class PipelineRunner:
                     completed,
                     output_exists=staged_video_path.is_file(),
                 )
+                low_memory_attempt = render_progress.finish_attempt(
+                    succeeded=not failure_code,
+                    return_code=int(completed.returncode),
+                    failure_code=failure_code,
+                    stage="ffmpeg_serial_fallback",
+                )
+                render_attempts.append(low_memory_attempt)
+                failure_stage = "ffmpeg_serial_fallback"
+                failure_attempt = low_memory_attempt if failure_code else None
                 if not failure_code:
                     encoder = "libx264"
                     plan = low_memory_plan
@@ -3739,6 +4052,10 @@ class PipelineRunner:
                     manifest["media"]["effective_video_transition"] = "cut"
                     manifest["warnings"] = warnings
 
+        # Keep every automatic FFmpeg attempt auditable.  Commands and local
+        # paths remain in machine-local files; the manifest stores only stage,
+        # return code, frame count and observed progress.
+        manifest["render_attempts"] = render_attempts
         if completed.returncode != 0 or not staged_video_path.is_file():
             self._abort_publish_transaction(journal_path, publish_transaction)
             _remove_empty_directory(publish_dir)
@@ -3749,7 +4066,18 @@ class PipelineRunner:
             )
             failure_diagnostics = capture_failure_diagnostics(
                 render_error_log,
-                stage="ffmpeg_render",
+                stage=failure_stage,
+                return_code=int(completed.returncode),
+                attempt=(
+                    int(failure_attempt.get("attempt") or 0)
+                    if failure_attempt
+                    else None
+                ),
+                attempt_label=(
+                    str(failure_attempt.get("label") or "")
+                    if failure_attempt
+                    else ""
+                ),
             )
             failure_summary = str(
                 failure_diagnostics.get("summary") or "FFmpeg 渲染失败。"
@@ -3766,6 +4094,7 @@ class PipelineRunner:
                 "output_file": "",
                 "error_log": str(render_error_log),
                 "failure_diagnostics": failure_diagnostics,
+                "render_attempts": render_attempts,
             }
             persist_manifest()
             raise PipelineError(
@@ -3773,7 +4102,7 @@ class PipelineRunner:
                 error_log=render_error_log,
                 failure_diagnostics=failure_diagnostics,
             )
-        progress(JobStatus.RENDERING, 0.94, "快速检查成片")
+        render_progress(JobStatus.RENDERING, 0.94, "快速检查成片")
         try:
             subtitle_text = subtitle_path.read_text(encoding="utf-8-sig")
         except OSError:

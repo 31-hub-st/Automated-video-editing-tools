@@ -29,6 +29,7 @@ from storyforge.updater import (  # noqa: E402
 FROZEN_BUILD_VALIDATION = "BUILD_STARTUP_VALIDATION.json"
 FROZEN_KOKORO_VALIDATION = "BUILD_KOKORO_VALIDATION.json"
 FROZEN_RELEASE_VALIDATION = "BUILD_RELEASE_VALIDATION.json"
+PORTABLE_RUNTIME_DIRECTORY = "StoryForgeData"
 RELEASE_VALIDATION_SCHEMA = 1
 
 
@@ -65,6 +66,7 @@ def _bundle_manifest(source: Path) -> dict[str, object]:
     """Hash every release file except the attestation that contains the hash."""
 
     records: list[tuple[str, int, str]] = []
+    normalized_paths: set[str] = set()
     total_bytes = 0
     for path in source.rglob("*"):
         if path.is_symlink():
@@ -72,8 +74,21 @@ def _bundle_manifest(source: Path) -> dict[str, object]:
         if not path.is_file():
             continue
         relative = path.relative_to(source).as_posix()
+        if relative.split("/", 1)[0].casefold() == PORTABLE_RUNTIME_DIRECTORY.casefold():
+            continue
         if relative.casefold() == FROZEN_RELEASE_VALIDATION.casefold():
             continue
+        if relative.casefold() == UPDATE_PACKAGE_METADATA.casefold():
+            continue
+        if any(part in {".git", "__pycache__"} for part in Path(relative).parts):
+            continue
+        normalized = relative.casefold()
+        if normalized in normalized_paths:
+            raise ValueError(
+                "Release directory contains case-insensitive duplicate paths: "
+                f"{relative}"
+            )
+        normalized_paths.add(normalized)
         size = int(path.stat().st_size)
         digest = file_sha256(path)
         records.append((relative, size, digest))
@@ -91,6 +106,10 @@ def _bundle_manifest(source: Path) -> dict[str, object]:
         "bundle_manifest_sha256": manifest_digest.hexdigest(),
         "bundle_file_count": len(records),
         "bundle_size_bytes": total_bytes,
+        # This exact, verified allow-list is consumed by future installers.
+        # It lets an update remove files managed by the previous release that
+        # disappeared from the new release without ever sweeping user files.
+        "bundle_files": [relative for relative, _size, _digest in records],
     }
 
 
@@ -236,6 +255,7 @@ def _verify_release_validation(
         "bundle_manifest_sha256",
         "bundle_file_count",
         "bundle_size_bytes",
+        "bundle_files",
     ):
         if raw.get(key) != current_manifest[key]:
             raise ValueError(
@@ -294,6 +314,8 @@ def _safe_files(source: Path, output: Path) -> list[tuple[Path, str]]:
         if path.resolve() == output.resolve():
             continue
         relative = path.relative_to(source)
+        if relative.parts and relative.parts[0].casefold() == PORTABLE_RUNTIME_DIRECTORY.casefold():
+            continue
         if any(part in {".git", "__pycache__"} for part in relative.parts):
             continue
         if relative.as_posix() == UPDATE_PACKAGE_METADATA:

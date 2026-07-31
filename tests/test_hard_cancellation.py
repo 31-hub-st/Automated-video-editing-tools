@@ -106,6 +106,60 @@ def _job(job_id: str, platform: PlatformProfile, output: Path) -> RenderJob:
 
 
 class CancellableProcessTests(unittest.TestCase):
+    def test_parent_exit_does_not_wait_for_descendant_holding_capture_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descendant_pid = root / "descendant.pid"
+            stdout_log = root / "stdout.log"
+            stderr_log = root / "stderr.log"
+            command = [
+                sys.executable,
+                "-u",
+                "-c",
+                (
+                    "import pathlib,subprocess,sys;"
+                    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(3)']);"
+                    "pathlib.Path(sys.argv[1]).write_text(str(child.pid),encoding='ascii');"
+                    "print('parent-complete',flush=True);"
+                    "print('parent-diagnostic',file=sys.stderr,flush=True)"
+                ),
+                str(descendant_pid),
+            ]
+
+            started = time.monotonic()
+            completed = run_cancellable_process(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout_log_path=stdout_log,
+                stderr_log_path=stderr_log,
+                check=False,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertLess(
+                elapsed,
+                2.0,
+                "the direct child exited, but an inherited pipe kept the call blocked",
+            )
+            self.assertIn("parent-complete", str(completed.stdout))
+            self.assertIn("parent-diagnostic", str(completed.stderr))
+            self.assertIn("parent-complete", stdout_log.read_text(encoding="utf-8"))
+            self.assertIn("parent-diagnostic", stderr_log.read_text(encoding="utf-8"))
+            if os.name == "nt":
+                self.assertFalse(
+                    any(
+                        thread.is_alive()
+                        and thread.name
+                        in {"storyforge-stdout-reader", "storyforge-stderr-reader"}
+                        for thread in threading.enumerate()
+                    ),
+                    "cancelled pipe reads left reader threads behind",
+                )
+
     def test_cancel_terminates_process_tree_and_raises_terminal_signal(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             pid_file = Path(temp) / "pids.txt"
@@ -126,7 +180,12 @@ class CancellableProcessTests(unittest.TestCase):
             def run() -> None:
                 try:
                     with cancellation_scope(token):
-                        run_cancellable_process(command, capture_output=True, check=False)
+                        run_cancellable_process(
+                            command,
+                            stdout_line_callback=lambda _line: None,
+                            capture_output=True,
+                            check=False,
+                        )
                 except BaseException as error:
                     errors.append(error)
 
@@ -155,6 +214,128 @@ class CancellableProcessTests(unittest.TestCase):
                 _wait_until(lambda: not _pid_is_alive(child_pid)),
                 "descendant process survived cancellation",
             )
+
+    def test_streams_stdout_while_draining_and_preserving_large_stderr(self) -> None:
+        received: list[str] = []
+        first_progress = threading.Event()
+        result: list[subprocess.CompletedProcess[object]] = []
+        command = [
+            sys.executable,
+            "-u",
+            "-c",
+            (
+                "import sys,time;"
+                "sys.stderr.write('E'*200000);sys.stderr.flush();"
+                "print('out_time_us=1000000',flush=True);"
+                "time.sleep(0.4);"
+                "print('progress=end',flush=True)"
+            ),
+        ]
+
+        def report(line: str) -> None:
+            received.append(line)
+            first_progress.set()
+
+        worker = threading.Thread(
+            target=lambda: result.append(
+                run_cancellable_process(
+                    command,
+                    stdout_line_callback=report,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+        self.assertTrue(first_progress.wait(2), "stdout progress was not streamed")
+        self.assertTrue(worker.is_alive(), "callback only ran after process exit")
+        worker.join(timeout=4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(received, ["out_time_us=1000000", "progress=end"])
+        self.assertEqual(result[0].returncode, 0)
+        self.assertIn("out_time_us=1000000", str(result[0].stdout))
+        self.assertEqual(len(str(result[0].stderr)), 200000)
+
+    def test_capture_is_tail_bounded_while_full_diagnostics_land_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stderr_log = Path(temporary) / "child-stderr.log"
+            command = [
+                sys.executable,
+                "-u",
+                "-c",
+                (
+                    "import sys;"
+                    "sys.stderr.write('A'*500000+'TAIL-MARKER');"
+                    "sys.stderr.flush();"
+                    "print('done',flush=True)"
+                ),
+            ]
+
+            completed = run_cancellable_process(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_limit_bytes=64 * 1024,
+                stderr_log_path=stderr_log,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertLessEqual(len(str(completed.stderr).encode("utf-8")), 64 * 1024)
+            self.assertTrue(str(completed.stderr).endswith("TAIL-MARKER"))
+            self.assertEqual(stderr_log.stat().st_size, 500000 + len("TAIL-MARKER"))
+            self.assertTrue(stderr_log.read_text(encoding="utf-8").endswith("TAIL-MARKER"))
+
+    def test_capture_is_bounded_without_progress_callback(self) -> None:
+        completed = run_cancellable_process(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.write('X'*300000);sys.stderr.write('Y'*300000)",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            capture_limit_bytes=4096,
+            check=False,
+        )
+
+        self.assertEqual(len(str(completed.stdout)), 4096)
+        self.assertEqual(len(str(completed.stderr)), 4096)
+
+    def test_custom_runner_keeps_original_kwargs_and_reports_completed_stdout(self) -> None:
+        received: list[str] = []
+        received_kwargs: dict[str, object] = {}
+
+        def injected_runner(command, **kwargs):
+            received_kwargs.update(kwargs)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="out_time_us=500000\nprogress=end\n",
+                stderr="diagnostic",
+            )
+
+        completed = run_cancellable_process(
+            ["fake-ffmpeg.exe"],
+            runner=injected_runner,
+            stdout_line_callback=received.append,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(received, ["out_time_us=500000", "progress=end"])
+        self.assertEqual(completed.stderr, "diagnostic")
+        self.assertNotIn("stdout_line_callback", received_kwargs)
+        self.assertTrue(received_kwargs["capture_output"])
 
     def test_kokoro_cli_uses_current_job_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from storyforge.api import StoryForgeApi
 from storyforge.config import SettingsRepository
+from storyforge.hub import HubConnectionError
 from storyforge.models import AppSettings, JobStatus, PlatformProfile, RenderJob
 
 
@@ -272,19 +273,63 @@ class ClientLocalWebTests(unittest.TestCase):
             self._rpc(self.client_url, cookie, csrf, "get_bootstrap")
         self.assertEqual(inactive_device.exception.code, 401)
         inactive_device.exception.close()
+        worker = self.client_api._client_web_server.worker_gateway  # type: ignore[union-attr]
+        self.assertFalse(worker.health()["ready"])
         reenabled = self.host_api.set_managed_device_active(
             device_id, True, revoke_tokens=False
         )
         self.assertTrue(reenabled["ok"], reenabled)
+        recovered = self.client_api.connect_hub_with_password(  # type: ignore[union-attr]
+            self.host_api._hub_server.base_url,  # type: ignore[union-attr]
+            "local-renderer",
+            "Lr1!2026",
+            "Render PC",
+        )
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertTrue(worker.health()["ready"])
         cookie, csrf, _session = self._local_session()
 
-        tokens = self.host_api.list_hub_user_tokens(self.member["id"])["data"]["items"]
+        tokens = [
+            item
+            for item in self.host_api.list_hub_user_tokens(self.member["id"])["data"]["items"]
+            if not item.get("revoked_at")
+        ]
         self.assertEqual(len(tokens), 1)
         self.assertTrue(self.host_api.revoke_hub_user_token(tokens[0]["id"])["ok"])
         with self.assertRaises(HTTPError) as revoked:
             self._rpc(self.client_url, cookie, csrf, "get_bootstrap")
         self.assertEqual(revoked.exception.code, 401)
         revoked.exception.close()
+        self.assertFalse(worker.health()["ready"])
+
+        recovered = self.client_api.connect_hub_with_password(  # type: ignore[union-attr]
+            self.host_api._hub_server.base_url,  # type: ignore[union-attr]
+            "local-renderer",
+            "Lr1!2026",
+            "Render PC",
+        )
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertTrue(worker.health()["ready"])
+        _cookie, _csrf, recovered_session = self._local_session()
+        self.assertEqual(recovered_session["user"]["username"], "local-renderer")
+
+    def test_temporary_hub_outage_does_not_disconnect_verified_worker(self) -> None:
+        assert self.client_api is not None
+        worker = self.client_api._client_web_server.worker_gateway
+        client = self.client_api._hub_client_snapshot()
+        self.assertIsNotNone(client)
+        assert client is not None
+
+        with patch.object(
+            client,
+            "verify_identity",
+            side_effect=HubConnectionError("temporary LAN outage"),
+        ):
+            status = self.client_api.get_hub_status()
+
+        self.assertTrue(status["ok"], status)
+        self.assertIs(self.client_api._hub_client_snapshot(), client)
+        self.assertTrue(worker.health()["ready"])
 
     def test_client_media_rpc_uses_only_local_queue_and_safe_local_paths(self) -> None:
         assert self.client_api is not None

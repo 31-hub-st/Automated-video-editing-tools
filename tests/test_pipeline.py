@@ -28,6 +28,9 @@ from storyforge.pipeline import (
     _copy_file_atomic,
     _completed_failure_code,
     _cover_outro_enabled,
+    _FFmpegProgressTracker,
+    _ffmpeg_progress_command,
+    _ffmpeg_progress_seconds,
     _plan_category_video_segments,
     _preflight_output_directory,
     _preflight_workspace_directory,
@@ -243,7 +246,7 @@ class NarrationAssemblyTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     _completed_failure_code(completed, output_exists=False),
-                    "out_of_memory",
+                    "resource_exhausted",
                 )
 
     def test_cpu_retry_is_only_allowed_for_hardware_encoder_initialization(self) -> None:
@@ -263,26 +266,29 @@ class NarrationAssemblyTests(unittest.TestCase):
                     _should_retry_with_cpu(code, "h264_nvenc", encoders)
                 )
 
-    def test_identical_cpu_compatibility_oom_is_not_retried(self) -> None:
+    def test_normalized_source_resource_failure_is_never_retried_with_same_graph(self) -> None:
         self.assertFalse(
             _should_retry_in_low_memory_mode(
                 "out_of_memory",
                 serial_render_prepared=True,
-                cpu_compatibility_attempted=True,
             )
         )
         self.assertTrue(
             _should_retry_in_low_memory_mode(
                 "out_of_memory",
                 serial_render_prepared=False,
-                cpu_compatibility_attempted=True,
+            )
+        )
+        self.assertTrue(
+            _should_retry_in_low_memory_mode(
+                "resource_exhausted",
+                serial_render_prepared=False,
             )
         )
         self.assertFalse(
             _should_retry_in_low_memory_mode(
                 "unknown",
                 serial_render_prepared=False,
-                cpu_compatibility_attempted=False,
             )
         )
 
@@ -584,6 +590,92 @@ class UsageLedgerTests(unittest.TestCase):
             reloaded.check("deepgram", 10, 100)
 
 
+class FFmpegProgressTests(unittest.TestCase):
+    def test_progress_command_is_idempotent_and_keeps_output_last(self) -> None:
+        command = ["ffmpeg.exe", "-i", "input.mp4", "output.mp4"]
+
+        injected = _ffmpeg_progress_command(command)
+
+        self.assertEqual(injected[-1], "output.mp4")
+        self.assertEqual(injected[1:3], ["-progress", "pipe:1"])
+        self.assertIn("-nostats", injected)
+        self.assertEqual(_ffmpeg_progress_command(injected), injected)
+
+    def test_progress_timestamps_accept_current_and_legacy_ffmpeg_fields(self) -> None:
+        self.assertAlmostEqual(
+            _ffmpeg_progress_seconds("out_time_us=1250000") or 0.0,
+            1.25,
+        )
+        self.assertAlmostEqual(
+            _ffmpeg_progress_seconds("out_time_ms=2500000") or 0.0,
+            2.5,
+        )
+        self.assertAlmostEqual(
+            _ffmpeg_progress_seconds("out_time=01:02:03.500") or 0.0,
+            3723.5,
+        )
+        for line in ("out_time=N/A", "out_time_us=-1", "speed=1.0x", ""):
+            with self.subTest(line=line):
+                self.assertIsNone(_ffmpeg_progress_seconds(line))
+
+    def test_progress_end_does_not_claim_success_before_process_exit(self) -> None:
+        updates: list[tuple[float, str]] = []
+        tracker = _FFmpegProgressTracker(
+            lambda _status, value, label: updates.append((value, label))
+        )
+        attempt = tracker.begin_attempt(100.0, "hardware", minimum=0.68)
+        attempt("frame=0")
+        attempt("out_time_us=100000000")
+        attempt("progress=end")
+
+        self.assertAlmostEqual(tracker.value, 0.68)
+        record = tracker.finish_attempt(
+            succeeded=False,
+            return_code=-12,
+            failure_code="resource_exhausted",
+        )
+
+        self.assertAlmostEqual(tracker.value, 0.68)
+        self.assertEqual(record["frames"], 0)
+        self.assertEqual(record["return_code"], -12)
+        self.assertTrue(any("失败" in label and "0 帧" in label for _, label in updates))
+
+    def test_retry_starts_a_numbered_attempt_with_its_own_progress(self) -> None:
+        updates: list[tuple[float, str]] = []
+        tracker = _FFmpegProgressTracker(
+            lambda _status, value, label: updates.append((value, label))
+        )
+        first = tracker.begin_attempt(100.0, "hardware", minimum=0.68)
+        first("frame=120")
+        first("out_time_us=50000000")
+        first_record = tracker.finish_attempt(
+            succeeded=False,
+            return_code=1,
+            failure_code="encoder_init",
+            stage="ffmpeg_render",
+        )
+        first_value = tracker.value
+
+        retry = tracker.begin_attempt(100.0, "cpu retry", minimum=0.74)
+        retry_start = tracker.value
+        retry("frame=0")
+        retry("progress=end")
+        second_record = tracker.finish_attempt(
+            succeeded=False,
+            return_code=-12,
+            failure_code="resource_exhausted",
+            stage="ffmpeg_cpu_fallback",
+        )
+
+        self.assertGreater(first_value, retry_start)
+        self.assertAlmostEqual(retry_start, 0.74)
+        self.assertAlmostEqual(tracker.value, 0.74)
+        self.assertEqual(first_record["attempt"], 1)
+        self.assertEqual(second_record["attempt"], 2)
+        self.assertEqual(second_record["stage"], "ffmpeg_cpu_fallback")
+        self.assertTrue(any("尝试 2" in label for _, label in updates))
+
+
 class PipelineRunnerTests(unittest.TestCase):
     def test_single_clip_low_memory_source_skips_redundant_stitched_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -705,7 +797,7 @@ class PipelineRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(serial[2].duration, 1.8)
         self.assertAlmostEqual(serial[2].start_time, 0.2)
 
-    def test_oom_on_hardware_skips_full_cpu_graph_and_uses_serial_fallback(self) -> None:
+    def test_oom_after_serial_normalization_does_not_repeat_full_graph(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "123456_Story.txt"
@@ -827,29 +919,35 @@ class PipelineRunnerTests(unittest.TestCase):
                 mock.patch("storyforge.pipeline._commit_video_usage"),
                 mock.patch("storyforge.pipeline._commit_music_usage"),
             ):
-                output = runner(
-                    job,
-                    PlatformProfile(id="platform", name="NovelBox"),
-                    lambda *_args: None,
-                )
+                with self.assertRaisesRegex(PipelineError, "FFmpeg"):
+                    runner(
+                        job,
+                        PlatformProfile(id="platform", name="NovelBox"),
+                        lambda *_args: None,
+                    )
 
-            self.assertTrue(Path(output).is_file())
-            self.assertEqual(delivery_attempts, 2)
-            self.assertTrue(runner._prefer_low_memory_render)
+            self.assertEqual(delivery_attempts, 1)
             job_dir = job_workspace_directory(job, runner.work_root)
             self.assertFalse((job_dir / "render-command-fallback.txt").exists())
             self.assertTrue((job_dir / "render-command-low-memory.txt").is_file())
             manifests = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertTrue(manifests["media"]["low_memory_fallback"])
             self.assertTrue(manifests["media"]["safe_serial_render"])
+            self.assertEqual(manifests["result"]["status"], "failed")
+            self.assertEqual(len(manifests["render_attempts"]), 1)
+            self.assertEqual(
+                manifests["render_attempts"][0]["stage"],
+                "ffmpeg_render",
+            )
+            self.assertEqual(
+                manifests["render_attempts"][0]["failure_code"],
+                "out_of_memory",
+            )
             delivery_commands = [
                 item for item in commands if Path(item[-1]).name.endswith(".partial.mp4")
             ]
-            self.assertEqual(len(delivery_commands), 2)
+            self.assertEqual(len(delivery_commands), 1)
             self.assertTrue(all(command.count("-i") == 2 for command in delivery_commands))
             self.assertIn("h264_nvenc", delivery_commands[0])
-            self.assertIn("-filter_complex_threads", delivery_commands[1])
-            self.assertIn("libx264", delivery_commands[1])
 
     def test_media_decode_sample_is_cached_by_path_size_and_mtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

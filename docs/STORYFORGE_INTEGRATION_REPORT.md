@@ -2,8 +2,8 @@
 
 > 文档用途：供后续开发团队将 StoryForge 的小说资料、分集规划、文案处理、配音、字幕、素材编排、浏览器即时预览、批量渲染、生产记录和多电脑协同能力嫁接到其他程序。
 >
-> 基准日期：2026-07-30  
-> 当前源码版本：`storyforge.__version__` 0.4.1
+> 基准日期：2026-08-01
+> 当前源码版本：`storyforge.__version__` 0.4.4
 > 数据库 Schema：12  
 > 设置 Schema：19
 > Hub 协议：1  
@@ -11,7 +11,7 @@
 > 成片 Manifest：2
 > 更新清单 Schema：1；更新包元数据：1；生产方案 `recipe_version`：1；生产预设 Schema：2
 >
-> 解释优先级：本报告前部的“0.4.1 当前嫁接合同”覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。当前稳定构建位于 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio\`，冻结态启动、内置 FFmpeg、Kokoro 实际合成、60 FPS 完整成片与独立 MP3 均已通过本机验收；更新包已发布到 Hub。员工电脑的最终安装与硬件冒烟状态仍以设备上报为准。
+> 解释优先级：本报告前部的当前嫁接合同覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。0.4.4 完整包位于 `D:\StoryForgeBuildTemp\delivery\0.4.4-stable-final\StoryForge-0.4.4-Windows-x64.zip`。冻结态启动、内置 FFmpeg、Kokoro 实际合成、311.849 秒 30 FPS 与 600.801 秒 60 FPS 完整成片、独立 MP3 和整包哈希绑定均已通过本机验收；员工电脑的最终硬件冒烟状态仍以设备上报为准。
 
 ---
 
@@ -1672,9 +1672,12 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File ".\scripts\build_exe.ps1" `
   -WithLocalAI `
-  -OutputDirectory "release\StoryForge-Studio-custom" `
+  -OutputDirectory "D:\StoryForgeBuildTemp\dist" `
+  -WorkDirectory "D:\StoryForgeBuildTemp\work" `
   -HubEndpoint "http://10.0.0.225:8765"
 ```
+
+生产构建必须显式使用上述两个纯英文/ASCII 目录。省略参数仅适合临时构建；当源码路径含中文时，脚本会自动改用源码所在盘根目录的 `StoryForgeBuildTemp\dist` 和 `StoryForgeBuildTemp\work`。
 
 `-WithLocalAI` 收集进程内 Kokoro/PyTorch 运行时，并自动校验、复制源码根的 `local-ai\kokoro` 到 EXE 同级。若源码根资产尚未准备，必须先运行以下准备命令，再执行上述构建：
 

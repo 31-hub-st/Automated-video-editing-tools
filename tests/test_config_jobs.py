@@ -1523,7 +1523,6 @@ class JobQueueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "every task is finished"):
             queue.archive_batch_snapshots(jobs[0].batch_id)
         self.assertEqual(len(queue.list_jobs()), 2)
-
         jobs[1].status = JobStatus.FAILED
         snapshots = queue.archive_batch_snapshots(jobs[0].batch_id)
         removed = queue.remove_archived_batch(
@@ -1538,6 +1537,18 @@ class JobQueueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already in the active film strip"):
             queue.restore_archived_batch(snapshots, {platform.id: platform})
         self.assertEqual(len(queue.list_jobs()), 2)
+
+    def test_unfinished_work_includes_jobs_waiting_in_queue(self) -> None:
+        platform = PlatformProfile(id="platform-1", name="NovelBox")
+        job = self._fifo_jobs("WAITING", 1, platform)[0]
+        queue = JobQueue(lambda *_: "")
+
+        self.assertFalse(queue.has_unfinished_work())
+        queue.enqueue_jobs([job], platform)
+        self.assertFalse(queue.is_rendering_busy())
+        self.assertTrue(queue.has_unfinished_work())
+        job.status = JobStatus.COMPLETED
+        self.assertFalse(queue.has_unfinished_work())
 
     def test_later_batch_cannot_overtake_stream_tail_appended_while_busy(self) -> None:
         platform = PlatformProfile(id="platform-1", name="NovelBox")

@@ -29,15 +29,15 @@ class FailureDiagnosticsTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(classify_failure(log_text), expected)
 
-    def test_windows_resource_and_thread_exhaustion_are_memory_failures(self) -> None:
+    def test_windows_resource_and_thread_exhaustion_are_not_reported_as_physical_ram(self) -> None:
         for log_text in (
-            "std::bad_alloc",
             "pthread_create failed: Resource temporarily unavailable",
             "The paging file is too small for this operation to complete",
             "Insufficient system resources exist to complete the requested service",
         ):
             with self.subTest(log_text=log_text):
-                self.assertEqual(classify_failure(log_text), "out_of_memory")
+                self.assertEqual(classify_failure(log_text), "resource_exhausted")
+        self.assertEqual(classify_failure("std::bad_alloc"), "out_of_memory")
 
     def test_sanitizes_controls_paths_and_secrets(self) -> None:
         raw = (
@@ -86,6 +86,9 @@ class FailureDiagnosticsTests(unittest.TestCase):
             report = capture_failure_diagnostics(
                 log_path,
                 stage="ffmpeg_render",
+                return_code=-12,
+                attempt=2,
+                attempt_label="CPU fallback",
                 max_read_bytes=800,
                 max_log_chars=240,
             )
@@ -93,12 +96,34 @@ class FailureDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["schema_version"], DIAGNOSTIC_SCHEMA_VERSION)
         self.assertEqual(report["code"], "permission_denied")
         self.assertEqual(report["stage"], "ffmpeg_render")
+        self.assertEqual(report["return_code"], -12)
+        self.assertEqual(report["attempt"], 2)
+        self.assertEqual(report["attempt_label"], "CPU fallback")
         self.assertEqual(report["log_name"], "render-error.log")
         self.assertTrue(report["truncated"])
         self.assertLessEqual(len(str(report["log_tail"])), 240)
         self.assertNotIn("Worker", str(report["log_tail"]))
         self.assertNotIn("PRIVATE-PREFIX", str(report["log_tail"]))
         self.assertIsInstance(json.dumps(report, ensure_ascii=False), str)
+
+    def test_memory_summary_does_not_claim_physical_ram_is_the_only_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            log_path = Path(folder, "render-error.log")
+            log_path.write_text(
+                "[fc#0] Error while filtering: Cannot allocate memory",
+                encoding="utf-8",
+            )
+            report = capture_failure_diagnostics(
+                log_path,
+                stage="ffmpeg_render",
+                return_code=-12,
+                attempt=1,
+            )
+
+        self.assertEqual(report["code"], "out_of_memory")
+        self.assertIn("不能仅据此", str(report["summary"]))
+        self.assertEqual(report["return_code"], -12)
+        self.assertEqual(report["attempt"], 1)
 
     def test_default_capture_never_exceeds_six_thousand_characters(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -9,7 +9,9 @@ description = "Local-first batch studio for narrated vertical novel videos"
 requires-python = ">=3.11"
 dependencies = [
   "imageio-ffmpeg>=0.6,<1",
-  "pywebview>=5,<7",
+  "pywebview==6.2.1",
+  "pythonnet==3.1.0; sys_platform == 'win32'",
+  "clr-loader==0.3.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]

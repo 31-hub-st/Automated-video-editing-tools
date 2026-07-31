@@ -17,7 +17,10 @@ from storyforge.worker import (
     LOCAL_WORKER_RPC_PERMISSIONS,
     LocalWorkerGateway,
     LocalWorkerProfileStore,
+    ProductionWorkerMutex,
+    discover_local_production_worker,
     ensure_local_worker_autostart,
+    local_worker_release_state,
     pause_local_worker_autostart_for_desktop,
 )
 from storyforge.web import ClientLocalWebServer
@@ -32,6 +35,78 @@ def _free_port() -> int:
 
 
 class LocalWorkerProfileTests(unittest.TestCase):
+    def test_discovery_hides_unready_worker_except_for_lifecycle_handoff(self) -> None:
+        payload = {
+            "ok": True,
+            "data": {
+                "service": "storyforge-local-worker",
+                "worker_role": "production-workstation",
+                "ready": False,
+                "rendering_busy": False,
+                "queue_busy": False,
+            },
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(payload).encode("utf-8")
+
+        with patch("storyforge.worker.urlopen", return_value=Response()):
+            self.assertIsNone(discover_local_production_worker())
+            lifecycle_worker = discover_local_production_worker(
+                include_unready=True
+            )
+
+        self.assertIsNotNone(lifecycle_worker)
+        assert lifecycle_worker is not None
+        self.assertFalse(lifecycle_worker["ready"])
+        self.assertEqual(
+            lifecycle_worker["endpoint"], "http://127.0.0.1:18765"
+        )
+
+    def test_worker_release_state_requires_matching_version_and_protocol(self) -> None:
+        current = {
+            "version": "0.4.1",
+            "protocol_version": LOCAL_WORKER_PROTOCOL_VERSION,
+            "minimum_browser_protocol_version": LOCAL_WORKER_PROTOCOL_VERSION,
+        }
+        self.assertEqual(
+            local_worker_release_state(current, expected_version="0.4.1"),
+            "current",
+        )
+        self.assertEqual(
+            local_worker_release_state(current, expected_version="0.4.2"),
+            "stale",
+        )
+        self.assertEqual(local_worker_release_state({}), "unknown")
+
+    def test_worker_mutex_identity_does_not_split_across_data_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            first = ProductionWorkerMutex(temporary)
+            second = ProductionWorkerMutex(Path(temporary) / "portable" / "StoryForgeData")
+            self.assertEqual(first.name, second.name)
+            self.assertEqual(first.name, "Global\\StoryForgeProductionWorker")
+            self.assertIn(
+                "Local\\StoryForgeProductionWorker", first.compatibility_names
+            )
+            # Both new processes also probe the legacy AppData-derived alias,
+            # so an already-running 0.4.2 Worker cannot coexist with a newly
+            # migrated portable Worker.
+            self.assertTrue(
+                set(first.compatibility_names).intersection(
+                    second.compatibility_names
+                )
+            )
+            if sys.platform != "win32":
+                self.assertTrue(first.acquire())
+                first.release()
+
     def test_packaged_login_task_never_contains_account_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

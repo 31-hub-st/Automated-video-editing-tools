@@ -18,6 +18,8 @@ from typing import Any
 
 
 UPDATE_PACKAGE_METADATA = "storyforge-update.json"
+RELEASE_VALIDATION_FILENAME = "BUILD_RELEASE_VALIDATION.json"
+PORTABLE_RUNTIME_DIRECTORY = "StoryForgeData"
 UPDATE_MANIFEST_SCHEMA = 1
 MAX_UPDATE_ENTRIES = 20_000
 MAX_UPDATE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
@@ -92,6 +94,39 @@ def _safe_relative_path(value: Any, *, label: str) -> str:
     if pure.parts and ":" in pure.parts[0]:
         raise ValueError(f"{label}路径不能包含盘符。")
     return pure.as_posix()
+
+
+def _managed_bundle_paths(
+    value: Mapping[str, Any], *, label: str
+) -> tuple[str, ...]:
+    """Validate a release-owned file allow-list without inferring ownership."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object.")
+    raw_files = value.get("bundle_files")
+    if not isinstance(raw_files, list):
+        raise ValueError(f"{label} bundle_files must be a list.")
+    try:
+        declared_count = int(value.get("bundle_file_count"))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} bundle_file_count is invalid.") from error
+    paths: list[str] = []
+    normalized: set[str] = set()
+    for raw_path in raw_files:
+        relative = _safe_relative_path(raw_path, label=label)
+        first = PurePosixPath(relative).parts[0]
+        if first.casefold() == PORTABLE_RUNTIME_DIRECTORY.casefold():
+            raise ValueError(f"{label} cannot manage StoryForgeData.")
+        if relative.casefold() == RELEASE_VALIDATION_FILENAME.casefold():
+            raise ValueError(f"{label} cannot manage its own validation file.")
+        key = relative.casefold()
+        if key in normalized:
+            raise ValueError(f"{label} contains duplicate paths.")
+        normalized.add(key)
+        paths.append(relative)
+    if declared_count != len(paths):
+        raise ValueError(f"{label} file count does not match bundle_files.")
+    return tuple(paths)
 
 
 def validate_update_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -301,6 +336,17 @@ class UpdateRepository:
         destination = (self.root / filename).resolve()
         destination.relative_to(self.root)
         with self._lock:
+            published = self.get_manifest()
+            if published is not None and published["version"] == version:
+                if published["sha256"] != digest:
+                    raise ValueError(
+                        "the same StoryForge version cannot publish a different update package"
+                    )
+                # Publishing is an idempotent release operation. Preserve the
+                # exact artifact and metadata already advertised to clients.
+                if progress is not None:
+                    progress(1.0, "The identical StoryForge update is already published.")
+                return published
             if progress is not None:
                 progress(0.42, "正在复制更新包到 Hub…")
             temporary = self.root / f".{filename}.{os.getpid()}.part"
@@ -396,6 +442,7 @@ class UpdateManager:
         auto_download_getter: Callable[[], bool],
         interval_minutes_getter: Callable[[], int | float],
         rendering_busy_getter: Callable[[], bool],
+        heavy_resource_lock: Any | None = None,
         launcher: Callable[[Path, Path, int], None] | None = None,
     ) -> None:
         self.current_version = normalize_version(current_version)
@@ -414,6 +461,7 @@ class UpdateManager:
         self._auto_download_getter = auto_download_getter
         self._interval_minutes_getter = interval_minutes_getter
         self._rendering_busy_getter = rendering_busy_getter
+        self._heavy_resource_lock = heavy_resource_lock
         self._launcher = launcher or self._launch_windows_worker
         self._lock = threading.RLock()
         self._operation_lock = threading.Lock()
@@ -456,6 +504,12 @@ class UpdateManager:
         """
 
         fallback = self.state_root
+        if os.environ.get("STORYFORGE_PORTABLE_MODE") == "1":
+            # The employee selected the installation drive by placing the
+            # complete StoryForge folder there. Keep downloads, staging and
+            # rollback state inside StoryForgeData as well; the installer only
+            # overlays packaged files and therefore preserves this directory.
+            return fallback
         if not bool(getattr(sys, "frozen", False)):
             return fallback
         try:
@@ -766,6 +820,11 @@ class UpdateManager:
         install_root = self.install_root().resolve()
         total = 0
         with zipfile.ZipFile(package) as archive:
+            archive_entries = {
+                _safe_relative_path(entry.filename, label="压缩包文件").casefold(): entry
+                for entry in archive.infolist()
+                if not entry.is_dir()
+            }
             for entry in archive.infolist():
                 if entry.is_dir():
                     continue
@@ -786,6 +845,50 @@ class UpdateManager:
                         total += int(target.stat().st_size)
                 except OSError:
                     continue
+            # A new release can intentionally remove DLLs/assets that belonged
+            # to the previous verified release. Those files are backed up too,
+            # so include them in the disk-space preflight instead of discovering
+            # the extra requirement halfway through installation.
+            validation_entry = archive_entries.get(
+                RELEASE_VALIDATION_FILENAME.casefold()
+            )
+            old_validation_path = install_root / RELEASE_VALIDATION_FILENAME
+            if validation_entry is not None and old_validation_path.is_file():
+                try:
+                    new_validation = json.loads(
+                        archive.read(validation_entry).decode("utf-8-sig")
+                    )
+                    old_validation = json.loads(
+                        old_validation_path.read_text(encoding="utf-8-sig")
+                    )
+                    new_paths = _managed_bundle_paths(
+                        new_validation, label="new release validation"
+                    )
+                    old_paths = _managed_bundle_paths(
+                        old_validation, label="old release validation"
+                    )
+                    new_keys = {path.casefold() for path in new_paths}
+                    for relative in old_paths:
+                        if relative.casefold() in new_keys:
+                            continue
+                        target = (
+                            install_root
+                            / Path(*PurePosixPath(relative).parts)
+                        ).resolve(strict=False)
+                        target.relative_to(install_root)
+                        if target.is_file():
+                            total += int(target.stat().st_size)
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    # Invalid/legacy ownership metadata results in no cleanup;
+                    # the installer follows the same fail-safe policy and keeps
+                    # unknown files rather than estimating or deleting them.
+                    pass
         return total
 
     def _apply_space_requirements(
@@ -987,10 +1090,79 @@ class UpdateManager:
         finally:
             self._operation_lock.release()
 
+    def _defer_download_for_production(
+        self, manifest: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        checked = validate_update_manifest(manifest)
+        with self._lock:
+            self._manifest = checked
+            self._status.update(
+                {
+                    "available_version": checked["version"],
+                    "state": "available",
+                    "progress": 0.12,
+                    "message": (
+                        "当前有待制作任务；更新包将在制作队列完全空闲后自动下载，"
+                        "不会与视频生成争用电脑资源。"
+                    ),
+                    "checked_at": utc_now(),
+                    "release_notes": checked["release_notes"],
+                    "published_at": checked["published_at"],
+                    "error": "",
+                }
+            )
+        return self.status()
+
     def _download_locked(
         self, client: Any, manifest: Mapping[str, Any]
     ) -> dict[str, Any]:
         checked = validate_update_manifest(manifest)
+        if self._rendering_busy_getter():
+            return self._defer_download_for_production(checked)
+
+        reservation = self._heavy_resource_lock
+        acquired = False
+        if reservation is not None:
+            acquired = bool(reservation.acquire(blocking=False))
+            if not acquired:
+                return self._defer_download_for_production(checked)
+        try:
+            # Close the TOCTOU window between the cheap queue check and the
+            # shared reservation. Production always takes priority.
+            if self._rendering_busy_getter():
+                return self._defer_download_for_production(checked)
+            return self._download_locked_reserved(client, checked)
+        finally:
+            if acquired:
+                reservation.release()
+
+    def _download_locked_reserved(
+        self, client: Any, manifest: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        checked = validate_update_manifest(manifest)
+        if self._rendering_busy_getter():
+            # The frozen employee package is intentionally self-contained and
+            # can be large.  Copying it, hashing it and inspecting the ZIP all
+            # compete with FFmpeg for disk bandwidth and CPU.  Discovery is
+            # cheap, but the payload waits for the next idle monitor pass.
+            with self._lock:
+                self._manifest = checked
+                self._status.update(
+                    {
+                        "available_version": checked["version"],
+                        "state": "available",
+                        "progress": 0.12,
+                        "message": (
+                            "当前正在生成视频；更新包会在队列空闲后的下一轮检查中自动下载，"
+                            "不会与本次制作争用电脑资源。"
+                        ),
+                        "checked_at": utc_now(),
+                        "release_notes": checked["release_notes"],
+                        "published_at": checked["published_at"],
+                        "error": "",
+                    }
+                )
+            return self.status()
         self._ensure_download_space(checked)
         version_directory = (self.cache_root / checked["version"]).resolve()
         version_directory.relative_to(self.cache_root)
@@ -1144,6 +1316,81 @@ class UpdateManager:
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parent.parent
 
+    def _record_apply_preflight_failure(
+        self,
+        *,
+        marker: Mapping[str, Any] | None,
+        manifest: Mapping[str, Any] | None,
+        error: BaseException,
+    ) -> None:
+        """Persist a failed hand-off and remove only its private staging root."""
+
+        failed_at = utc_now()
+        message = str(error) or type(error).__name__
+        failed_marker = dict(marker or {})
+        try:
+            persisted = json.loads(self.pending_path.read_text(encoding="utf-8"))
+            if isinstance(persisted, Mapping):
+                # The external worker may have published its apply-work root
+                # after Python handed it off but before process creation failed.
+                failed_marker.update(dict(persisted))
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+        failed_marker.setdefault("schema_version", 1)
+        failed_marker.update(
+            {
+                "installing": False,
+                "installing_at": "",
+                "installing_phase": "",
+                "last_error": message,
+                "failed_at": failed_at,
+            }
+        )
+        apply_value = str(failed_marker.get("apply_work_root") or "").strip()
+        failed_marker["apply_work_root"] = ""
+        try:
+            self._write_json_atomic(self.pending_path, failed_marker)
+        except OSError:
+            pass
+        version = str((manifest or {}).get("version") or "").strip()
+        try:
+            self._write_json_atomic(
+                self.result_path,
+                {
+                    "status": "failed",
+                    "version": version,
+                    "failed_at": failed_at,
+                    "phase": "preflight",
+                    "error": message,
+                    "rollback_available": False,
+                },
+            )
+        except OSError:
+            pass
+        if apply_value:
+            try:
+                candidate = Path(apply_value).resolve(strict=False)
+                allowed = candidate.name.startswith("apply-") and any(
+                    self._path_is_within(candidate, root)
+                    for root in (self.storage_root, self.state_root)
+                )
+                if allowed:
+                    self._remove_path_best_effort(candidate)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        self._pending_ready = bool(manifest)
+        with self._lock:
+            self._status.update(
+                {
+                    "state": "error",
+                    "progress": 0.0,
+                    "message": "更新安装预检失败，已安全停止；请查看更新结果后重试。",
+                    "apply_on_restart": bool(manifest),
+                    "restart_required": bool(manifest),
+                    "error": message,
+                }
+            )
+
     def launch_scheduled_update(self) -> bool:
         """Hand off a scheduled release only after rendering is completely idle."""
 
@@ -1159,31 +1406,97 @@ class UpdateManager:
                     }
                 )
             return False
-        with self._lock:
-            manifest = dict(self._manifest) if self._manifest else None
-            package_value = str(self._status.get("package_path") or "").strip()
-        if manifest is None or not package_value:
+        if not self._operation_lock.acquire(blocking=False):
             return False
-        package = Path(package_value).resolve(strict=True)
-        space_requirements = self._apply_space_requirements(package, manifest)
+        marker: dict[str, Any] | None = None
+        manifest: dict[str, Any] | None = None
         try:
-            marker = json.loads(self.pending_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError) as error:
-            raise RuntimeError("待安装更新记录无法读取。") from error
-        marker["update_storage_root"] = str(self.storage_root)
-        marker["space_requirements"] = space_requirements
-        self._write_json_atomic(self.pending_path, marker)
-        self._write_windows_worker()
-        self._launcher(self.worker_path, self.pending_path, os.getpid())
-        with self._lock:
-            self._status.update(
+            with self._lock:
+                manifest = dict(self._manifest) if self._manifest else None
+                package_value = str(self._status.get("package_path") or "").strip()
+            if manifest is None or not package_value:
+                return False
+            try:
+                loaded_marker = json.loads(
+                    self.pending_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(loaded_marker, Mapping):
+                    raise ValueError("pending update marker is not an object")
+                marker = dict(loaded_marker)
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                failure = RuntimeError("待安装更新记录无法读取。")
+                self._record_apply_preflight_failure(
+                    marker=None,
+                    manifest=manifest,
+                    error=failure,
+                )
+                raise failure from error
+
+            installing_at = self._parse_utc(marker.get("installing_at"))
+            if (
+                bool(marker.get("installing"))
+                and installing_at is not None
+                and datetime.now(timezone.utc) - installing_at
+                <= UPDATE_INSTALLING_GRACE
+            ):
+                self._pending_ready = False
+                return False
+
+            # Publish the installing state before hashing, disk preflight,
+            # worker generation or process launch. A second StoryForge copy
+            # restores this marker as installer-owned and cannot hand off a
+            # second updater during the live-file copy window.
+            marker.update(
                 {
-                    "state": "applying_on_restart",
-                    "message": "StoryForge 退出后将安装更新并重新打开。",
-                    "rendering_busy": False,
+                    "installing": True,
+                    "installing_at": utc_now(),
+                    "installing_phase": "handoff",
+                    "installation_id": (
+                        str(marker.get("installation_id") or "").strip()
+                        or hashlib.sha256(os.urandom(32)).hexdigest()
+                    ),
+                    "apply_work_root": "",
+                    "last_error": "",
+                    "update_storage_root": str(self.storage_root),
+                    "register_local_worker": (
+                        str(self._mode_getter() or "").strip().casefold()
+                        == "client"
+                    ),
                 }
             )
-        return True
+            self._write_json_atomic(self.pending_path, marker)
+            self._pending_ready = False
+            with self._lock:
+                self._status.update(
+                    {
+                        "state": "applying_on_restart",
+                        "message": "正在安全启动更新安装程序。",
+                        "apply_on_restart": False,
+                        "restart_required": False,
+                        "rendering_busy": False,
+                        "error": "",
+                    }
+                )
+
+            try:
+                package = Path(package_value).resolve(strict=True)
+                space_requirements = self._apply_space_requirements(
+                    package, manifest
+                )
+                marker["space_requirements"] = space_requirements
+                self._write_json_atomic(self.pending_path, marker)
+                self._write_windows_worker()
+                self._launcher(self.worker_path, self.pending_path, os.getpid())
+            except BaseException as error:
+                self._record_apply_preflight_failure(
+                    marker=marker,
+                    manifest=manifest,
+                    error=error,
+                )
+                raise
+            return True
+        finally:
+            self._operation_lock.release()
 
     def _write_windows_worker(self) -> None:
         self.worker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1196,6 +1509,125 @@ function Write-JsonUtf8NoBom([string]$Path, [object]$Value, [int]$Depth = 12) {
   $json = $Value | ConvertTo-Json -Depth $Depth
   [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
 }
+function Resolve-ManagedInstallPath(
+  [string]$Root,
+  [string]$RelativePath,
+  [string]$Label = 'managed release file'
+) {
+  if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.IndexOf([char]0) -ge 0) {
+    throw "Invalid $Label path."
+  }
+  $parts = @($RelativePath -split '[\\/]')
+  if (
+    $parts.Count -eq 0 -or
+    @($parts | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' -or $_.Contains(':') }).Count -gt 0
+  ) {
+    throw "Unsafe $Label path."
+  }
+  if ([string]::Equals($parts[0], 'StoryForgeData', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Protected StoryForgeData path cannot be managed by an update."
+  }
+  $rootPath = [IO.Path]::GetFullPath($Root)
+  $rootPrefix = $rootPath.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $normalizedRelative = [string]::Join([IO.Path]::DirectorySeparatorChar, $parts)
+  $target = [IO.Path]::GetFullPath((Join-Path $rootPath $normalizedRelative))
+  if (-not $target.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsafe $Label path outside the StoryForge installation."
+  }
+  $cursor = $rootPath
+  foreach ($part in $parts) {
+    $cursor = Join-Path $cursor $part
+    if (Test-Path -LiteralPath $cursor) {
+      $item = Get-Item -LiteralPath $cursor -Force
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Unsafe $Label path crosses a reparse point."
+      }
+    }
+  }
+  return @{ relative=$normalizedRelative; target=$target }
+}
+function Wait-StoryForgeWorkerHealth(
+  [string]$ExpectedVersion,
+  [int]$TimeoutSeconds = 90,
+  [string]$ExpectedExecutablePath = ''
+) {
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  do {
+    foreach ($port in 18765..18770) {
+      try {
+        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/worker/api/health" -TimeoutSec 2
+        $identityMatches = $true
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedExecutablePath)) {
+          $identityMatches = $false
+          try {
+            $workerPid = [int]$response.data.process_id
+            $workerProcess = Get-Process -Id $workerPid -ErrorAction Stop
+            $workerPath = [IO.Path]::GetFullPath([string]$workerProcess.Path)
+            $expectedPath = [IO.Path]::GetFullPath($ExpectedExecutablePath)
+            $identityMatches = [string]::Equals(
+              $workerPath,
+              $expectedPath,
+              [StringComparison]::OrdinalIgnoreCase
+            )
+          } catch {
+            $identityMatches = $false
+          }
+        }
+        if (
+          $response.ok -and
+          $response.data.service -eq 'storyforge-local-worker' -and
+          $identityMatches -and
+          (
+            [string]::IsNullOrWhiteSpace($ExpectedVersion) -or
+            [string]$response.data.version -eq $ExpectedVersion
+          )
+        ) {
+          return @{ endpoint="http://127.0.0.1:$port"; data=$response.data }
+        }
+      } catch {
+        # An unused loopback discovery port is expected while startup settles.
+      }
+    }
+    Start-Sleep -Milliseconds 500
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $null
+}
+$resultPath = Join-Path ([IO.Path]::GetDirectoryName($MarkerPath)) 'last-update-result.json'
+$marker = $null
+$version = ''
+$workRoot = ''
+$stage = ''
+$backup = ''
+$installationId = ''
+$installMutex = $null
+$installMutexAcquired = $false
+$failureAlreadyRecorded = $false
+trap {
+  $failureMessage = [string]$_.Exception.Message
+  if (-not $failureAlreadyRecorded) {
+    try {
+      if ($null -eq $marker) { $marker = [pscustomobject]@{ schema_version=1 } }
+      $marker | Add-Member -NotePropertyName installing -NotePropertyValue $false -Force
+      $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue '' -Force
+      $marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue '' -Force
+      $marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue '' -Force
+      $marker | Add-Member -NotePropertyName last_error -NotePropertyValue $failureMessage -Force
+      $marker | Add-Member -NotePropertyName failed_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+      Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+    } catch {}
+    try {
+      Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='failed'; version=$version; failed_at=[DateTime]::UtcNow.ToString('o'); phase='preflight'; error=$failureMessage; rollback_available=$false }
+    } catch {}
+  }
+  if (-not [string]::IsNullOrWhiteSpace($workRoot)) {
+    Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if ($installMutexAcquired -and $null -ne $installMutex) {
+    try { $installMutex.ReleaseMutex() } catch {}
+  }
+  if ($null -ne $installMutex) { try { $installMutex.Dispose() } catch {} }
+  exit 1
+}
 $marker = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $package = [IO.Path]::GetFullPath([string]$marker.package_path)
 $installRoot = [IO.Path]::GetFullPath([string]$marker.install_root)
@@ -1203,21 +1635,78 @@ $storageRoot = [IO.Path]::GetDirectoryName($MarkerPath)
 if ($null -ne $marker.update_storage_root -and -not [string]::IsNullOrWhiteSpace([string]$marker.update_storage_root)) {
   $storageRoot = [IO.Path]::GetFullPath([string]$marker.update_storage_root)
 }
-$resultPath = Join-Path ([IO.Path]::GetDirectoryName($MarkerPath)) 'last-update-result.json'
 $expected = ([string]$marker.manifest.sha256).ToLowerInvariant()
 $version = [string]$marker.manifest.version
 $entrypoint = ([string]$marker.manifest.entrypoint).Replace('/', [IO.Path]::DirectorySeparatorChar)
+$mutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+  $mutexBytes = [Text.Encoding]::UTF8.GetBytes($installRoot.ToLowerInvariant())
+  $mutexIdentity = ([BitConverter]::ToString($mutexHasher.ComputeHash($mutexBytes))).Replace('-', '')
+} finally { $mutexHasher.Dispose() }
+$installMutex = New-Object Threading.Mutex($false, ('Local\StoryForgeUpdate-' + $mutexIdentity))
+try {
+  $installMutexAcquired = $installMutex.WaitOne(0)
+} catch [Threading.AbandonedMutexException] {
+  $installMutexAcquired = $true
+}
+if (-not $installMutexAcquired) {
+  $installMutex.Dispose()
+  exit 0
+}
+# Mark the hand-off before any package hash, disk-space, extraction or copy
+# preflight. New StoryForge processes now suppress re-apply immediately, while
+# the named mutex prevents a second external installer from entering at all.
+$marker | Add-Member -NotePropertyName installing -NotePropertyValue $true -Force
+$marker | Add-Member -NotePropertyName installing_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+$installationId = [string]$marker.installation_id
+if ([string]::IsNullOrWhiteSpace($installationId)) {
+  $installationId = [guid]::NewGuid().ToString('N')
+  $marker | Add-Member -NotePropertyName installation_id -NotePropertyValue $installationId -Force
+}
+$marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue 'preflight' -Force
+$marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue '' -Force
+$marker | Add-Member -NotePropertyName last_error -NotePropertyValue '' -Force
+Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+$oldReleaseValidationPath = Join-Path $installRoot 'BUILD_RELEASE_VALIDATION.json'
+$oldReleaseVersion = ''
+$oldEntryPath = ''
+$oldManagedFiles = New-Object System.Collections.Generic.List[string]
+if (Test-Path -LiteralPath $oldReleaseValidationPath -PathType Leaf) {
+  try {
+    $oldReleaseValidation = Get-Content -LiteralPath $oldReleaseValidationPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $oldReleaseVersion = [string]$oldReleaseValidation.app_version
+    $oldEntryInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath ([string]$oldReleaseValidation.entrypoint) -Label 'old entrypoint'
+    $oldEntryPath = [string]$oldEntryInfo.target
+  } catch {
+    # Missing legacy identity must never relax rollback health verification.
+    $oldReleaseVersion = ''
+    $oldEntryPath = ''
+  }
+  try {
+    $oldBundleProperty = $oldReleaseValidation.PSObject.Properties['bundle_files']
+    if ($null -ne $oldBundleProperty -and $null -ne $oldBundleProperty.Value) {
+      foreach ($oldRelative in @($oldBundleProperty.Value)) {
+        $oldInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath ([string]$oldRelative) -Label 'old managed release file'
+        $oldManagedFiles.Add([string]$oldInfo.relative)
+      }
+    }
+  } catch {
+    # An incomplete or unsafe legacy list is ignored as a whole. Unknown files
+    # are safer to retain than to infer ownership and delete them.
+    $oldManagedFiles.Clear()
+  }
+}
+$workerTaskName = 'StoryForge Local Worker'
+$existingWorkerTask = Get-ScheduledTask -TaskName $workerTaskName -ErrorAction SilentlyContinue
+$existingWorkerTaskXml = ''
+if ($null -ne $existingWorkerTask) {
+  $existingWorkerTaskXml = Export-ScheduledTask -TaskName $workerTaskName -ErrorAction Stop
+}
+$registerProperty = $marker.PSObject.Properties['register_local_worker']
+$shouldRegisterWorker = $(if ($null -ne $registerProperty) { [bool]$registerProperty.Value } else { $null -ne $existingWorkerTask })
+if ([IO.Path]::GetExtension($entrypoint).ToLowerInvariant() -eq '.py') { $shouldRegisterWorker = $false }
 try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
 if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) { throw 'StoryForge is still running; update deferred.' }
-$installedEntryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
-Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
-  try {
-    if ($_.Id -ne $PID -and [string]::Equals($_.Path, $installedEntryPath, [StringComparison]::OrdinalIgnoreCase)) {
-      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
-  } catch {}
-}
-Start-Sleep -Milliseconds 500
 $actual = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'StoryForge update SHA-256 verification failed.' }
 New-Item -ItemType Directory -Path $storageRoot -Force | Out-Null
@@ -1233,6 +1722,9 @@ $workRoot = Join-Path $storageRoot ('apply-' + [guid]::NewGuid().ToString('N'))
 $stage = Join-Path $workRoot 'stage'
 $backup = Join-Path $workRoot 'backup'
 New-Item -ItemType Directory -Path $stage,$backup -Force | Out-Null
+$marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue 'staging' -Force
+$marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue $workRoot -Force
+Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($package)
 try {
@@ -1246,19 +1738,83 @@ try {
     [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
   }
 } finally { $zip.Dispose() }
+# A browser or chat client can mark the downloaded ZIP as Internet content.
+# Remove that alternate data stream only after StoryForge has verified the
+# signed manifest, size and SHA-256, and before any .NET/native assembly is
+# copied into the live installation.
+Get-ChildItem -LiteralPath $stage -File -Recurse | Unblock-File -ErrorAction Stop
 $stageEntryPath = [IO.Path]::GetFullPath((Join-Path $stage $entrypoint))
 if (-not (Test-Path -LiteralPath $stageEntryPath -PathType Leaf)) { throw 'Updated StoryForge entrypoint is missing from the staged package.' }
+$newReleaseValidationPath = Join-Path $stage 'BUILD_RELEASE_VALIDATION.json'
+if (-not (Test-Path -LiteralPath $newReleaseValidationPath -PathType Leaf)) {
+  throw 'Updated StoryForge managed-file validation is missing.'
+}
+$newReleaseValidation = Get-Content -LiteralPath $newReleaseValidationPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$newBundleProperty = $newReleaseValidation.PSObject.Properties['bundle_files']
+if ($null -eq $newBundleProperty -or $null -eq $newBundleProperty.Value) {
+  throw 'Updated StoryForge managed-file list is missing.'
+}
+$newManagedFiles = New-Object System.Collections.Generic.List[string]
+$newManagedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($newRelative in @($newBundleProperty.Value)) {
+  $newInfo = Resolve-ManagedInstallPath -Root $stage -RelativePath ([string]$newRelative) -Label 'new managed release file'
+  if (-not (Test-Path -LiteralPath ([string]$newInfo.target) -PathType Leaf)) {
+    throw "Updated StoryForge managed file is missing: $newRelative"
+  }
+  if (-not $newManagedSet.Add([string]$newInfo.relative)) {
+    throw "Updated StoryForge managed-file list contains a duplicate path: $newRelative"
+  }
+  $newManagedFiles.Add([string]$newInfo.relative)
+}
+$declaredBundleCount = 0
+try { $declaredBundleCount = [int]$newReleaseValidation.bundle_file_count } catch { throw 'Updated StoryForge managed-file count is invalid.' }
+if ($declaredBundleCount -ne $newManagedFiles.Count) {
+  throw 'Updated StoryForge managed-file count does not match its verified list.'
+}
+$stageManagedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($stageFile in Get-ChildItem -LiteralPath $stage -File -Recurse) {
+  $stageRelative = $stageFile.FullName.Substring($stage.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+  $stageRelativePortable = $stageRelative.Replace('\','/')
+  if (
+    $stageRelativePortable -eq 'storyforge-update.json' -or
+    $stageRelativePortable -eq 'BUILD_RELEASE_VALIDATION.json'
+  ) { continue }
+  $stageInfo = Resolve-ManagedInstallPath -Root $stage -RelativePath $stageRelative -Label 'staged release file'
+  [void]$stageManagedSet.Add([string]$stageInfo.relative)
+}
+if (-not $newManagedSet.SetEquals($stageManagedSet)) {
+  throw 'Updated StoryForge managed-file list does not exactly match the staged release.'
+}
+if ($null -ne $existingWorkerTask) {
+  if ($existingWorkerTask.State -eq 'Running') {
+    Stop-ScheduledTask -TaskName $workerTaskName -ErrorAction SilentlyContinue
+  }
+  Unregister-ScheduledTask -TaskName $workerTaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+$installedEntryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
+$entryPath = $installedEntryPath
+Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+  try {
+    if ($_.Id -ne $PID -and [string]::Equals($_.Path, $installedEntryPath, [StringComparison]::OrdinalIgnoreCase)) {
+      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
+Start-Sleep -Milliseconds 500
 $copied = New-Object System.Collections.Generic.List[string]
 $created = New-Object System.Collections.Generic.List[string]
+$removed = New-Object System.Collections.Generic.List[string]
 $launched = $null
+$marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue 'copying' -Force
+$marker | Add-Member -NotePropertyName installing_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
 try {
   $stageFiles = Get-ChildItem -LiteralPath $stage -File -Recurse
   foreach ($source in $stageFiles) {
     $relative = $source.FullName.Substring($stage.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
     if ($relative.Replace('\','/') -eq 'storyforge-update.json') { continue }
-    $target = [IO.Path]::GetFullPath((Join-Path $installRoot $relative))
-    $installPrefix = $installRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    if (-not $target.StartsWith($installPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe install path.' }
+    $targetInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath $relative -Label 'update install file'
+    $target = [string]$targetInfo.target
     if (Test-Path -LiteralPath $target -PathType Leaf) {
       $backupTarget = Join-Path $backup $relative
       New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($backupTarget)) -Force | Out-Null
@@ -1270,12 +1826,51 @@ try {
     $copied.Add($relative)
     Copy-Item -LiteralPath $source.FullName -Destination $target -Force
   }
+  # Delete only files explicitly owned by the previous verified release and
+  # absent from the new verified release. Never enumerate the installation to
+  # infer ownership: unknown/user files are intentionally retained.
+  foreach ($oldRelative in $oldManagedFiles) {
+    if ($newManagedSet.Contains($oldRelative)) { continue }
+    $oldInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath $oldRelative -Label 'obsolete managed release file'
+    $obsoleteTarget = [string]$oldInfo.target
+    if (-not (Test-Path -LiteralPath $obsoleteTarget -PathType Leaf)) { continue }
+    $backupTarget = Join-Path $backup ([string]$oldInfo.relative)
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($backupTarget)) -Force | Out-Null
+    Copy-Item -LiteralPath $obsoleteTarget -Destination $backupTarget -Force
+    if (-not (Test-Path -LiteralPath $backupTarget -PathType Leaf)) {
+      throw "Could not back up obsolete StoryForge release file: $oldRelative"
+    }
+    Remove-Item -LiteralPath $obsoleteTarget -Force
+    $removed.Add([string]$oldInfo.relative)
+  }
   $entryPath = [IO.Path]::GetFullPath((Join-Path $installRoot $entrypoint))
   if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) { throw 'Updated StoryForge entrypoint is missing.' }
   $marker | Add-Member -NotePropertyName installing -NotePropertyValue $true -Force
   $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+  $marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue 'health_check' -Force
   $marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue $workRoot -Force
   Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+  $env:STORYFORGE_UPDATE_HEALTH_TOKEN = $installationId
+  $workerHealth = $null
+  if ($shouldRegisterWorker) {
+    $registrationCandidates = @(
+      (Join-Path $installRoot 'admin-tools\enable_storyforge_worker.ps1'),
+      (Join-Path $installRoot 'enable_storyforge_worker.ps1')
+    )
+    $registrationScript = $registrationCandidates |
+      Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+      Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$registrationScript)) {
+      throw 'Updated StoryForge local-worker registration script is missing.'
+    }
+    $powershellPath = Join-Path $PSHOME 'powershell.exe'
+    & $powershellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+      -File $registrationScript -ExecutablePath $entryPath -TaskName $workerTaskName `
+      -RequiredAppVersion $version -NoHealthWait -Quiet
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Updated StoryForge local-worker task could not be registered.'
+    }
+  }
   if ([IO.Path]::GetExtension($entryPath).ToLowerInvariant() -eq '.py') {
     $pythonw = Join-Path $installRoot '.build-venv\Scripts\pythonw.exe'
     $python = Join-Path $installRoot '.build-venv\Scripts\python.exe'
@@ -1285,33 +1880,168 @@ try {
   } else {
     $launched = Start-Process -FilePath $entryPath -WorkingDirectory $installRoot -PassThru
   }
-  Start-Sleep -Seconds 4
-  if ($null -eq $launched -or $launched.HasExited) { throw 'Updated StoryForge failed its startup health check.' }
+  # Launch before checking health. The exact-version check prevents an older
+  # Worker left in another folder from being mistaken for a successful update;
+  # that case rolls back safely instead of force-stopping an unknown queue.
+  # A desktop process that exits during startup (for example because Windows
+  # blocked Python.Runtime.dll) must never be hidden by a healthy Worker from
+  # another StoryForge folder.  Require both this UI process and the Worker
+  # process registered from this exact executable to stay alive.
+  Start-Sleep -Seconds 3
+  $launched.Refresh()
+  if ($launched.HasExited) {
+    throw "Updated StoryForge desktop exited during startup (exit code $($launched.ExitCode))."
+  }
+  $expectedWorkerExecutable = $(
+    if ([IO.Path]::GetExtension($entryPath).ToLowerInvariant() -eq '.exe') {
+      $entryPath
+    } else {
+      ''
+    }
+  )
+  $workerHealth = Wait-StoryForgeWorkerHealth `
+    -ExpectedVersion $version `
+    -TimeoutSeconds 90 `
+    -ExpectedExecutablePath $expectedWorkerExecutable
+  if ($null -eq $workerHealth) {
+    throw 'Updated StoryForge failed its loopback version health check.'
+  }
 } catch {
   $failureMessage = [string]$_.Exception.Message
+  $rollbackServiceRestored = -not $shouldRegisterWorker
+  $rollbackError = ''
+  try {
+    $failedTask = Get-ScheduledTask -TaskName $workerTaskName -ErrorAction SilentlyContinue
+    if ($null -ne $failedTask) {
+      if ($failedTask.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $workerTaskName -ErrorAction SilentlyContinue
+      }
+      Unregister-ScheduledTask -TaskName $workerTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+  } catch {}
+  try {
+    if ($null -ne $launched -and -not $launched.HasExited) {
+      Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+  Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      if ($_.Id -ne $PID -and [string]::Equals($_.Path, $entryPath, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
+  Start-Sleep -Milliseconds 500
+  $rollbackFileErrors = New-Object System.Collections.Generic.List[string]
   foreach ($relative in $copied) {
     $backupTarget = Join-Path $backup $relative
-    $target = Join-Path $installRoot $relative
-    if (Test-Path -LiteralPath $backupTarget -PathType Leaf) { Copy-Item -LiteralPath $backupTarget -Destination $target -Force }
+    try {
+      $targetInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath $relative -Label 'rollback install file'
+      $target = [string]$targetInfo.target
+      if (Test-Path -LiteralPath $backupTarget -PathType Leaf) {
+        Copy-Item -LiteralPath $backupTarget -Destination $target -Force
+      }
+    } catch {
+      $rollbackFileErrors.Add("restore $relative`: $([string]$_.Exception.Message)")
+    }
   }
   foreach ($relative in $created) {
-    $target = Join-Path $installRoot $relative
-    if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
+    try {
+      $targetInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath $relative -Label 'rollback created file'
+      $target = [string]$targetInfo.target
+      if (Test-Path -LiteralPath $target -PathType Leaf) {
+        Remove-Item -LiteralPath $target -Force
+      }
+    } catch {
+      $rollbackFileErrors.Add("remove $relative`: $([string]$_.Exception.Message)")
+    }
+  }
+  foreach ($relative in $removed) {
+    $backupTarget = Join-Path $backup $relative
+    try {
+      $targetInfo = Resolve-ManagedInstallPath -Root $installRoot -RelativePath $relative -Label 'rollback removed file'
+      $target = [string]$targetInfo.target
+      if (-not (Test-Path -LiteralPath $backupTarget -PathType Leaf)) {
+        throw 'backup is missing'
+      }
+      New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
+      Copy-Item -LiteralPath $backupTarget -Destination $target -Force
+    } catch {
+      $rollbackFileErrors.Add("restore removed $relative`: $([string]$_.Exception.Message)")
+    }
+  }
+  # Rollback restores the exact old task definition when one existed. A
+  # registration failure is retained in the result instead of being swallowed.
+  $marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue 'rollback_health' -Force
+  $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+  Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
+  if ($shouldRegisterWorker) {
+    try {
+      if (
+        [string]::IsNullOrWhiteSpace($oldReleaseVersion) -or
+        [string]::IsNullOrWhiteSpace($oldEntryPath) -or
+        -not (Test-Path -LiteralPath $oldEntryPath -PathType Leaf)
+      ) {
+        throw 'Rollback release identity is missing or its executable was not restored.'
+      }
+      if (-not [string]::IsNullOrWhiteSpace($existingWorkerTaskXml)) {
+        Register-ScheduledTask -TaskName $workerTaskName -Xml $existingWorkerTaskXml -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $workerTaskName -ErrorAction Stop
+      } else {
+        $rollbackCandidates = @(
+          (Join-Path $installRoot 'admin-tools\enable_storyforge_worker.ps1'),
+          (Join-Path $installRoot 'enable_storyforge_worker.ps1')
+        )
+        $rollbackScript = $rollbackCandidates |
+          Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+          Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string]$rollbackScript)) {
+          throw 'Rollback local-worker registration script is missing.'
+        }
+        $powershellPath = Join-Path $PSHOME 'powershell.exe'
+        & $powershellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+          -File $rollbackScript -ExecutablePath $oldEntryPath -TaskName $workerTaskName `
+          -RequiredAppVersion $oldReleaseVersion -NoHealthWait -Quiet
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Rollback local-worker task could not be registered.'
+        }
+      }
+      $rollbackHealth = Wait-StoryForgeWorkerHealth `
+        -ExpectedVersion $oldReleaseVersion `
+        -TimeoutSeconds 45 `
+        -ExpectedExecutablePath $oldEntryPath
+      if ($null -eq $rollbackHealth) {
+        throw 'Rollback local-worker exact version and executable health check timed out.'
+      }
+      $rollbackServiceRestored = $true
+    } catch {
+      $rollbackError = [string]$_.Exception.Message
+      $rollbackServiceRestored = $false
+    }
+  }
+  if ($rollbackFileErrors.Count -gt 0) {
+    $rollbackFilesMessage = 'File rollback errors: ' + [string]::Join('; ', $rollbackFileErrors)
+    if ([string]::IsNullOrWhiteSpace($rollbackError)) { $rollbackError = $rollbackFilesMessage }
+    else { $rollbackError = $rollbackError + '; ' + $rollbackFilesMessage }
   }
   try {
     $marker | Add-Member -NotePropertyName installing -NotePropertyValue $false -Force
     $marker | Add-Member -NotePropertyName installing_at -NotePropertyValue '' -Force
+    $marker | Add-Member -NotePropertyName installing_phase -NotePropertyValue '' -Force
     $marker | Add-Member -NotePropertyName apply_work_root -NotePropertyValue '' -Force
     $marker | Add-Member -NotePropertyName last_error -NotePropertyValue $failureMessage -Force
+    $marker | Add-Member -NotePropertyName rollback_service_restored -NotePropertyValue $rollbackServiceRestored -Force
+    $marker | Add-Member -NotePropertyName rollback_error -NotePropertyValue $rollbackError -Force
     Write-JsonUtf8NoBom -Path $MarkerPath -Value $marker
   } catch {}
   try {
-    Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='failed'; version=$version; failed_at=[DateTime]::UtcNow.ToString('o'); error=$failureMessage; rollback_available=$false }
+    Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='failed'; version=$version; failed_at=[DateTime]::UtcNow.ToString('o'); error=$failureMessage; rollback_available=$false; rollback_service_restored=$rollbackServiceRestored; rollback_error=$rollbackError }
   } catch {}
   Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+  $failureAlreadyRecorded = $true
   throw
 }
-Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='installed'; version=$version; installed_at=[DateTime]::UtcNow.ToString('o'); backup_path=$backup; rollback_available=$true; health='process_alive' }
+Write-JsonUtf8NoBom -Path $resultPath -Value @{ status='installed'; version=$version; installed_at=[DateTime]::UtcNow.ToString('o'); backup_path=$backup; rollback_available=$true; health='loopback_version_and_install_identity'; endpoint=[string]$workerHealth.endpoint; worker_process_id=[int]$workerHealth.data.process_id; desktop_process_id=[int]$launched.Id }
 Remove-Item -LiteralPath $MarkerPath -Force
 Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue
 try {
@@ -1321,6 +2051,10 @@ try {
   }
 } catch {}
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+if ($installMutexAcquired -and $null -ne $installMutex) {
+  try { $installMutex.ReleaseMutex() } catch {}
+}
+if ($null -ne $installMutex) { try { $installMutex.Dispose() } catch {} }
 '''
         self.worker_path.write_text(script, encoding="utf-8", newline="\n")
 

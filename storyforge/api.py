@@ -54,6 +54,7 @@ from .hub import (
 )
 from .jobs import JobQueue
 from .library_service import LibraryService
+from .maintenance import run_startup_cache_maintenance
 from .models import AppSettings, BatchSpec, JobStatus, PlatformProfile, RenderJob
 from .providers.text import create_text_provider
 from .providers.tts import edge_tts_runtime_available
@@ -124,6 +125,7 @@ class StoryForgeApi:
         )
         self._hub_server: HubServer | None = None
         self._hub_client: HubClient | None = None
+        self._hub_client_lock = threading.RLock()
         self._client_web_server: Any = None
         self._hub_error = ""
         self._device_sync_lock = threading.RLock()
@@ -156,6 +158,12 @@ class StoryForgeApi:
         # The exact same lock is also held by PipelineRunner for each job, so
         # a queued render cannot start in the tiny window after the busy check.
         self._voice_preview_lock = self._heavy_resource_lock
+        # No render can be active before the local pipeline is attached.  Use
+        # this idle startup window to remove only reproducible crash leftovers
+        # and bound local speech caches before another batch can fill C:.
+        self._startup_cache_maintenance = run_startup_cache_maintenance(
+            self._repository.data_dir
+        )
         self._local_draft_files_lock = threading.RLock()
         self._local_draft_files: dict[str, dict[str, str]] = {}
         self._desktop_session_path = (
@@ -246,7 +254,8 @@ class StoryForgeApi:
             interval_minutes_getter=lambda: int(
                 self._state.settings.hub.update_check_minutes
             ),
-            rendering_busy_getter=self._queue.is_rendering_busy,
+            rendering_busy_getter=self._queue.has_unfinished_work,
+            heavy_resource_lock=self._heavy_resource_lock,
         )
         self._reconcile_interrupted_records()
         self._update_manager.start()
@@ -359,12 +368,61 @@ class StoryForgeApi:
         hub = self._state.settings.hub
         return str(hub.device_id or hub.device_name or "local")
 
+    def _hub_client_snapshot(self) -> HubClient | None:
+        """Return the installed Hub transport as one synchronized value."""
+
+        with self._hub_client_lock:
+            return self._hub_client
+
+    def _observe_hub_client(self, client: HubClient) -> HubClient:
+        """Make authoritative credential rejection update Worker health."""
+
+        client.authentication_failure_callback = (
+            lambda error, source=client: self._mark_hub_authentication_failed(
+                source, error
+            )
+        )
+        return client
+
+    def _mark_hub_authentication_failed(
+        self,
+        client: HubClient,
+        error: BaseException,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Disconnect only the rejected installed credential.
+
+        The persisted token is intentionally retained so diagnostics can
+        explain what failed and a password login can rotate it in place. LAN
+        timeouts never call this path and therefore do not turn a temporary
+        outage into a forced re-enrolment.
+        """
+
+        message = str(error) or type(error).__name__
+        with self._hub_client_lock:
+            if not force and self._hub_client is not client:
+                return False
+            self._hub_client = None
+            self._hub_error = message
+        self._set_device_sync_status(
+            state="authentication_required",
+            last_error=message,
+        )
+        self._device_sync_wake.set()
+        return True
+
     def _activate_hub_client(self, client: HubClient) -> dict[str, Any]:
         """Install one verified transport as the shared-data runtime."""
 
-        identity = client.verify_identity()
-        catalog = HubCatalogProxy(client)
-        remote_platforms = catalog.list_platforms().get("items", [])
+        client = self._observe_hub_client(client)
+        try:
+            identity = client.verify_identity()
+            catalog = HubCatalogProxy(client)
+            remote_platforms = catalog.list_platforms().get("items", [])
+        except HubAuthenticationError as error:
+            self._mark_hub_authentication_failed(client, error, force=True)
+            raise
         library = LibraryService(
             catalog,
             lambda: self._state.settings,
@@ -372,7 +430,6 @@ class StoryForgeApi:
             text_provider_factory=self._runtime_text_provider_factory,
             remote_text_provider=True,
         )
-        self._hub_client = client
         self._catalog = catalog
         self._library = library
         self._runtime_hub_mode = "client"
@@ -382,6 +439,10 @@ class StoryForgeApi:
             for item in remote_platforms
             if isinstance(item, Mapping)
         ]
+        # Publish readiness only after every shared-data dependency has moved
+        # to the newly verified transport.
+        with self._hub_client_lock:
+            self._hub_client = client
         return identity
 
     def _device_sync_status_value(self) -> dict[str, Any]:
@@ -523,6 +584,10 @@ class StoryForgeApi:
             self._device_sync_wake.clear()
             try:
                 self._device_sync_once()
+            except HubAuthenticationError as error:
+                client = self._hub_client_snapshot()
+                if client is not None:
+                    self._mark_hub_authentication_failed(client, error)
             except (HubError, OSError, RuntimeError, TypeError, ValueError) as error:
                 self._hub_error = str(error) or type(error).__name__
                 self._set_device_sync_status(
@@ -587,9 +652,12 @@ class StoryForgeApi:
             try:
                 if not hub.access_token:
                     raise ValueError("当前电脑尚未使用账号密码完成登记。")
-                client = HubClient(hub.endpoint, hub.access_token, timeout_seconds=8)
+                client = self._observe_hub_client(
+                    HubClient(hub.endpoint, hub.access_token, timeout_seconds=8)
+                )
                 client.verify_identity()
-                self._hub_client = client
+                with self._hub_client_lock:
+                    self._hub_client = client
                 return HubCatalogProxy(client)
             except (HubError, OSError, ValueError, RuntimeError) as error:
                 # Keep the desktop shell usable so the operator can repair its
@@ -1891,13 +1959,18 @@ class StoryForgeApi:
 
     def get_hub_status(self) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
-            if self._hub_client is not None:
+            client = self._hub_client_snapshot()
+            if client is not None:
                 try:
-                    self._hub_client.verify_identity()
+                    client.verify_identity()
                     self._hub_error = ""
+                except HubAuthenticationError as error:
+                    self._mark_hub_authentication_failed(client, error)
                 except (HubError, OSError, ValueError, RuntimeError) as error:
+                    # Keep a verified device transport installed through a
+                    # temporary LAN/Hub outage. A later status/sync request can
+                    # recover without forcing the employee to enter a password.
                     self._hub_error = str(error) or type(error).__name__
-                    self._hub_client = None
             return self._hub_status_value()
 
         return self._guard(operation)

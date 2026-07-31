@@ -2475,6 +2475,7 @@
   }
 
   const terminalStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
+  const unsuccessfulTerminalStatuses = new Set(["failed", "cancelled", "interrupted"]);
   const executionStatuses = new Set(["preflight", "preparing", "polishing", "narrating", "composing", "previewing", "rendering"]);
 
   function pathLeaf(value) {
@@ -5321,13 +5322,14 @@
             <div class="record-batch-tasks">${(batch.tasks || []).map((record) => {
               const platform = platformById(record.platform_id);
               const progress = Math.round((Number(record.progress) || 0) * 100);
+              const showProgress = !unsuccessfulTerminalStatuses.has(record.status);
               const materials = (record.materials || []).map((material) => `<span class="record-material">${escapeHtml(material.name)} · ${Number(material.usage_count || 0)}次</span>`).join("");
               const attempts = record.attempts || [];
               return `<article class="record-row is-${escapeHtml(record.status)}">
                 <label class="record-select"><input type="checkbox" data-select-record="${escapeHtml(record.id)}" ${state.selectedRecordIds.has(String(record.id)) ? "checked" : ""}><span class="sr-only">选择任务</span></label>
                 <span class="record-state-mark"></span>
                 <div class="record-copy"><div><span>${escapeHtml(record.episode_label || "")}${record.creative_line ? ` · 视频${escapeHtml(record.creative_line)}` : ""} · 第${Number(record.current_attempt || 1)}次尝试</span><b>${escapeHtml(record.title)}</b><small>${escapeHtml(platform?.name || "平台未知")} · 口令 ${escapeHtml(record.promo_code || "未选择")} · ${escapeHtml(record.publishing_account_name || "待分配")}</small></div>${record.error ? `<p class="record-error">${escapeHtml(record.error)}</p>` : ""}${recordFailureDiagnostics(record.failure_diagnostics)}${record.cancellation_reason ? `<p class="record-cancel-reason">取消原因：${escapeHtml(record.cancellation_reason)}</p>` : ""}<div class="record-materials">${materials || "<span>暂无素材使用记录</span>"}</div>${attempts.length > 1 ? `<details class="record-attempts"><summary>查看 ${attempts.length} 次尝试</summary>${attempts.map((attempt) => `<div class="record-attempt"><p><b>第${Number(attempt.attempt_no)}次</b><span>${escapeHtml(attempt.status)} · ${escapeHtml(attempt.device_id || "未知电脑")}</span>${attempt.error_message ? `<em>${escapeHtml(attempt.error_message)}</em>` : ""}</p>${recordFailureDiagnostics(attempt.metadata?.failure_diagnostics, `第${Number(attempt.attempt_no)}次技术详情`)}</div>`).join("")}</details>` : ""}</div>
-                <div class="record-progress"><span>${escapeHtml(record.stage_label || record.status)}</span><b>${progress}%</b><i><em style="width:${progress}%"></em></i></div>
+                <div class="record-progress ${showProgress ? "" : "is-terminal"}"><span>${escapeHtml(record.stage_label || record.status)}</span><b>${showProgress ? `${progress}%` : "已结束"}</b>${showProgress ? `<i><em style="width:${progress}%"></em></i>` : ""}</div>
                 <div class="record-actions">${Number(record.artifact_count || 0) > 0 ? `<button type="button" class="text-button artifact-button" data-view-record-artifacts="${escapeHtml(record.id)}">查看文件</button>` : ""}${record.novel_id ? `<button type="button" class="text-button" data-open-record-novel="${escapeHtml(record.novel_id)}">查看小说</button>` : ""}${record.status === "completed" && record.output_folder ? `<button type="button" class="text-button" data-output-folder="${escapeHtml(record.output_folder)}">打开输出</button>` : ""}</div>
               </article>`;
             }).join("")}</div>
@@ -5340,11 +5342,12 @@
     root.innerHTML = filtered.map((record) => {
       const platform = platformById(record.platform_id);
       const progress = Math.round((Number(record.progress) || 0) * 100);
+      const showProgress = !unsuccessfulTerminalStatuses.has(record.status);
       const materials = (record.materials || []).map((material) => `<span class="record-material">${escapeHtml(material.name)} · ${Number(material.usage_count || 0)}次</span>`).join("");
       return `<article class="record-row is-${escapeHtml(record.status)}">
         <span class="record-state-mark"></span>
         <div class="record-copy"><div><span>${escapeHtml(record.episode_label || "")}${record.creative_line ? ` · 视频${escapeHtml(record.creative_line)}` : ""}</span><b>${escapeHtml(record.title)}</b><small>${escapeHtml(platform?.name || "平台未知")} · 口令 ${escapeHtml(record.promo_code || "未选择")} · ${escapeHtml(record.publishing_account_name || "待分配")}</small></div>${record.error ? `<p class="record-error">${escapeHtml(record.error)}</p>` : ""}${recordFailureDiagnostics(record.failure_diagnostics)}<div class="record-materials">${materials || "<span>暂无素材使用记录</span>"}</div></div>
-        <div class="record-progress"><span>${escapeHtml(record.stage_label || record.status)}</span><b>${progress}%</b><i><em style="width:${progress}%"></em></i></div>
+        <div class="record-progress ${showProgress ? "" : "is-terminal"}"><span>${escapeHtml(record.stage_label || record.status)}</span><b>${showProgress ? `${progress}%` : "已结束"}</b>${showProgress ? `<i><em style="width:${progress}%"></em></i>` : ""}</div>
         <div class="record-actions">${Number(record.artifact_count || 0) > 0 ? `<button type="button" class="text-button artifact-button" data-view-record-artifacts="${escapeHtml(record.id)}">查看文件</button>` : ""}${record.novel_id ? `<button type="button" class="text-button" data-open-record-novel="${escapeHtml(record.novel_id)}">查看小说</button>` : ""}${record.status === "completed" && record.output_folder ? `<button type="button" class="text-button" data-output-folder="${escapeHtml(record.output_folder)}">打开输出</button>` : ""}</div>
       </article>`;
     }).join("");
@@ -7074,6 +7077,7 @@
         const batchJobs = batch.jobs.map((job, index) => {
           const stateClass = ["failed", "completed", "cancelled", "interrupted", "awaiting_approval", "waiting_preview"].includes(job.status) ? job.status : "";
           const progress = Math.round((Number(job.progress) || 0) * 100);
+          const showProgress = !unsuccessfulTerminalStatuses.has(job.status);
           const jobPlatform = state.platforms.find((item) => item.id === job.platform_id);
           const errorDetail = job.status === "failed" && job.message
             ? `<p class="job-error">${escapeHtml(job.message)}${job.error_log ? `<span>${escapeHtml(job.error_log)}</span>` : ""}</p>`
@@ -7098,12 +7102,12 @@
             <div class="job-copy">
               <b>${escapeHtml(job.title)}</b>
               <small>口令 ${escapeHtml(job.code)} · ${escapeHtml(jobPlatform?.name || "平台未知")} · ${escapeHtml(pathLeaf(job.source_file))}</small>
-              <div class="job-progress" role="progressbar" aria-label="${escapeHtml(job.title)} 进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><i style="--progress:${progress}%"></i></div>
+              ${showProgress ? `<div class="job-progress" role="progressbar" aria-label="${escapeHtml(job.title)} 进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><i style="--progress:${progress}%"></i></div>` : ""}
               ${errorDetail}
             </div>
             <div class="job-state-wrap">
               <span class="job-state ${stateClass}">${escapeHtml(statusText(job))}</span>
-              <strong>${progress}%</strong>
+              <strong>${showProgress ? `${progress}%` : "已结束"}</strong>
               ${outputAction}
               ${retryAction}
               ${archiveAction}

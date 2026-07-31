@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
+import wave
 
 from storyforge.services.media import (
     COLOR_GRADE_FILTERS,
@@ -871,12 +872,12 @@ class FFmpegPlanningTests(unittest.TestCase):
         )
         self.assertIn(
             "[cover_intro_window_source]trim=duration=2,"
-            "setpts=PTS-STARTPTS+2/TB,split=2",
+            "setpts=PTS-STARTPTS,split=2",
             plan.filter_complex,
         )
         self.assertIn(
             "[cover_end_window_source]trim=duration=6,"
-            "setpts=PTS-STARTPTS+8/TB[cover_end_source]",
+            "setpts=PTS-STARTPTS[cover_end_source]",
             plan.filter_complex,
         )
         self.assertNotIn(str(cover), plan.filter_complex)
@@ -892,15 +893,23 @@ class FFmpegPlanningTests(unittest.TestCase):
             "force_original_aspect_ratio=decrease",
             plan.filter_complex,
         )
-        self.assertIn("clip((t-2)/2,0,1)", plan.filter_complex)
-        self.assertIn("clip((t-8)/6,0,1)", plan.filter_complex)
+        self.assertIn("clip(t/2,0,1)", plan.filter_complex)
+        self.assertIn("clip(t/6,0,1)", plan.filter_complex)
         self.assertGreaterEqual(plan.filter_complex.count("eval=frame"), 2)
         self.assertNotIn("zoompan", plan.filter_complex)
-        self.assertIn("fade=t=in:st=2:d=0.35:alpha=1", plan.filter_complex)
-        self.assertIn("fade=t=out:st=3.65:d=0.35:alpha=1", plan.filter_complex)
-        self.assertIn("enable='between(t,2,4)'", plan.filter_complex)
-        self.assertIn("fade=t=in:st=8:d=0.5:alpha=1", plan.filter_complex)
-        self.assertIn("enable='gte(t,8)'", plan.filter_complex)
+        self.assertIn("fade=t=in:st=0:d=0.35:alpha=1", plan.filter_complex)
+        self.assertIn("fade=t=out:st=1.65:d=0.35:alpha=1", plan.filter_complex)
+        self.assertIn(
+            "tpad=start_mode=add:start_duration=2:color=black@0.0"
+            "[cover_intro_timeline]",
+            plan.filter_complex,
+        )
+        self.assertIn("fade=t=in:st=0:d=0.5:alpha=1", plan.filter_complex)
+        self.assertIn(
+            "tpad=start_mode=add:start_duration=8:color=black@0.0"
+            "[cover_end_timeline]",
+            plan.filter_complex,
+        )
         self.assertIn("eof_action=pass:repeatlast=0", plan.filter_complex)
         self.assertIn(
             "[cover_end_source]scale=1080:1920:"
@@ -908,11 +917,11 @@ class FFmpegPlanningTests(unittest.TestCase):
             plan.filter_complex,
         )
         self.assertIn("crop=1080:1920:x='(iw-ow)/2':y='(ih-oh)/2'", plan.filter_complex)
-        self.assertIn("overlay=0:0:enable='gte(t,8)'", plan.filter_complex)
+        self.assertIn("[cover_end_timeline]overlay=0:0:", plan.filter_complex)
         self.assertNotIn("[cover_end_bg][cover_end_fg]", plan.filter_complex)
 
         end_overlay_position = plan.filter_complex.index(
-            "[cover_intro_composited][cover_end_scene]"
+            "[cover_intro_composited][cover_end_timeline]"
         )
         ass_position = plan.filter_complex.index("[covered]ass=filename=")
         self.assertLess(end_overlay_position, ass_position)
@@ -942,12 +951,12 @@ class FFmpegPlanningTests(unittest.TestCase):
         self.assertIn("[cover_end_source]", plan.filter_complex)
         self.assertIn(
             "[cover_end_window_source]trim=duration=6,"
-            "setpts=PTS-STARTPTS+8/TB",
+            "setpts=PTS-STARTPTS",
             plan.filter_complex,
         )
         self.assertIn("[cover_end_base]", plan.filter_complex)
-        self.assertIn("[joined][cover_end_scene]", plan.filter_complex)
-        self.assertIn("enable='gte(t,8)'", plan.filter_complex)
+        self.assertIn("[joined][cover_end_timeline]", plan.filter_complex)
+        self.assertIn("start_duration=8:color=black@0.0", plan.filter_complex)
         self.assertIn("[covered]ass=filename=", plan.filter_complex)
 
     def test_disabled_cover_outro_keeps_intro_but_uses_caption_only_ending(self) -> None:
@@ -971,13 +980,14 @@ class FFmpegPlanningTests(unittest.TestCase):
         self.assertIn("split=2[cover_intro_bg_source][cover_intro_fg_source]", plan.filter_complex)
         self.assertIn(
             "[cover_intro_window_source]trim=duration=2,"
-            "setpts=PTS-STARTPTS+2/TB",
+            "setpts=PTS-STARTPTS",
             plan.filter_complex,
         )
-        self.assertIn("[cover_intro_composited]split=2", plan.filter_complex)
+        self.assertIn("[cover_intro_composited]eq=brightness=", plan.filter_complex)
         self.assertNotIn("cover_end_source", plan.filter_complex)
         self.assertNotIn("cover_end_scene", plan.filter_complex)
-        self.assertIn("eq=brightness=-0.24:saturation=0.72", plan.filter_complex)
+        self.assertIn("brightness='-0.24*clip((t-8)/0.5,0,1)'", plan.filter_complex)
+        self.assertIn("saturation='1-0.28*clip((t-8)/0.5,0,1)'", plan.filter_complex)
         self.assertIn("[end_composited]ass=filename=", plan.filter_complex)
         self.assertIn("[voice_mix][ducked]amix=", plan.filter_complex)
 
@@ -1028,18 +1038,251 @@ class FFmpegPlanningTests(unittest.TestCase):
             end_card_without_cover=True,
         )
 
-        self.assertIn("[joined]split=2[story_main][story_end_source]", plan.filter_complex)
+        self.assertNotIn("[joined]split=2", plan.filter_complex)
+        self.assertNotIn("[story_main][story_end_", plan.filter_complex)
         self.assertIn(
-            "[story_end_source]trim=start=8:duration=6,"
-            "setpts=PTS-STARTPTS+8/TB",
+            "[joined]eq=brightness='-0.24*clip((t-8)/0.5,0,1)':"
+            "saturation='1-0.28*clip((t-8)/0.5,0,1)':eval=frame"
+            "[end_composited]",
             plan.filter_complex,
         )
-        self.assertIn("eq=brightness=-0.24:saturation=0.72", plan.filter_complex)
-        self.assertIn("enable='gte(t,8)'", plan.filter_complex)
-        self.assertIn("eof_action=pass:repeatlast=0", plan.filter_complex)
-        overlay_position = plan.filter_complex.index("[story_main][story_end_card]")
+        overlay_position = plan.filter_complex.index("[joined]eq=brightness=")
         ass_position = plan.filter_complex.index("[end_composited]ass=filename=")
         self.assertLess(overlay_position, ass_position)
+
+    def test_long_visual_endings_never_delay_an_overlay_input_to_the_end(self) -> None:
+        base = Path("C:/StoryForge")
+        arguments = (
+            [VideoSegment(base / "source.mp4", 600.0, 600.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "output.mp4",
+            600.0,
+        )
+        caption_only = build_ffmpeg_plan(*arguments)
+        dark_ending = build_ffmpeg_plan(
+            *arguments,
+            end_card_duration=6.0,
+            end_card_without_cover=True,
+        )
+        cover_ending = build_ffmpeg_plan(
+            *arguments,
+            cover_path=base / "cover.jpg",
+            cover_intro_enabled=False,
+            end_card_duration=6.0,
+        )
+        intro_and_cover_ending = build_ffmpeg_plan(
+            *arguments,
+            cover_path=base / "cover.jpg",
+            cover_intro_start=2.0,
+            cover_intro_duration=2.0,
+            end_card_duration=6.0,
+        )
+
+        self.assertIn("[joined]ass=filename=", caption_only.filter_complex)
+        for plan in (dark_ending, cover_ending, intro_and_cover_ending):
+            with self.subTest(graph=plan.filter_complex[:80]):
+                self.assertNotIn("setpts=PTS-STARTPTS+", plan.filter_complex)
+                self.assertNotIn("enable='gte(t,594)'", plan.filter_complex)
+        self.assertIn("[joined]eq=brightness=", dark_ending.filter_complex)
+        self.assertNotIn("[story_end_timeline]", dark_ending.filter_complex)
+        for plan in (cover_ending, intro_and_cover_ending):
+            with self.subTest(cover_graph=plan.filter_complex[:80]):
+                self.assertIn(
+                    "tpad=start_mode=add:start_duration=594:color=black@0.0",
+                    plan.filter_complex,
+                )
+        self.assertNotIn("enable='between(t,2,4)'", intro_and_cover_ending.filter_complex)
+        self.assertIn(
+            "tpad=start_mode=add:start_duration=2:color=black@0.0"
+            "[cover_intro_timeline]",
+            intro_and_cover_ending.filter_complex,
+        )
+
+    def test_real_ffmpeg_streams_caption_dark_and_cover_endings_from_frame_zero(self) -> None:
+        try:
+            import imageio_ffmpeg  # type: ignore[import-not-found]
+        except ImportError:
+            self.skipTest("imageio-ffmpeg is not installed")
+        ffmpeg = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        if not ffmpeg.is_file():
+            self.skipTest("a real FFmpeg executable is not available")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source.mp4"
+            narration = root / "voice.wav"
+            cover = root / "cover.ppm"
+            subtitles = root / "captions.ass"
+            output = root / "output.mp4"
+
+            generated = subprocess.run(
+                [
+                    str(ffmpeg),
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x284:rate=12:duration=10",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y",
+                    str(source),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if generated.returncode != 0:
+                self.skipTest(f"test FFmpeg cannot encode H.264: {generated.stderr[-300:]}")
+
+            with wave.open(str(narration), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(48_000)
+                wav.writeframes(b"\x00\x00" * (48_000 * 10))
+            cover.write_bytes(
+                b"P6\n16 16\n255\n" + bytes((210, 55, 95)) * (16 * 16)
+            )
+            subtitles.write_text(
+                "[Script Info]\n"
+                "ScriptType: v4.00+\n"
+                "PlayResX: 160\n"
+                "PlayResY: 284\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,16,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+                "0,0,0,0,100,100,0,0,1,1,0,2,10,10,20,1\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+                "Effect, Text\n"
+                "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,streaming test\n",
+                encoding="utf-8",
+            )
+
+            common = {
+                "ffmpeg_path": ffmpeg,
+                "width": 160,
+                "height": 284,
+                "fps": 12,
+                "end_card_duration": 5.0,
+                "render_mode": "compatibility",
+            }
+            plans = {
+                "caption_only": build_ffmpeg_plan(
+                    [VideoSegment(source, 10.0, 10.0)],
+                    narration,
+                    None,
+                    subtitles,
+                    output,
+                    10.0,
+                    **common,
+                ),
+                "dark_ending": build_ffmpeg_plan(
+                    [VideoSegment(source, 10.0, 10.0)],
+                    narration,
+                    None,
+                    subtitles,
+                    output,
+                    10.0,
+                    end_card_without_cover=True,
+                    **common,
+                ),
+                "cover_ending": build_ffmpeg_plan(
+                    [VideoSegment(source, 10.0, 10.0)],
+                    narration,
+                    None,
+                    subtitles,
+                    output,
+                    10.0,
+                    cover_path=cover,
+                    cover_animation="gentle_push",
+                    **common,
+                ),
+            }
+
+            for mode, candidate in plans.items():
+                with self.subTest(mode=mode):
+                    command = candidate.as_list()
+                    first_input = command.index("-i")
+                    command[first_input:first_input] = ["-readrate", "1"]
+                    filter_graph = command.index("-filter_complex")
+                    command = command[: filter_graph + 2] + [
+                        "-map",
+                        "[vout]",
+                        "-map",
+                        "[aout]",
+                        "-t",
+                        "1",
+                        "-stats_period",
+                        "0.1",
+                        "-progress",
+                        "pipe:1",
+                        "-f",
+                        "null",
+                        "-",
+                    ]
+
+                    started = time.monotonic()
+                    process = subprocess.Popen(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+
+                    def wait_for_frame() -> float:
+                        assert process.stdout is not None
+                        for line in process.stdout:
+                            if line.startswith("frame=") and int(line.partition("=")[2]) > 0:
+                                return time.monotonic() - started
+                        raise AssertionError("FFmpeg exited before emitting a frame")
+
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    future = executor.submit(wait_for_frame)
+                    try:
+                        try:
+                            first_frame_after = future.result(timeout=2.4)
+                        except FutureTimeoutError:
+                            process.kill()
+                            _stdout, stderr = process.communicate(timeout=10)
+                            self.fail(
+                                "FFmpeg did not emit a frame before the 5-second ending "
+                                "window; the overlay is buffering the primary stream. "
+                                f"FFmpeg tail: {stderr[-600:]}"
+                            )
+                        self.assertLess(first_frame_after, 2.4)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate(timeout=10)
+                        executor.shutdown(wait=True, cancel_futures=True)
+
+            completed = subprocess.run(
+                plans["cover_ending"].as_list(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr[-1000:])
+            self.assertGreater(output.stat().st_size, 1_000)
 
     def test_cover_animation_modes_are_seek_safe_and_none_has_no_fades(self) -> None:
         base = Path("C:/StoryForge")
@@ -1074,8 +1317,8 @@ class FFmpegPlanningTests(unittest.TestCase):
 
         self.assertNotIn("fade=t=", static.filter_complex)
         self.assertIn("eval=frame", static.filter_complex)
-        self.assertIn("sin((t-2)*1.7)", parallax.filter_complex)
-        self.assertIn("cos((t-2)*1.3)", parallax.filter_complex)
+        self.assertIn("sin(t*1.7)", parallax.filter_complex)
+        self.assertIn("cos(t*1.3)", parallax.filter_complex)
         self.assertIn("1.075-0.055*", pull.filter_complex)
         self.assertIn("(iw-ow)*(0.18+0.64*", pan.filter_complex)
         self.assertNotIn("zoompan", parallax.filter_complex)
@@ -1108,7 +1351,7 @@ class FFmpegPlanningTests(unittest.TestCase):
                 )
                 self.assertIn(expected_fragment, plan.filter_complex)
                 self.assertIn("eval=frame", plan.filter_complex)
-                self.assertIn("clip((t-", plan.filter_complex)
+                self.assertIn("clip(t/", plan.filter_complex)
                 self.assertNotIn("zoompan", plan.filter_complex)
 
         focus = build_ffmpeg_plan(
@@ -1118,7 +1361,7 @@ class FFmpegPlanningTests(unittest.TestCase):
         )
         self.assertIn("gblur=sigma=9:steps=2", focus.filter_complex)
         self.assertIn("gblur=sigma=11:steps=2", focus.filter_complex)
-        self.assertIn("fade=t=out:st=8:d=0.8:alpha=1", focus.filter_complex)
+        self.assertIn("fade=t=out:st=0:d=0.8:alpha=1", focus.filter_complex)
 
     def test_color_grade_whitelist_and_neutral_backward_compatibility(self) -> None:
         base = Path("C:/StoryForge")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,7 @@ LOCAL_WORKER_SESSION_SECONDS = 30 * 60
 LOCAL_WORKER_PROTOCOL_VERSION = 2
 LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION = 2
 LOCAL_WORKER_TASK_NAME = "StoryForge Local Worker"
+_WINDOWS_ALREADY_EXISTS = 183
 
 
 _TERMINAL_WORKER_JOB_STATUSES = frozenset(
@@ -69,9 +71,21 @@ LOCAL_WORKER_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
 
 
 def discover_local_production_worker(
-    *, timeout_seconds: float = 0.25
+    *, timeout_seconds: float = 0.25, include_unready: bool = False
 ) -> dict[str, Any] | None:
-    """Return the first live production worker on the fixed loopback range."""
+    """Return the first usable production worker on the loopback range.
+
+    A process can keep its loopback health listener alive after its saved Hub
+    device credential has been revoked.  Such a listener reports
+    ``ready=false`` and must not be opened as if it were an authenticated
+    production service: its client-local browser deliberately cannot accept
+    account passwords.  Lifecycle and handoff code may set
+    ``include_unready=True`` so it can still find and safely stop that process.
+
+    Legacy peers which do not publish ``ready`` remain discoverable.  They are
+    handled conservatively by the existing queue/version checks instead of
+    risking a second render owner during a rolling upgrade.
+    """
 
     for port in LOCAL_WORKER_DISCOVERY_PORTS:
         try:
@@ -87,10 +101,175 @@ def discover_local_production_worker(
                 and data.get("worker_role") == "production-workstation"
             ):
                 data["endpoint"] = f"http://127.0.0.1:{port}"
+                if not include_unready and data.get("ready") is False:
+                    continue
                 return data
         except (OSError, TimeoutError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
             continue
     return None
+
+
+def local_worker_release_state(
+    worker: Mapping[str, Any], *, expected_version: str = __version__
+) -> str:
+    """Classify a discovered worker without guessing about legacy peers.
+
+    ``current`` means both the application and browser/worker protocol match
+    this release. ``stale`` means a version-checked wait must not accept that
+    endpoint as the new release. A worker which predates version reporting is
+    ``unknown`` and is deliberately left running rather than guessed about.
+    """
+
+    reported_version = str(
+        worker.get("version") or worker.get("app_version") or ""
+    ).strip()
+    if not reported_version:
+        return "unknown"
+    try:
+        protocol_version = int(worker.get("protocol_version") or 0)
+        minimum_browser = int(
+            worker.get("minimum_browser_protocol_version") or 0
+        )
+    except (TypeError, ValueError):
+        return "stale"
+    if (
+        reported_version == str(expected_version or "").strip()
+        and protocol_version >= LOCAL_WORKER_PROTOCOL_VERSION
+        and minimum_browser <= LOCAL_WORKER_PROTOCOL_VERSION
+    ):
+        return "current"
+    return "stale"
+
+
+def wait_for_local_production_worker(
+    *,
+    expected_version: str | None = None,
+    timeout_seconds: float = 20.0,
+    poll_seconds: float = 0.15,
+) -> dict[str, Any] | None:
+    """Wait for one worker, optionally requiring an exact release match."""
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    while True:
+        worker = discover_local_production_worker(timeout_seconds=0.35)
+        if worker is not None and (
+            expected_version is None
+            or local_worker_release_state(
+                worker, expected_version=expected_version
+            )
+            == "current"
+        ):
+            return worker
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(max(0.02, float(poll_seconds)))
+
+
+class ProductionWorkerMutex:
+    """Windows named mutex preventing two queues on one physical workstation.
+
+    HTTP port discovery alone has a check-then-bind race: a scheduled Worker
+    and a desktop launch can both observe no listener and then bind different
+    ports. Holding this mutex before ``StoryForgeApi`` construction makes the
+    queue owner unique even while the HTTP server is still starting.
+    """
+
+    def __init__(self, data_dir: str | Path) -> None:
+        # ``data_dir`` remains in the signature for source compatibility, but
+        # it must not participate in the identity. Version 0.4.3 migrates an
+        # employee from AppData to a portable StoryForgeData folder; hashing
+        # that path would let the old and new Workers each own a different
+        # mutex and render the same Hub task twice.
+        # ``Local\\`` is scoped to one interactive Windows session.  It let a
+        # scheduled worker and an RDP/console session each own a queue and
+        # render the same Hub record twice.  ``Global\\`` provides the actual
+        # machine-wide ownership boundary expected by a workstation worker.
+        self.name = "Global\\StoryForgeProductionWorker"
+        legacy_base = os.environ.get("APPDATA")
+        legacy_root = (
+            Path(legacy_base)
+            if legacy_base
+            else Path.home() / "AppData" / "Roaming"
+        ) / "StoryForgeStudio"
+
+        def legacy_name(path: str | Path) -> str:
+            normalized = os.path.normcase(
+                str(Path(path).expanduser().resolve(strict=False))
+            )
+            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+            return f"Local\\StoryForgeProductionWorker-{digest}"
+
+        # Keep the path-derived aliases for compatibility with development and
+        # transitional 0.4.3 builds that used a per-data-directory identity.
+        # Released 0.4.2 Workers did not own any named mutex, so the one-time
+        # 0.4.2 -> 0.4.3 migration must still stop that old Worker before the
+        # portable copy is started. The fixed first name is the permanent
+        # cross-version identity from 0.4.3 onward.
+        self.compatibility_names = tuple(
+            dict.fromkeys(
+                (
+                    "Local\\StoryForgeProductionWorker",
+                    legacy_name(data_dir),
+                    legacy_name(legacy_root),
+                )
+            )
+        )
+        self._handles: list[int] = []
+
+    def acquire(self) -> bool:
+        if self._handles:
+            return True
+        if os.name != "nt":
+            # StoryForge production packages are Windows-only. Source-mode
+            # tests on other platforms do not need a process-global mutex.
+            self._handles = [-1]
+            return True
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        acquired: list[int] = []
+        try:
+            for name in (self.name, *self.compatibility_names):
+                # CreateMutexW reports an existing object through last-error.
+                # Clear the thread-local ctypes copy first so an earlier API
+                # call cannot make a newly-created alias look occupied.
+                ctypes.set_last_error(0)
+                handle = kernel32.CreateMutexW(None, True, name)
+                if not handle:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if ctypes.get_last_error() == _WINDOWS_ALREADY_EXISTS:
+                    kernel32.CloseHandle(handle)
+                    return False
+                acquired.append(int(handle))
+            self._handles = acquired
+            acquired = []
+            return True
+        finally:
+            for handle in reversed(acquired):
+                kernel32.ReleaseMutex(ctypes.c_void_p(handle))
+                kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+    def release(self) -> None:
+        handles = self._handles
+        self._handles = []
+        if not handles or handles == [-1] or os.name != "nt":
+            return
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        for handle in reversed(handles):
+            kernel32.ReleaseMutex(ctypes.c_void_p(handle))
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+    def __del__(self) -> None:
+        try:
+            self.release()
+        except BaseException:
+            pass
 
 
 def ensure_local_worker_autostart(
@@ -154,6 +333,8 @@ def ensure_local_worker_autostart(
         LOCAL_WORKER_TASK_NAME,
         "-RequiredProtocolVersion",
         str(LOCAL_WORKER_PROTOCOL_VERSION),
+        "-RequiredAppVersion",
+        __version__,
         "-NoHealthWait",
         "-Quiet",
     ]
@@ -213,7 +394,7 @@ def pause_local_worker_autostart_for_desktop(
     # same durable queue in a second process.  Older workers do not publish
     # these fields, so fail closed until they have been updated rather than
     # guessing that the queue is idle.
-    running_before_stop = discover_local_production_worker()
+    running_before_stop = discover_local_production_worker(include_unready=True)
     if running_before_stop is not None:
         rendering_busy = running_before_stop.get("rendering_busy")
         queue_busy = running_before_stop.get("queue_busy")
@@ -284,7 +465,9 @@ def pause_local_worker_autostart_for_desktop(
         return {
             "state": "warning",
             "paused": False,
-            "worker_running": bool(discover_local_production_worker()),
+            "worker_running": bool(
+                discover_local_production_worker(include_unready=True)
+            ),
             "message": "后台制作服务暂未切换到桌面窗口。",
             "technical": (str(error) or type(error).__name__)[:300],
         }
@@ -292,7 +475,9 @@ def pause_local_worker_autostart_for_desktop(
         return {
             "state": "warning",
             "paused": False,
-            "worker_running": bool(discover_local_production_worker()),
+            "worker_running": bool(
+                discover_local_production_worker(include_unready=True)
+            ),
             "message": "后台制作服务暂未切换到桌面窗口。",
             "technical": str(
                 getattr(completed, "stderr", "")
@@ -301,10 +486,10 @@ def pause_local_worker_autostart_for_desktop(
             )[:300],
         }
     deadline = time.monotonic() + 6.0
-    running = discover_local_production_worker()
+    running = discover_local_production_worker(include_unready=True)
     while running is not None and time.monotonic() < deadline:
         time.sleep(0.1)
-        running = discover_local_production_worker()
+        running = discover_local_production_worker(include_unready=True)
     if running is not None:
         return {
             "state": "warning",
@@ -516,7 +701,12 @@ class LocalWorkerGateway:
         }
 
     def health(self) -> dict[str, Any]:
-        hub_client = getattr(self.api, "_hub_client", None)
+        client_snapshot = getattr(self.api, "_hub_client_snapshot", None)
+        hub_client = (
+            client_snapshot()
+            if callable(client_snapshot)
+            else getattr(self.api, "_hub_client", None)
+        )
         hub_server = getattr(self.api, "_hub_server", None)
         runtime_mode = str(getattr(self.api, "_runtime_hub_mode", ""))
         hub_connected = bool(
@@ -544,6 +734,7 @@ class LocalWorkerGateway:
         return {
             "service": "storyforge-local-worker",
             "version": __version__,
+            "process_id": os.getpid(),
             "protocol_version": LOCAL_WORKER_PROTOCOL_VERSION,
             "minimum_browser_protocol_version": LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION,
             "started_at_unix": self.started_at_unix,

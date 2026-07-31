@@ -1438,19 +1438,18 @@ def build_ffmpeg_plan(
     if cover_index is None:
         if end_card_without_cover:
             end_start = _ffmpeg_number(target_duration - end_card_duration)
-            end_duration = _ffmpeg_number(end_card_duration)
             end_fade_duration = _ffmpeg_number(min(0.5, end_card_duration / 4))
-            graph.append("[joined]split=2[story_main][story_end_source]")
-            graph.append(
-                f"[story_end_source]trim=start={end_start}:duration={end_duration},"
-                f"setpts=PTS-STARTPTS+{end_start}/TB,"
-                "format=rgba,eq=brightness=-0.24:saturation=0.72,"
-                f"fade=t=in:st={end_start}:d={end_fade_duration}:alpha=1[story_end_card]"
+            end_progress = (
+                f"clip((t-{end_start})/{end_fade_duration},0,1)"
             )
+            # Apply the closing grade directly to each primary frame.  A split
+            # branch trimmed from ``end_start`` cannot produce its first frame
+            # until the decoder reaches the ending and therefore recreates the
+            # same framesync backlog even when a tpad is appended afterwards.
             graph.append(
-                "[story_main][story_end_card]overlay=(W-w)/2:(H-h)/2:"
-                f"enable='gte(t,{end_start})':eof_action=pass:repeatlast=0"
-                "[end_composited]"
+                "[joined]eq="
+                f"brightness='-0.24*{end_progress}':"
+                f"saturation='1-0.28*{end_progress}':eval=frame[end_composited]"
             )
             graph.append(
                 f"[end_composited]ass=filename='{escaped_subtitles}'"
@@ -1463,13 +1462,8 @@ def build_ffmpeg_plan(
     else:
         intro_start = _ffmpeg_number(cover_intro_start)
         intro_duration = _ffmpeg_number(cover_intro_duration)
-        intro_end_value = cover_intro_start + cover_intro_duration
-        intro_end = _ffmpeg_number(intro_end_value)
         intro_fade_duration_value = min(0.35, cover_intro_duration / 4)
         intro_fade_duration = _ffmpeg_number(intro_fade_duration_value)
-        intro_fade_out = _ffmpeg_number(
-            intro_end_value - intro_fade_duration_value
-        )
         end_start_value = target_duration - end_card_duration
         end_start = _ffmpeg_number(end_start_value)
         end_duration = _ffmpeg_number(end_card_duration)
@@ -1482,9 +1476,10 @@ def build_ffmpeg_plan(
         # deterministic.  The intro intentionally keeps the complete cover on
         # a softly blurred bed; the closing shot below uses a separate
         # full-bleed crop, as requested for the final narrated CTA.
-        intro_progress = (
-            f"clip((t-{intro_start})/{intro_duration},0,1)"
-        )
+        # Cover scenes are animated on a local zero-based timeline.  Their
+        # placement on the story timeline happens later via a transparent
+        # prefix, so no overlay input starts at a future timestamp.
+        intro_progress = f"clip(t/{intro_duration},0,1)"
         intro_ease = f"(0.5-0.5*cos(PI*{intro_progress}))"
         intro_zoom_amount = {
             "none": 0.0,
@@ -1504,7 +1499,7 @@ def build_ffmpeg_plan(
             f"1+{_ffmpeg_number(intro_zoom_amount)}*"
             f"{intro_ease}"
         )
-        end_progress = f"clip((t-{end_start})/{_ffmpeg_number(end_card_duration)},0,1)"
+        end_progress = f"clip(t/{_ffmpeg_number(end_card_duration)},0,1)"
         # Cosine easing mirrors the restrained, non-spring camera moves used by
         # modern mobile editors without depending on any external NLE.
         end_ease = f"(0.5-0.5*cos(PI*{end_progress}))"
@@ -1514,7 +1509,7 @@ def build_ffmpeg_plan(
             "gentle_push": f"1+0.065*{end_ease}",
             "gentle_pull": f"1.075-0.055*{end_ease}",
             "slow_pan": "1.075",
-            "soft_parallax": f"1.06+0.006*sin((t-{end_start})*1.1)",
+            "soft_parallax": "1.06+0.006*sin(t*1.1)",
             "vertical_drift": "1.09",
             "focus_reveal": f"1.05-0.025*{end_ease}",
             "cinematic_push": f"1+0.095*{end_ease}",
@@ -1527,8 +1522,8 @@ def build_ffmpeg_plan(
         if cover_animation == "slow_pan":
             end_crop_x = f"(iw-ow)*(0.18+0.64*{end_ease})"
         elif cover_animation == "soft_parallax":
-            end_crop_x += f"+(iw-ow)*0.14*sin((t-{end_start})*0.82)"
-            end_crop_y += f"+(ih-oh)*0.10*cos((t-{end_start})*0.67)"
+            end_crop_x += "+(iw-ow)*0.14*sin(t*0.82)"
+            end_crop_y += "+(ih-oh)*0.10*cos(t*0.67)"
         elif cover_animation == "vertical_drift":
             end_crop_y = f"(ih-oh)*(0.12+0.76*{end_ease})"
         elif cover_animation == "ken_burns_left":
@@ -1538,8 +1533,8 @@ def build_ffmpeg_plan(
         intro_overlay_x = "(W-w)/2"
         intro_overlay_y = "(H-h)/2"
         if cover_animation == "soft_parallax":
-            intro_overlay_x += f"+8*sin((t-{intro_start})*1.7)"
-            intro_overlay_y += f"+6*cos((t-{intro_start})*1.3)"
+            intro_overlay_x += "+8*sin(t*1.7)"
+            intro_overlay_y += "+6*cos(t*1.3)"
         elif cover_animation == "vertical_drift":
             intro_overlay_y = f"'(H-h)/2+14*(0.5-{intro_ease})'"
         elif cover_animation == "ken_burns_left":
@@ -1550,21 +1545,23 @@ def build_ffmpeg_plan(
             ""
             if cover_animation == "none"
             else (
-                f",fade=t=in:st={intro_start}:d={intro_fade_duration}:color=white"
-                f",fade=t=out:st={intro_fade_out}:d={intro_fade_duration}:alpha=1"
+                f",fade=t=in:st=0:d={intro_fade_duration}:color=white"
+                f",fade=t=out:st={_ffmpeg_number(cover_intro_duration - intro_fade_duration_value)}:"
+                f"d={intro_fade_duration}:alpha=1"
             )
             if cover_animation == "soft_flash"
             else (
-                f",fade=t=in:st={intro_start}:d={intro_fade_duration}:alpha=1"
-                f",fade=t=out:st={intro_fade_out}:d={intro_fade_duration}:alpha=1"
+                f",fade=t=in:st=0:d={intro_fade_duration}:alpha=1"
+                f",fade=t=out:st={_ffmpeg_number(cover_intro_duration - intro_fade_duration_value)}:"
+                f"d={intro_fade_duration}:alpha=1"
             )
         )
         end_fade = (
             ""
             if cover_animation == "none"
-            else f",fade=t=in:st={end_start}:d={end_fade_duration}:color=white"
+            else f",fade=t=in:st=0:d={end_fade_duration}:color=white"
             if cover_animation == "soft_flash"
-            else f",fade=t=in:st={end_start}:d={end_fade_duration}:alpha=1"
+            else f",fade=t=in:st=0:d={end_fade_duration}:alpha=1"
         )
         if cover_intro_enabled and cover_outro_enabled:
             graph.append(
@@ -1583,13 +1580,13 @@ def build_ffmpeg_plan(
         if cover_outro_enabled:
             graph.append(
                 f"[cover_end_window_source]trim=duration={end_duration},"
-                f"setpts=PTS-STARTPTS+{end_start}/TB[cover_end_source]"
+                "setpts=PTS-STARTPTS[cover_end_source]"
             )
 
         if cover_intro_enabled:
             graph.append(
                 f"[cover_intro_window_source]trim=duration={intro_duration},"
-                f"setpts=PTS-STARTPTS+{intro_start}/TB,split=2"
+                "setpts=PTS-STARTPTS,split=2"
                 "[cover_intro_bg_source][cover_intro_fg_source]"
             )
             graph.append(
@@ -1631,7 +1628,7 @@ def build_ffmpeg_plan(
                 )
                 graph.append(
                     "[cover_intro_blur_source]gblur=sigma=9:steps=2,"
-                    f"fade=t=out:st={intro_start}:d={intro_focus_duration}:alpha=1"
+                    f"fade=t=out:st=0:d={intro_focus_duration}:alpha=1"
                     "[cover_intro_blur]"
                 )
                 graph.append(
@@ -1648,8 +1645,13 @@ def build_ffmpeg_plan(
                     "[cover_intro_scene]"
                 )
             graph.append(
-                "[joined][cover_intro_scene]"
-                f"overlay=(W-w)/2:(H-h)/2:enable='between(t,{intro_start},{intro_end})':"
+                "[cover_intro_scene]"
+                f"tpad=start_mode=add:start_duration={intro_start}:color=black@0.0"
+                "[cover_intro_timeline]"
+            )
+            graph.append(
+                "[joined][cover_intro_timeline]"
+                "overlay=(W-w)/2:(H-h)/2:"
                 "eof_action=pass:repeatlast=0[cover_intro_composited]"
             )
             cover_base_label = "cover_intro_composited"
@@ -1690,7 +1692,7 @@ def build_ffmpeg_plan(
                 )
                 graph.append(
                     "[cover_end_blur_source]gblur=sigma=11:steps=2,"
-                    f"fade=t=out:st={end_start}:d={end_focus_duration}:alpha=1"
+                    f"fade=t=out:st=0:d={end_focus_duration}:alpha=1"
                     "[cover_end_blur]"
                 )
                 graph.append(
@@ -1699,25 +1701,24 @@ def build_ffmpeg_plan(
                     f"{end_fade}[cover_end_scene]"
                 )
             graph.append(
-                f"[{cover_base_label}][cover_end_scene]"
-                f"overlay=0:0:enable='gte(t,{end_start})':"
+                "[cover_end_scene]"
+                f"tpad=start_mode=add:start_duration={end_start}:color=black@0.0"
+                "[cover_end_timeline]"
+            )
+            graph.append(
+                f"[{cover_base_label}][cover_end_timeline]"
+                "overlay=0:0:"
                 "eof_action=pass:repeatlast=0[covered]"
             )
             cover_caption_base = "covered"
         elif end_card_without_cover:
-            graph.append(
-                f"[{cover_base_label}]split=2[story_main][story_end_source]"
+            end_progress = (
+                f"clip((t-{end_start})/{end_fade_duration},0,1)"
             )
             graph.append(
-                f"[story_end_source]trim=start={end_start}:duration={end_duration},"
-                f"setpts=PTS-STARTPTS+{end_start}/TB,"
-                "format=rgba,eq=brightness=-0.24:saturation=0.72,"
-                f"fade=t=in:st={end_start}:d={end_fade_duration}:alpha=1[story_end_card]"
-            )
-            graph.append(
-                "[story_main][story_end_card]overlay=(W-w)/2:(H-h)/2:"
-                f"enable='gte(t,{end_start})':eof_action=pass:repeatlast=0"
-                "[end_composited]"
+                f"[{cover_base_label}]eq="
+                f"brightness='-0.24*{end_progress}':"
+                f"saturation='1-0.28*{end_progress}':eval=frame[end_composited]"
             )
             cover_caption_base = "end_composited"
         else:

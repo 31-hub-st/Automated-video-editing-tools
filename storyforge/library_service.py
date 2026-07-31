@@ -400,7 +400,10 @@ class LibraryService:
         self.catalog = catalog
         self._settings_getter = settings_getter
         self.data_dir = Path(data_dir).resolve()
-        self.voice_previews = VoicePreviewService(settings_getter)
+        self.voice_previews = VoicePreviewService(
+            settings_getter,
+            cache_root=self.data_dir / "voice-previews",
+        )
         self._text_provider_factory = text_provider_factory
         self._remote_text_provider = bool(remote_text_provider)
 

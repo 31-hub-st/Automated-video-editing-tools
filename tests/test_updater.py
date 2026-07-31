@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -87,6 +89,33 @@ class UpdatePackageTests(unittest.TestCase):
             )
             self.assertEqual(repository.get_manifest(), second)
 
+    def test_repository_same_version_publish_is_idempotent_but_rejects_new_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            package = make_update_package(root, "0.2.0")
+
+            first = repository.publish(package, "0.2.0", "original notes")
+            repeated = repository.publish(package, "0.2.0", "changed notes")
+
+            self.assertEqual(repeated, first)
+            self.assertEqual(
+                len(list(repository.root.glob("StoryForge-*.zip"))), 1
+            )
+
+            alternate_root = root / "alternate"
+            alternate_root.mkdir()
+            conflicting = make_update_package(alternate_root, "0.2.0")
+            with zipfile.ZipFile(
+                conflicting, "a", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                archive.writestr("extra-release-file.txt", b"different bytes")
+
+            with self.assertRaisesRegex(ValueError, "same StoryForge version"):
+                repository.publish(conflicting, "0.2.0")
+
+            self.assertEqual(repository.get_manifest(), first)
+
     def test_locked_stale_package_does_not_fail_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -161,6 +190,104 @@ class UpdatePackageTests(unittest.TestCase):
             self.assertTrue(output.is_file())
             self.assertTrue(Path(result["manifest_path"]).is_file())
             self.assertEqual(inspect_update_package(output)["version"], __version__)
+            validation = json.loads(
+                (build / "BUILD_RELEASE_VALIDATION.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                validation["bundle_files"],
+                [
+                    "BUILD_STARTUP_VALIDATION.json",
+                    "StoryForge.exe",
+                    "ui/index.html",
+                ],
+            )
+            self.assertEqual(
+                validation["bundle_file_count"],
+                len(validation["bundle_files"]),
+            )
+
+    def test_release_validation_rejects_tampered_managed_file_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build = root / "build"
+            (build / "ui").mkdir(parents=True)
+            (build / "StoryForge.exe").write_bytes(b"built application")
+            (build / "ui" / "index.html").write_text("updated", encoding="utf-8")
+            (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+                json.dumps(
+                    {"ok": True, "frozen": True, "app_version": __version__}
+                ),
+                encoding="utf-8",
+            )
+            write_release_validation(
+                build,
+                entrypoint="StoryForge.exe",
+                requested_version=__version__,
+                with_local_ai=False,
+            )
+            validation_path = build / "BUILD_RELEASE_VALIDATION.json"
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            validation["bundle_files"].remove("ui/index.html")
+            validation_path.write_text(json.dumps(validation), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "bundle_files mismatch"):
+                build_package(
+                    build,
+                    output_path=root / "release" / "tampered-list.zip",
+                    entrypoint="StoryForge.exe",
+                    version=__version__,
+                )
+
+    def test_frozen_package_never_contains_portable_employee_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build = root / "build"
+            build.mkdir()
+            (build / "StoryForge.exe").write_bytes(b"built application")
+            (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+                json.dumps(
+                    {"ok": True, "frozen": True, "app_version": __version__}
+                ),
+                encoding="utf-8",
+            )
+            portable = build / "StoryForgeData"
+            portable.mkdir()
+            (portable / "settings.json").write_text("employee secret", encoding="utf-8")
+            write_release_validation(
+                build,
+                entrypoint="StoryForge.exe",
+                requested_version=__version__,
+                with_local_ai=False,
+            )
+            output = root / "release" / "update.zip"
+
+            build_package(
+                build,
+                output_path=output,
+                entrypoint="StoryForge.exe",
+                version=__version__,
+            )
+
+            with zipfile.ZipFile(output) as archive:
+                names = {name.casefold() for name in archive.namelist()}
+            self.assertFalse(any(name.startswith("storyforgedata/") for name in names))
+            validation = json.loads(
+                (build / "BUILD_RELEASE_VALIDATION.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(
+                any(
+                    path.casefold().startswith("storyforgedata/")
+                    for path in validation["bundle_files"]
+                )
+            )
+            self.assertNotIn(
+                "build_release_validation.json",
+                {path.casefold() for path in validation["bundle_files"]},
+            )
 
     def test_frozen_package_rejects_entrypoint_changed_after_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -411,11 +538,13 @@ class _FakeUpdateClient:
     def __init__(self, manifest: dict, package: Path) -> None:
         self.manifest = manifest
         self.package = package
+        self.download_calls = 0
 
     def get_update_manifest(self) -> dict:
         return dict(self.manifest)
 
     def download_update_package(self, manifest: dict, *, destination: Path) -> dict:
+        self.download_calls += 1
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.package, destination)
         return {
@@ -443,7 +572,7 @@ class UpdateManagerTests(unittest.TestCase):
             manager._write_windows_worker()
             script = manager.worker_path.read_text(encoding="utf-8")
 
-            health_index = script.index("failed its startup health check")
+            health_index = script.index("failed its loopback version health check")
             result_index = script.index("@{ status='installed'")
             marker_removal_index = script.index(
                 "Remove-Item -LiteralPath $MarkerPath -Force"
@@ -452,11 +581,99 @@ class UpdateManagerTests(unittest.TestCase):
             self.assertLess(result_index, marker_removal_index)
             self.assertIn("rollback_available=$true", script)
             self.assertIn("Copy-Item -LiteralPath $backupTarget", script)
+            self.assertIn("/worker/api/health", script)
+            self.assertIn(
+                "[string]$response.data.version -eq $ExpectedVersion", script
+            )
+            self.assertIn(
+                "health='loopback_version_and_install_identity'", script
+            )
+            self.assertNotIn("health='process_alive'", script)
+            self.assertIn("$launched.Refresh()", script)
+            self.assertIn("if ($launched.HasExited)", script)
+            self.assertIn("$response.data.process_id", script)
+            self.assertIn("-ExpectedExecutablePath $expectedWorkerExecutable", script)
+            self.assertIn("[string]$workerProcess.Path", script)
+            self.assertIn(
+                "admin-tools\\enable_storyforge_worker.ps1", script
+            )
+            self.assertIn("-ExecutablePath $entryPath", script)
+            self.assertIn("-RequiredAppVersion $version", script)
+            self.assertIn("Unregister-ScheduledTask", script)
+            self.assertIn("Export-ScheduledTask", script)
+            self.assertIn(
+                "Register-ScheduledTask -TaskName $workerTaskName -Xml $existingWorkerTaskXml",
+                script,
+            )
+            self.assertIn("$rollbackScript", script)
+            self.assertIn("rollback_service_restored", script)
+            self.assertIn(
+                "-ExpectedVersion $oldReleaseVersion", script
+            )
+            self.assertIn("-ExpectedExecutablePath $oldEntryPath", script)
+            self.assertNotIn("Wait-StoryForgeWorkerHealth -ExpectedVersion ''", script)
+            self.assertIn("BUILD_RELEASE_VALIDATION.json", script)
+            self.assertIn("$oldManagedFiles", script)
+            self.assertIn("$newManagedSet.Contains($oldRelative)", script)
+            self.assertIn("$removed.Add([string]$oldInfo.relative)", script)
+            self.assertIn("foreach ($relative in $removed)", script)
+            self.assertIn("Protected StoryForgeData path cannot be managed", script)
+            self.assertIn("path crosses a reparse point", script)
+            self.assertIn(
+                "Unknown/user files are intentionally retained".casefold(),
+                script.casefold(),
+            )
+            self.assertNotIn(
+                "Get-ChildItem -LiteralPath $installRoot -File -Recurse", script
+            )
+            launch_index = script.index("$launched = Start-Process")
+            worker_health_index = script.index(
+                "$workerHealth = Wait-StoryForgeWorkerHealth"
+            )
+            self.assertLess(launch_index, worker_health_index)
             package_removal_index = script.index(
                 "Remove-Item -LiteralPath $package -Force"
             )
             self.assertLess(result_index, package_removal_index)
             self.assertIn("update_storage_root", script)
+            unblock_index = script.index("Unblock-File -ErrorAction Stop")
+            copy_index = script.index(
+                "Copy-Item -LiteralPath $source.FullName -Destination $target -Force"
+            )
+            self.assertLess(unblock_index, copy_index)
+            installing_index = script.index(
+                "Add-Member -NotePropertyName installing -NotePropertyValue $true"
+            )
+            hash_index = script.index("Get-FileHash -LiteralPath $package")
+            self.assertLess(installing_index, hash_index)
+            self.assertLess(installing_index, copy_index)
+            copying_index = script.index(
+                "Add-Member -NotePropertyName installing_phase -NotePropertyValue 'copying'"
+            )
+            health_index = script.index(
+                "Add-Member -NotePropertyName installing_phase -NotePropertyValue 'health_check'"
+            )
+            health_token_index = script.index(
+                "$env:STORYFORGE_UPDATE_HEALTH_TOKEN = $installationId"
+            )
+            self.assertLess(copying_index, copy_index)
+            self.assertLess(copy_index, health_index)
+            self.assertLess(health_index, launch_index)
+            self.assertLess(health_index, health_token_index)
+            self.assertLess(health_token_index, launch_index)
+            self.assertIn("NotePropertyName installation_id", script)
+            self.assertIn("NotePropertyValue 'rollback_health'", script)
+            self.assertIn("Local\\StoryForgeUpdate-", script)
+            self.assertIn("$installMutex.WaitOne(0)", script)
+            self.assertIn("phase='preflight'", script)
+            self.assertIn("Remove-Item -LiteralPath $workRoot -Recurse", script)
+            obsolete_backup_index = script.index(
+                "Copy-Item -LiteralPath $obsoleteTarget -Destination $backupTarget -Force"
+            )
+            obsolete_remove_index = script.index(
+                "Remove-Item -LiteralPath $obsoleteTarget -Force"
+            )
+            self.assertLess(obsolete_backup_index, obsolete_remove_index)
 
     def test_generated_apply_script_is_valid_windows_powershell(self) -> None:
         powershell = shutil.which("powershell.exe") or shutil.which("powershell")
@@ -486,6 +703,65 @@ class UpdateManagerTests(unittest.TestCase):
 
             completed = subprocess.run(
                 [powershell, "-NoLogo", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_generated_managed_path_guard_rejects_data_and_escape_paths(self) -> None:
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("Windows PowerShell is unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=root / "client",
+                client_getter=lambda: None,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+            )
+            manager._write_windows_worker()
+            worker = manager.worker_path.read_text(encoding="utf-8")
+            start = worker.index("function Resolve-ManagedInstallPath")
+            end = worker.index("function Wait-StoryForgeWorkerHealth")
+            resolver = worker[start:end]
+            install = root / "StoryForge"
+            install.mkdir()
+            quoted_install = str(install).replace("'", "''")
+            probe = root / "managed-path-probe.ps1"
+            probe.write_text(
+                resolver
+                + "\n$ErrorActionPreference = 'Stop'\n"
+                + f"$root = '{quoted_install}'\n"
+                + "$valid = Resolve-ManagedInstallPath -Root $root -RelativePath '_internal/ok.dll'\n"
+                + "$expected = [IO.Path]::GetFullPath((Join-Path $root '_internal\\ok.dll'))\n"
+                + "if (-not [string]::Equals([string]$valid.target, $expected, [StringComparison]::OrdinalIgnoreCase)) { exit 2 }\n"
+                + "$rejectedData = $false\n"
+                + "try { Resolve-ManagedInstallPath -Root $root -RelativePath 'StoryForgeData/logs/private.log' | Out-Null } catch { $rejectedData = $true }\n"
+                + "if (-not $rejectedData) { exit 3 }\n"
+                + "$rejectedEscape = $false\n"
+                + "try { Resolve-ManagedInstallPath -Root $root -RelativePath '../outside.dll' | Out-Null } catch { $rejectedEscape = $true }\n"
+                + "if (-not $rejectedEscape) { exit 4 }\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -562,6 +838,112 @@ class UpdateManagerTests(unittest.TestCase):
             self.assertTrue(active_apply.is_dir())
             self.assertFalse(stale_apply.exists())
 
+    def test_launch_marks_installing_before_launcher_and_second_manager_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            manifest = repository.publish(make_update_package(root), "0.2.0")
+            client = _FakeUpdateClient(
+                manifest, repository.resolve_package(manifest)
+            )
+            data_dir = root / "client"
+            observations: list[dict] = []
+
+            def launcher(_worker: Path, marker_path: Path, _pid: int) -> None:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                observations.append(marker)
+                second = UpdateManager(
+                    current_version="0.1.0",
+                    data_dir=data_dir,
+                    client_getter=lambda: client,
+                    mode_getter=lambda: "client",
+                    enabled_getter=lambda: True,
+                    auto_download_getter=lambda: True,
+                    interval_minutes_getter=lambda: 1,
+                    rendering_busy_getter=lambda: False,
+                )
+                self.assertEqual(
+                    second.status()["state"], "applying_on_restart"
+                )
+                self.assertFalse(second.launch_scheduled_update())
+
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=data_dir,
+                client_getter=lambda: client,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+                launcher=launcher,
+            )
+            manager.check_now(auto_download=True)
+
+            self.assertTrue(manager.launch_scheduled_update())
+            self.assertEqual(len(observations), 1)
+            self.assertTrue(observations[0]["installing"])
+            self.assertTrue(observations[0]["installing_at"])
+            self.assertEqual(observations[0]["installing_phase"], "handoff")
+            self.assertRegex(observations[0]["installation_id"], r"^[0-9a-f]{64}$")
+            self.assertEqual(observations[0]["apply_work_root"], "")
+
+    def test_launch_preflight_failure_records_marker_result_and_cleans_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            manifest = repository.publish(make_update_package(root), "0.2.0")
+            client = _FakeUpdateClient(
+                manifest, repository.resolve_package(manifest)
+            )
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=root / "client",
+                client_getter=lambda: client,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+                launcher=lambda *_args: self.fail("launcher must not run"),
+            )
+            manager.check_now(auto_download=True)
+            apply_root = manager.storage_root / "apply-preflight-test"
+            (apply_root / "stage").mkdir(parents=True)
+
+            def fail_preflight(_package: Path, _manifest: dict) -> dict:
+                pending = json.loads(
+                    manager.pending_path.read_text(encoding="utf-8")
+                )
+                pending["apply_work_root"] = str(apply_root)
+                manager._write_json_atomic(manager.pending_path, pending)
+                raise OSError("preflight disk probe failed")
+
+            with (
+                patch.object(
+                    manager,
+                    "_apply_space_requirements",
+                    side_effect=fail_preflight,
+                ),
+                self.assertRaisesRegex(OSError, "preflight disk probe failed"),
+            ):
+                manager.launch_scheduled_update()
+
+            failed_marker = json.loads(
+                manager.pending_path.read_text(encoding="utf-8")
+            )
+            result = json.loads(manager.result_path.read_text(encoding="utf-8"))
+            self.assertFalse(failed_marker["installing"])
+            self.assertEqual(failed_marker["installing_at"], "")
+            self.assertEqual(failed_marker["installing_phase"], "")
+            self.assertEqual(failed_marker["apply_work_root"], "")
+            self.assertIn("preflight disk probe failed", failed_marker["last_error"])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["phase"], "preflight")
+            self.assertIn("preflight disk probe failed", result["error"])
+            self.assertFalse(apply_root.exists())
+            self.assertEqual(manager.status()["state"], "error")
+
     def test_frozen_client_prefers_writable_install_volume_for_large_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -585,6 +967,32 @@ class UpdateManagerTests(unittest.TestCase):
             self.assertEqual(manager.storage_root.parent, install_root.parent)
             self.assertNotEqual(manager.storage_root, manager.state_root)
             self.assertEqual(manager.cache_root.parent, manager.storage_root)
+
+    def test_portable_client_keeps_updates_inside_storyforge_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "StoryForge" / "StoryForgeData"
+            with (
+                patch("storyforge.updater.sys.frozen", True, create=True),
+                patch.dict(
+                    os.environ,
+                    {"STORYFORGE_PORTABLE_MODE": "1"},
+                    clear=False,
+                ),
+            ):
+                manager = UpdateManager(
+                    current_version="0.1.0",
+                    data_dir=data_dir,
+                    client_getter=lambda: None,
+                    mode_getter=lambda: "client",
+                    enabled_getter=lambda: True,
+                    auto_download_getter=lambda: True,
+                    interval_minutes_getter=lambda: 1,
+                    rendering_busy_getter=lambda: False,
+                )
+
+            self.assertEqual(manager.storage_root, data_dir / "updates")
+            self.assertEqual(manager.cache_root, data_dir / "updates" / "downloads")
 
     def test_cleanup_preserves_pending_zip_and_removes_superseded_downloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -706,7 +1114,75 @@ class UpdateManagerTests(unittest.TestCase):
             ):
                 manager._ensure_download_space(manifest)
 
-    def test_auto_download_schedules_and_never_applies_during_render(self) -> None:
+    def test_backup_estimate_includes_only_obsolete_verified_release_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install = root / "install"
+            (install / "ui").mkdir(parents=True)
+            (install / "StoryForge.exe").write_bytes(b"old")
+            (install / "ui" / "index.html").write_bytes(b"old-ui")
+            (install / "obsolete.dll").write_bytes(b"obsolete")
+            (install / "employee-notes.txt").write_bytes(b"keep-me")
+            old_validation = {
+                "bundle_file_count": 3,
+                "bundle_files": [
+                    "StoryForge.exe",
+                    "ui/index.html",
+                    "obsolete.dll",
+                ],
+            }
+            old_validation_path = install / "BUILD_RELEASE_VALIDATION.json"
+            old_validation_path.write_text(
+                json.dumps(old_validation), encoding="utf-8"
+            )
+            package = root / "update.zip"
+            new_validation = {
+                "bundle_file_count": 2,
+                "bundle_files": ["StoryForge.exe", "ui/index.html"],
+            }
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr(
+                    "storyforge-update.json",
+                    json.dumps(
+                        {"version": "0.2.0", "entrypoint": "StoryForge.exe"}
+                    ),
+                )
+                archive.writestr("StoryForge.exe", b"new")
+                archive.writestr("ui/index.html", b"new-ui")
+                archive.writestr(
+                    "BUILD_RELEASE_VALIDATION.json",
+                    json.dumps(new_validation),
+                )
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=root / "client",
+                client_getter=lambda: None,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+            )
+
+            with patch.object(manager, "install_root", return_value=install):
+                estimated = manager._estimate_backup_bytes(package)
+
+            expected = sum(
+                path.stat().st_size
+                for path in (
+                    install / "StoryForge.exe",
+                    install / "ui" / "index.html",
+                    install / "obsolete.dll",
+                    old_validation_path,
+                )
+            )
+            self.assertEqual(estimated, expected)
+            self.assertNotEqual(
+                estimated,
+                expected + (install / "employee-notes.txt").stat().st_size,
+            )
+
+    def test_auto_download_waits_for_idle_before_copying_or_inspecting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository = UpdateRepository(root / "published")
@@ -731,19 +1207,95 @@ class UpdateManagerTests(unittest.TestCase):
             )
 
             status = manager.check_now(auto_download=True)
-            self.assertEqual(status["state"], "deferred")
-            self.assertTrue(status["downloaded"])
-            self.assertTrue(status["apply_on_restart"])
-            self.assertTrue(Path(status["package_path"]).is_file())
-            self.assertTrue(manager.pending_path.is_file())
+            self.assertEqual(status["state"], "available")
+            self.assertFalse(status["downloaded"])
+            self.assertFalse(status["apply_on_restart"])
+            self.assertEqual(status["package_path"], "")
+            self.assertFalse(manager.pending_path.exists())
+            self.assertEqual(client.download_calls, 0)
             self.assertFalse(manager.launch_scheduled_update())
             self.assertEqual(launches, [])
 
             busy[0] = False
+            status = manager.check_now(auto_download=True)
+            self.assertEqual(status["state"], "scheduled")
+            self.assertTrue(status["downloaded"])
+            self.assertTrue(status["apply_on_restart"])
+            self.assertTrue(Path(status["package_path"]).is_file())
+            self.assertTrue(manager.pending_path.is_file())
+            self.assertEqual(client.download_calls, 1)
             self.assertTrue(manager.launch_scheduled_update())
             self.assertEqual(len(launches), 1)
             self.assertTrue(launches[0][0].is_file())
             self.assertTrue(launches[0][1].is_file())
+            marker = json.loads(launches[0][1].read_text(encoding="utf-8"))
+            self.assertTrue(marker["register_local_worker"])
+
+    def test_manual_download_also_defers_while_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            manifest = repository.publish(make_update_package(root), "0.2.0")
+            client = _FakeUpdateClient(
+                manifest, repository.resolve_package(manifest)
+            )
+            busy = [True]
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=root / "client",
+                client_getter=lambda: client,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: busy[0],
+            )
+
+            status = manager.download()
+
+            self.assertEqual(status["state"], "available")
+            self.assertTrue(status["rendering_busy"])
+            self.assertFalse(status["downloaded"])
+            self.assertEqual(client.download_calls, 0)
+            self.assertFalse(manager.pending_path.exists())
+
+            busy[0] = False
+            status = manager.download()
+            self.assertEqual(status["state"], "scheduled")
+            self.assertEqual(client.download_calls, 1)
+            self.assertTrue(manager.pending_path.is_file())
+
+    def test_download_defers_when_render_reservation_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            manifest = repository.publish(make_update_package(root), "0.2.0")
+            client = _FakeUpdateClient(
+                manifest, repository.resolve_package(manifest)
+            )
+            reservation = threading.Lock()
+            reservation.acquire()
+            manager = UpdateManager(
+                current_version="0.1.0",
+                data_dir=root / "client",
+                client_getter=lambda: client,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+                heavy_resource_lock=reservation,
+            )
+
+            try:
+                status = manager.check_now(auto_download=True)
+            finally:
+                reservation.release()
+
+            self.assertEqual(status["state"], "available")
+            self.assertFalse(status["downloaded"])
+            self.assertEqual(client.download_calls, 0)
+            self.assertFalse(manager.pending_path.exists())
 
     def test_tampered_download_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

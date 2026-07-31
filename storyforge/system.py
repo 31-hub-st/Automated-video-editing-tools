@@ -6,10 +6,8 @@ import shutil
 import subprocess
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
-from importlib.util import find_spec
 from functools import lru_cache
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -44,15 +42,20 @@ def _creation_flags() -> int:
 
 _DISABLED_ENCODERS: set[tuple[str, str]] = set()
 _DISABLED_ENCODERS_LOCK = threading.RLock()
+_ENCODER_PROBE_LOCK = threading.RLock()
 
 
 def mark_encoder_unavailable(ffmpeg: str | Path, encoder: str) -> None:
     """Avoid retrying a hardware encoder that failed in this app session."""
 
-    key = (os.path.normcase(str(Path(ffmpeg).resolve())), str(encoder))
-    with _DISABLED_ENCODERS_LOCK:
-        _DISABLED_ENCODERS.add(key)
-    available_encoders.cache_clear()
+    # Keep disablement and cache invalidation atomic with respect to a first
+    # capability probe.  Otherwise a browser self-check could republish the
+    # just-failed backend while the render thread is clearing the cache.
+    with _ENCODER_PROBE_LOCK:
+        key = (os.path.normcase(str(Path(ffmpeg).resolve())), str(encoder))
+        with _DISABLED_ENCODERS_LOCK:
+            _DISABLED_ENCODERS.add(key)
+        available_encoders.cache_clear()
 
 
 def _encoder_is_disabled(ffmpeg: str | Path, encoder: str) -> bool:
@@ -107,10 +110,8 @@ def _runtime_encoder_works(executable: str, encoder: str) -> bool:
 
 
 @lru_cache(maxsize=4)
-def available_encoders(ffmpeg: Path | None = None) -> list[str]:
-    executable = ffmpeg or resolve_ffmpeg()
-    if executable is None:
-        return []
+def _available_encoders_cached(executable_value: str) -> tuple[str, ...]:
+    executable = Path(executable_value)
     try:
         result = run_cancellable_process(
             [str(executable), "-hide_banner", "-encoders"],
@@ -123,7 +124,7 @@ def available_encoders(ffmpeg: Path | None = None) -> list[str]:
             creationflags=_creation_flags(),
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return ()
     output = f"{result.stdout}\n{result.stderr}"
     compiled = {
         name
@@ -135,24 +136,42 @@ def available_encoders(ffmpeg: Path | None = None) -> list[str]:
         for name in ("h264_nvenc", "h264_qsv", "h264_amf")
         if name in compiled and not _encoder_is_disabled(executable, name)
     ]
-    # Probe independent GPU backends concurrently.  The previous sequential
-    # implementation could make the splash status appear frozen for as long as
-    # 36 seconds on machines with stale NVENC/QSV/AMF driver registrations.
-    with ThreadPoolExecutor(max_workers=max(1, len(hardware))) as executor:
-        futures = [
-            executor.submit(
-                copy_context().run,
-                _runtime_encoder_works,
-                str(executable),
-                name,
-            )
-            for name in hardware
-        ]
-        results = [future.result() for future in futures]
-    working = [name for name, ready in zip(hardware, results, strict=True) if ready]
+    # ``auto`` consumes only the first usable hardware backend.  Initialising
+    # NVENC, QSV and AMF simultaneously needlessly makes three 1080x1920/60
+    # FFmpeg processes compete for the display GPU during Worker startup.  On
+    # low-memory PCs or unstable drivers that can freeze the UI or reset the
+    # display. Probe in preference order and stop as soon as one works.
+    working: list[str] = []
+    for name in hardware:
+        if _runtime_encoder_works(str(executable), name):
+            working.append(name)
+            break
     if "libx264" in compiled:
         working.append("libx264")
-    return working
+    return tuple(working)
+
+
+def available_encoders(ffmpeg: Path | None = None) -> list[str]:
+    """Return one safe hardware choice plus the CPU fallback.
+
+    ``functools.lru_cache`` permits duplicate execution when several threads
+    miss the same key concurrently.  The explicit lock sits outside the
+    cached helper so only one request performs the first driver probe; waiting
+    browser/self-check requests reuse its completed value.
+    """
+
+    executable = ffmpeg or resolve_ffmpeg()
+    if executable is None:
+        return []
+    with _ENCODER_PROBE_LOCK:
+        return list(_available_encoders_cached(str(executable)))
+
+
+# Preserve the small public cache-control surface used by diagnostics/tests
+# and by ``mark_encoder_unavailable`` without exposing the private helper.
+available_encoders.cache_clear = (  # type: ignore[attr-defined]
+    _available_encoders_cached.cache_clear
+)
 
 
 def embedded_kokoro_available() -> bool:

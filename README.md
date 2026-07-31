@@ -1,6 +1,15 @@
 # StoryForge Studio
 
-> 当前稳定源码版本：`0.4.1`。完整程序位于 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio\`，EXE SHA-256 为 `038ADADCB27368BA5A24BB81E13D3347FFAD734EA5BE31322AB98294D0006FB1`；冻结态启动、内置 FFmpeg、Kokoro 实际合成、60 FPS 完整成片与独立 MP3 均已通过本机验收。员工更新包已经发布到 Hub，员工电脑联网并重启 StoryForge 后即可自动取得 0.4.1；实际安装状态仍以“多电脑协同”中的设备版本为准。
+> 当前稳定源码版本：`0.4.4`。员工版采用单目录便携交付，推荐把完整目录解压到 `D:\StoryForge`；程序、组件和全部运行数据均归属这一目录。完整安装与员工更新使用同一个包：`D:\StoryForgeBuildTemp\delivery\0.4.4-stable-final\StoryForge-0.4.4-Windows-x64.zip`，SHA-256 为 `85b9ecd1914d4076ada7ad656573be6cf2161ffab7693224996aab519f2eeb1f`。完整验收信息见 [0.4.4 稳定版交付报告](docs/V0.4.4_STABLE_RELEASE.md)。
+
+## 0.4.4 员工版安装约定
+
+- 必须复制或解压**整个发布目录**，不能只发送 EXE，也不能在 ZIP 内直接运行。推荐目录为 `D:\StoryForge`：路径只用英文字母、数字及常规 ASCII 符号，位于本地固定磁盘且当前用户可写。
+- 不要安装到中文/Unicode 路径、`Program Files`、OneDrive/网盘同步目录、网络共享或 U 盘。程序会在不合格路径创建运行数据前直接停止并给出搬移提示。
+- 所有可变运行数据统一位于 `D:\StoryForge\StoryForgeData`，包括设置、账号/连接状态、数据库、日志、WebView 数据、更新状态、渲染工作区、模型与语音缓存和临时文件。员工主动选择的视频素材、音乐及最终输出目录仍可放在其他本地磁盘。
+- 后续更新包只能替换程序文件，**不得包含、覆盖或删除 `StoryForgeData`**。0.4.4 的安装、排障、备份和卸载都以这一目录边界为准。
+- **0.4.2 升级到 0.4.3 是一次例外的受控迁移。**由于 0.4.2 旧更新器存在缺陷，严禁通过 0.4.2 的自动更新向员工机推送 0.4.3。管理员须先停止旧程序与 Worker，再把完整 0.4.3 包部署到 `D:\StoryForge`，由首次启动安全复制旧 C 盘长期数据。新目录已有文件不会被旧数据覆盖；旧设置、数据库、日志、命令/Manifest 和未知文件保留，缓存、临时文件、旧更新包和可重新生成的渲染媒体不会迁移。确认 0.4.3 真实任务成功前，不要人工删除旧 C 盘目录。
+- 便携版日志入口为 `D:\StoryForge\StoryForgeData\logs`；单任务详细错误位于 `D:\StoryForge\StoryForgeData\render-work\<批次>\<任务>\job-error.log` 或 `render-error.log`。完整迁移规则、更新流程和回滚步骤见 [Windows 部署说明](docs/DEPLOYMENT_WINDOWS.md) 与 [局域网软件更新](docs/AUTO_UPDATE.md)。
 
 局域网网页端与桌面端使用同一套账号、页面和制作能力。浏览器中的资料操作由 Hub 处理；试听配音、选择素材、FFmpeg 渲染和输出则交给当前员工电脑的“本机制作服务”。员工首次在 EXE 中用账号密码登录后，该服务会自动登记并随 Windows 登录运行，无需一直打开 StoryForge 完整窗口。最短使用流程见 [网页端使用说明](docs/WEB_ACCESS.md)。
 
@@ -130,7 +139,7 @@ py -3 -m venv .venv
 6. 在即时预览中检查版式和效果；重点确认顶部口令卡全程可见、结尾小说封面铺满全屏、CTA 旁白使用普通字幕同步显示。确认配置后点击“直接生成完整视频”，系统立即把本批完整任务加入队列；不会生成或审批中间视频文件。
 7. 提交成功后不用等待：制作台会保留女声、样式、节奏和本机目录，清空口令、发布账号与分集并进入下一批。重新选择这三项即可继续提交；多个批次按提交先后严格排队。任一视频失败会记录原因并跳过，不会让后续视频或下一批停住。
 
-员工选择的输出目录只展示便于发布的批次文件夹：`待发布/<平台>_<口令>_<小说>_B<批次8位>/`。默认模式下，批次内只平铺每条任务同基名的最终 MP4 与纯旁白 MP3；`audio_only` 模式固定只生成一份最终 MP3；`reuse_audio` 使用 StoryForge 输出的 MP3 更换视频素材并生成新 MP4。MP3 自身内嵌小说、口令、正文和精确字幕时间索引，可复制到其他员工电脑继续换素材，不额外生成旁车文件；缺少该索引的外部或旧版 MP3 会被拒绝，避免字幕、配音和口令错配。文件名包含批内序号、平台、口令、E001/E002、变体号和批次短 ID，排序、复制和批量发布都不需要进入多层目录。`manifest.json`、`quality-check.log`、ASS、内部 WAV、原稿、旁白稿、渲染命令、恢复日志和缓存统一放在当前员工 Windows 账号的 `%APPDATA%\StoryForgeStudio\render-work\<批次>\<任务>/` 等应用数据目录，不混入员工可见的批次发布文件夹；同卷原子发布只使用输出根目录下临时隐藏 staging，完成或恢复后清理。Hub 仅保存元数据、校验和本机引用，不复制上述文件。旧接口中的 `export_narration_audio=true`、`false` 或缺失都安全迁移为默认 `video_and_mp3`。当前设置 Schema 为 19。每个批次仍保存独立卷宗、持久化总视频数、完成/失败计数和总体进度；旧版本的多层目录与旧记录继续兼容读取。
+员工选择的输出目录只展示便于发布的批次文件夹：`待发布/<平台>_<口令>_<小说>_B<批次8位>/`。默认模式下，批次内只平铺每条任务同基名的最终 MP4 与纯旁白 MP3；`audio_only` 模式固定只生成一份最终 MP3；`reuse_audio` 使用 StoryForge 输出的 MP3 更换视频素材并生成新 MP4。MP3 自身内嵌小说、口令、正文和精确字幕时间索引，可复制到其他员工电脑继续换素材，不额外生成旁车文件；缺少该索引的外部或旧版 MP3 会被拒绝，避免字幕、配音和口令错配。文件名包含批内序号、平台、口令、E001/E002、变体号和批次短 ID，排序、复制和批量发布都不需要进入多层目录。`manifest.json`、`quality-check.log`、ASS、内部 WAV、原稿、旁白稿、渲染命令、恢复日志和缓存统一放在 `D:\StoryForge\StoryForgeData\render-work\<批次>\<任务>\` 等便携数据目录，不混入员工可见的批次发布文件夹；同卷原子发布只使用输出根目录下临时隐藏 staging，完成或恢复后清理。Hub 仅保存元数据、校验和本机引用，不复制上述文件。旧接口中的 `export_narration_audio=true`、`false` 或缺失都安全迁移为默认 `video_and_mp3`。当前设置 Schema 为 19。每个批次仍保存独立卷宗、持久化总视频数、完成/失败计数和总体进度；旧版本的多层目录与旧记录继续兼容读取。
 
 ## 文本服务
 
@@ -141,7 +150,7 @@ py -3 -m venv .venv
 | Cloudflare Workers AI | API Key、完整 API 地址；可选模型 | 当前界面未单独填写 Account ID，因此请把完整推理地址填入“API 地址”。 |
 | Ollama | 本机先安装并启动 Ollama；可选地址与模型 | 默认地址为 `http://127.0.0.1:11434/api/chat`，默认模型为 `llama3.1:8b`。适合有足够内存/显存的电脑。 |
 
-云端文本服务失败时，如果启用了“服务失败时切换”，任务会记录原因并切换到本地规则模式。API Key 使用当前 Windows 用户的 DPAPI 加密，配置存放于 `%APPDATA%\StoryForgeStudio`。
+云端文本服务失败时，如果启用了“服务失败时切换”，任务会记录原因并切换到本地规则模式。API Key 使用当前 Windows 用户的 DPAPI 加密；员工便携版配置存放于 `D:\StoryForge\StoryForgeData`。
 
 ## 女声服务
 
@@ -165,7 +174,7 @@ py -3 -m venv .venv
 
 题材声音使用语义档案，切换服务时自动映射：戏剧张力、温暖亲密、冷静低沉、清晰强势。同一批视频只使用一个选定女声，但下一批可重新试听和选择，并默认沿用上次成功音色。默认目标语速为推荐档 240 WPM；制作台提供舒适 220、推荐 240、快速 260、极快 280，以及 200–280 WPM 自定义值。切换语速会生成并自动播放 8–12 秒真实试听，缓存相同小说、声音和语速的结果。视频素材速度由员工固定选择，支持 1.0/1.1/1.25/1.4/1.5× 预设及 0.8–3.0× 自定义；多素材优先硬切，也可选择 0.2 秒柔和过渡，不进行智能变速或渲染后的相似度扫描。背景音乐默认 28%，可自动匹配、手动指定或完全关闭；启用时旁白出现会自动压低音乐而不会盖过人声。
 
-本地和云端配音都会使用逐句 WAV 缓存；相同文本、服务、模型、女声和语速再次生成时会直接复用，任务中断后也能保留已经完成的句子。缓存默认位于 `%LOCALAPPDATA%\StoryForgeStudio\cache\tts`。
+本地和云端配音都会使用逐句 WAV 缓存；相同文本、服务、模型、女声和语速再次生成时会直接复用，任务中断后也能保留已经完成的句子。员工便携版缓存位于 `D:\StoryForge\StoryForgeData\cache\tts`。
 
 ### Edge TTS（无需 API Key，需联网）
 
@@ -190,8 +199,13 @@ python -m pip install "edge-tts>=7.2,<8"
 构建脚本使用独立的 `.build-venv`，不会覆盖当前 Python 环境。团队员工版必须在构建时写入 Hub 地址；该文件只含公开地址，不含账号、密码或内部设备凭据：
 
 ```powershell
-& '.\scripts\build_exe.ps1' -HubEndpoint 'http://10.0.0.225:8765'
+& '.\scripts\build_exe.ps1' `
+  -OutputDirectory 'D:\StoryForgeBuildTemp\dist' `
+  -WorkDirectory 'D:\StoryForgeBuildTemp\work' `
+  -HubEndpoint 'http://10.0.0.225:8765'
 ```
+
+生产构建应始终像上面一样显式传入两个纯英文/ASCII 目录。若仅作本机临时构建且省略这两个参数，脚本在源码路径含中文时会自动改用源码所在盘根目录下的 `StoryForgeBuildTemp\dist` 与 `StoryForgeBuildTemp\work`，避免 PyInstaller 在中文工作路径中失败。
 
 默认生成 onedir 发布目录：
 
@@ -201,12 +215,15 @@ dist\StoryForge Studio\
 └─ storyforge-connection.json
 ```
 
-当前稳定目录为 `D:\StoryForgeBuildTemp\release\0.4.1-stable\StoryForge Studio`；其 EXE SHA-256 为 `038ADADCB27368BA5A24BB81E13D3347FFAD734EA5BE31322AB98294D0006FB1`。员工更新 ZIP 为 `D:\StoryForgeBuildTemp\updates\StoryForge-0.4.1.zip`，大小 717,189,196 字节，SHA-256 为 `172730D7FDA5DABDAD956CC56D200FAD8D57EF3DB6EDB0FBFD179AE7D070F59A`。Hub 公告文件为 `StoryForge-0.4.1-172730d7fda5.zip`。旧版发布摘要仅作历史记录，不能把旧产物改名冒充本版；员工电脑是否已安装成功，应以设备上报版本和一次真实任务冒烟为准。
+0.4.4 的构建产物必须先通过冻结态启动、内置 FFmpeg/TTS、真实渲染、升级迁移和员工机冒烟验收，再写入最终发布清单。完整安装与 Hub 更新使用同一个已验收 ZIP，ZIP 根目录不包含 `StoryForgeData`。最终包路径、大小和 SHA-256 见 [0.4.4 稳定版交付报告](docs/V0.4.4_STABLE_RELEASE.md)。
 
 指定输出目录：
 
 ```powershell
-& '.\scripts\build_exe.ps1' -OutputDirectory 'D:\StoryForgeBuild' -HubEndpoint 'http://10.0.0.225:8765'
+& '.\scripts\build_exe.ps1' `
+  -OutputDirectory 'D:\StoryForgeBuildTemp\dist' `
+  -WorkDirectory 'D:\StoryForgeBuildTemp\work' `
+  -HubEndpoint 'http://10.0.0.225:8765'
 ```
 
 轻量 EXE 包含桌面/网页界面、本机制作服务和 FFmpeg，但不捆绑体积较大的本地 Kokoro/PyTorch 运行时。轻量版可使用 Edge TTS、Deepgram，或连接独立的本地 Kokoro HTTP 服务。完整窗口关闭后，已启用的本机制作服务仍可继续为网页提供上述能力。
@@ -214,7 +231,11 @@ dist\StoryForge Studio\
 需要把进程内 Kokoro 一并打进 EXE 时，在配置较好的构建电脑上运行：
 
 ```powershell
-& '.\scripts\build_exe.ps1' -WithLocalAI -HubEndpoint 'http://10.0.0.225:8765'
+& '.\scripts\build_exe.ps1' `
+  -WithLocalAI `
+  -OutputDirectory 'D:\StoryForgeBuildTemp\dist' `
+  -WorkDirectory 'D:\StoryForgeBuildTemp\work' `
+  -HubEndpoint 'http://10.0.0.225:8765'
 ```
 
 `-WithLocalAI` 会把 Kokoro/PyTorch 运行时收进 EXE，并校验、复制源码根目录 `local-ai\kokoro` 到发布目录。若源码根尚未准备离线资产，先导出完整模型与多语种女声：
@@ -298,7 +319,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 **硬件编码失败**
 
-更新显卡驱动。自动模式会做一次短探测，但远程桌面、驱动更新和显卡占用仍可能影响编码器；如需强制 CPU 编码，请关闭软件，把 `%APPDATA%\StoryForgeStudio\settings.json` 中 `settings.video_encoder` 改为 `libx264` 后再启动。
+更新显卡驱动。自动模式会做一次短探测，但远程桌面、驱动更新和显卡占用仍可能影响编码器；如需强制 CPU 编码，请关闭软件，把 `D:\StoryForge\StoryForgeData\settings.json` 中 `settings.video_encoder` 改为 `libx264` 后再启动。
 
 **本地 Kokoro 提示未安装**
 

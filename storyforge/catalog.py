@@ -7754,31 +7754,46 @@ class CatalogRepository:
                 )
                 self._sync_record_attempt(connection, updated)
                 result = self._record_dict(updated)
-                self._audit(
-                    connection,
-                    action=action,
-                    entity_type="production_record",
-                    entity_id=record_id,
-                    actor_user_id=actor_user_id,
-                    before=before,
-                    after={
-                        key: result[key]
-                        for key in (
-                            "draft_id",
-                            "job_id",
-                            "novel_id",
-                            "binding_id",
-                            "episode_id",
-                            "publishing_account_id",
-                            "variant_index",
-                            "promo_code_snapshot",
-                            "status",
-                            "progress",
-                            "output_path",
-                            "error_message",
-                        )
-                    },
+                audit_keys = (
+                    "draft_id",
+                    "job_id",
+                    "novel_id",
+                    "binding_id",
+                    "episode_id",
+                    "publishing_account_id",
+                    "variant_index",
+                    "promo_code_snapshot",
+                    "status",
+                    "progress",
+                    "output_path",
+                    "error_message",
                 )
+                audit_after = {key: result[key] for key in audit_keys}
+                # FFmpeg reports progress several times per second. Persisting
+                # that current state is useful, but storing a full immutable
+                # before/after audit event for every percentage creates tens
+                # of thousands of duplicate rows per long render. Audit the
+                # creation and business transitions (status/result/error)
+                # while treating a progress-only projection as telemetry.
+                material_audit_keys = tuple(
+                    key for key in audit_keys if key != "progress"
+                )
+                should_audit = action == "production_record.created" or before is None
+                if not should_audit:
+                    should_audit = any(
+                        before.get(key) != audit_after.get(key)
+                        for key in material_audit_keys
+                    )
+                if should_audit:
+                    self._audit(
+                        connection,
+                        action=action,
+                        entity_type="production_record",
+                        entity_id=record_id,
+                        actor_user_id=actor_user_id,
+                        before=before,
+                        after=audit_after,
+                    )
                 return result
         except sqlite3.IntegrityError as error:
             if "job_id" in str(error).casefold() or "unique constraint" in str(error).casefold():

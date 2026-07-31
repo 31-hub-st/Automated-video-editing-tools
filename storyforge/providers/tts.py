@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -18,7 +19,7 @@ import wave
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,14 +50,17 @@ _SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _TTS_CACHE_SCHEMA = "storyforge-tts-wav-v1"
 _TTS_CACHE_LOCKS: dict[str, threading.RLock] = {}
 _TTS_CACHE_LOCKS_GUARD = threading.Lock()
-_TTS_CACHE_DEFAULT_MAX_BYTES = 5 * 1024 * 1024 * 1024
-_TTS_CACHE_DEFAULT_MAX_AGE_DAYS = 30.0
+_TTS_CACHE_DEFAULT_MAX_BYTES = 1024 * 1024 * 1024
+_TTS_CACHE_DEFAULT_MAX_AGE_DAYS = 14.0
 _TTS_CACHE_PRUNE_INTERVAL_SECONDS = 15 * 60
 _TTS_CACHE_PRUNE_LOCK = threading.Lock()
 _TTS_CACHE_LAST_PRUNED: dict[str, float] = {}
 _KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
 _KOKORO_MODEL_FILES = ("config.json", "kokoro-v1_0.pth")
 _KOKORO_VOICE_IDS = ("af_heart", "af_bella", "af_nicole", "af_sarah")
+_KOKORO_DEFAULT_DEVICE = "cpu"
+_KOKORO_DEFAULT_INTRAOP_THREADS = 2
+_KOKORO_DEFAULT_INTEROP_THREADS = 1
 _EDGE_PROVIDER_ALIASES = frozenset(
     {"edge", "edge_tts", "microsoft_edge", "microsoft_edge_tts"}
 )
@@ -1726,6 +1730,80 @@ class KokoroProvider(TTSProvider):
 KokoroTTSProvider = KokoroProvider
 
 
+def _windows_ascii_short_path(path: Path) -> Path | None:
+    """Return an existing path's DOS short form when Windows provides one."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = int(
+            ctypes.windll.kernel32.GetShortPathNameW(
+                str(path),
+                buffer,
+                len(buffer),
+            )
+        )
+        if length <= 0 or length >= len(buffer):
+            return None
+        candidate = str(buffer.value or "").strip()
+        if not candidate or not candidate.isascii():
+            return None
+        return Path(candidate)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _windows_espeak_cache_roots(
+    configured_cache: str,
+    loader_version: str,
+    *,
+    portable: bool,
+) -> tuple[Path, ...]:
+    """Build ordered ASCII cache roots without leaving StoryForgeData.
+
+    Portable startup rejects a non-ASCII installation root before any data or
+    migration is created.  The short-path candidate is retained as a safe
+    compatibility alias for existing non-portable/source installations; both
+    aliases still point to the configured cache's physical files.
+    """
+
+    configured = str(configured_cache or "").strip()
+    candidates: list[Path] = []
+    configured_path: Path | None = None
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if portable and not str(configured_path).isascii():
+            return ()
+        candidates.append(
+            configured_path
+            / "StoryForge"
+            / "runtime"
+            / f"espeakng-loader-{loader_version}"
+        )
+        short_path = _windows_ascii_short_path(configured_path)
+        if short_path is not None:
+            candidates.append(
+                short_path
+                / "StoryForge"
+                / "runtime"
+                / f"espeakng-loader-{loader_version}"
+            )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        value = str(candidate)
+        key = ntpath.normcase(ntpath.normpath(value))
+        if key in seen or not value.isascii():
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return tuple(unique)
+
+
 def _prepare_windows_espeak_loader() -> None:
     """Relocate eSpeak resources when their Windows path is not ASCII-safe.
 
@@ -1760,21 +1838,33 @@ def _prepare_windows_espeak_loader() -> None:
         except PackageNotFoundError:
             loader_version = "bundled"
 
-        cache_bases = [
-            os.environ.get("STORYFORGE_ESPEAK_CACHE", ""),
-            os.environ.get("LOCALAPPDATA", ""),
-            str(Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Documents"),
-            tempfile.gettempdir(),
-        ]
+        configured_cache = str(
+            os.environ.get("STORYFORGE_ESPEAK_CACHE") or ""
+        ).strip()
+        portable = os.environ.get("STORYFORGE_PORTABLE_MODE") == "1"
+        cache_roots = list(
+            _windows_espeak_cache_roots(
+                configured_cache,
+                loader_version,
+                portable=portable,
+            )
+        )
+        if not portable:
+            cache_bases = [
+                os.environ.get("LOCALAPPDATA", ""),
+                str(Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Documents"),
+                tempfile.gettempdir(),
+            ]
+            for raw_base in dict.fromkeys(item for item in cache_bases if item):
+                cache_roots.append(
+                    Path(raw_base)
+                    / "StoryForge"
+                    / "runtime"
+                    / f"espeakng-loader-{loader_version}"
+                )
         cache_error: OSError | None = None
         cache_paths: tuple[Path, Path] | None = None
-        for raw_base in dict.fromkeys(item for item in cache_bases if item):
-            cache_root = (
-                Path(raw_base)
-                / "StoryForge"
-                / "runtime"
-                / f"espeakng-loader-{loader_version}"
-            )
+        for cache_root in cache_roots:
             if not str(cache_root).isascii():
                 continue
 
@@ -1815,6 +1905,156 @@ def _prepare_windows_espeak_loader() -> None:
         ) from error
 
 
+def _kokoro_option(
+    options: Mapping[str, Any],
+    names: Sequence[str],
+    default: Any,
+    *,
+    environment_name: str = "",
+) -> Any:
+    for name in names:
+        if name in options:
+            return options[name]
+    if environment_name:
+        environment_value = str(os.environ.get(environment_name) or "").strip()
+        if environment_value:
+            return environment_value
+    return default
+
+
+def _kokoro_thread_count(
+    options: Mapping[str, Any],
+    names: Sequence[str],
+    default: int,
+    provider: str,
+    *,
+    environment_name: str,
+) -> int:
+    raw_value = _kokoro_option(
+        options,
+        names,
+        default,
+        environment_name=environment_name,
+    )
+    if isinstance(raw_value, bool):
+        value = 0
+    else:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = 0
+    if value <= 0:
+        raise ProviderConfigurationError(
+            f"Kokoro option {names[0]} must be a positive integer.",
+            provider=provider,
+        )
+    return value
+
+
+def _configure_kokoro_torch(
+    torch_runtime: Any, options: Mapping[str, Any], provider: str
+) -> tuple[int, int]:
+    """Apply conservative CPU thread defaults without destabilising PyTorch.
+
+    PyTorch only permits ``set_num_interop_threads`` before inter-op work has
+    started.  Remember each attempted value on the imported runtime so cached
+    pipelines and repeated provider construction remain harmless even when the
+    first attempt was already too late.
+    """
+
+    intraop_threads = _kokoro_thread_count(
+        options,
+        (
+            "torch_num_threads",
+            "torch_intra_op_threads",
+            "torch_intraop_threads",
+            "intra_op_threads",
+            "intraop_threads",
+            "num_threads",
+            "threads",
+        ),
+        _KOKORO_DEFAULT_INTRAOP_THREADS,
+        provider,
+        environment_name="STORYFORGE_KOKORO_TORCH_THREADS",
+    )
+    interop_threads = _kokoro_thread_count(
+        options,
+        (
+            "torch_num_interop_threads",
+            "torch_inter_op_threads",
+            "torch_interop_threads",
+            "inter_op_threads",
+            "interop_threads",
+            "num_interop_threads",
+        ),
+        _KOKORO_DEFAULT_INTEROP_THREADS,
+        provider,
+        environment_name="STORYFORGE_KOKORO_INTEROP_THREADS",
+    )
+
+    settings = (
+        ("set_num_threads", "_storyforge_kokoro_intraop_threads", intraop_threads),
+        (
+            "set_num_interop_threads",
+            "_storyforge_kokoro_interop_threads",
+            interop_threads,
+        ),
+    )
+    for setter_name, marker_name, value in settings:
+        if getattr(torch_runtime, marker_name, None) == value:
+            continue
+        # Mark before calling: a RuntimeError means the inter-op pool is already
+        # initialized, so retrying the same setting cannot make it succeed.
+        try:
+            setattr(torch_runtime, marker_name, value)
+        except Exception:
+            pass
+        setter = getattr(torch_runtime, setter_name, None)
+        if not callable(setter):
+            continue
+        try:
+            setter(value)
+        except Exception:
+            # CPU-only/minimal builds may omit support, and inter-op changes are
+            # expressly one-shot in PyTorch.  Neither should abort narration.
+            pass
+    return intraop_threads, interop_threads
+
+
+def _kokoro_device(
+    torch_runtime: Any, options: Mapping[str, Any], provider: str
+) -> str:
+    raw_device = _kokoro_option(
+        options,
+        ("device", "kokoro_device", "torch_device"),
+        _KOKORO_DEFAULT_DEVICE,
+        environment_name="STORYFORGE_KOKORO_DEVICE",
+    )
+    device = str(raw_device or _KOKORO_DEFAULT_DEVICE).strip().casefold()
+    if device not in {"cpu", "cuda", "auto"}:
+        raise ProviderConfigurationError(
+            "Kokoro option device must be one of: cpu, cuda, auto.",
+            provider=provider,
+        )
+    if device == "cpu":
+        return device
+
+    cuda = getattr(torch_runtime, "cuda", None)
+    is_available = getattr(cuda, "is_available", None)
+    try:
+        cuda_available = bool(is_available()) if callable(is_available) else False
+    except Exception:
+        cuda_available = False
+    if device == "auto":
+        return "cuda" if cuda_available else "cpu"
+    if not cuda_available:
+        raise ProviderConfigurationError(
+            "Kokoro device is set to cuda, but CUDA is not available.",
+            provider=provider,
+        )
+    return "cuda"
+
+
 class EmbeddedKokoroProvider(TTSProvider):
     """Use the official Kokoro Python package in-process and cache its model."""
 
@@ -1836,14 +2076,23 @@ class EmbeddedKokoroProvider(TTSProvider):
 
         with cls._pipeline_lock:
             released = len(cls._pipelines)
-            cached_pipelines = tuple(cls._pipelines.values())
+            cached_pipelines = tuple(cls._pipelines.items())
+            used_cuda = any(
+                str(cache_key).endswith(":cuda")
+                for cache_key, _pipeline in cached_pipelines
+            )
             cls._pipelines.clear()
             # Drop every temporary strong reference before collecting cycles.
             del cached_pipelines
             loaded_torch = sys.modules.get("torch")
-            if released == 0 and loaded_torch is None:
-                # Edge/Deepgram/HTTP Kokoro jobs must not import the heavyweight
-                # local ML runtime merely to release a cache that never existed.
+            if not used_cuda:
+                # CPU pipelines must not initialize a CUDA context merely to
+                # clear an allocator they never used.  This also keeps Edge,
+                # Deepgram and HTTP Kokoro jobs from importing local PyTorch.
+                try:
+                    gc.collect()
+                except Exception:
+                    pass
                 return released
             try:
                 gc.collect()
@@ -1917,10 +2166,18 @@ class EmbeddedKokoroProvider(TTSProvider):
             )
         _ensure_kokoro_language_dependencies(selected_code, self.config.name)
         with self._pipeline_lock:
-            if selected_code in self._pipelines:
-                return self._pipelines[selected_code]
-            assets = _offline_kokoro_assets()
             try:
+                # Import and configure torch before importing Kokoro or creating
+                # a model.  This is the earliest lazy-loading boundary where the
+                # provider-specific thread policy is known.
+                import torch
+
+                _configure_kokoro_torch(torch, self.config.options, self.config.name)
+                device = _kokoro_device(torch, self.config.options, self.config.name)
+                cache_key = selected_code if device == "cpu" else f"{selected_code}:{device}"
+                if cache_key in self._pipelines:
+                    return self._pipelines[cache_key]
+                assets = _offline_kokoro_assets()
                 _prepare_windows_espeak_loader()
                 _prepare_huggingface_cache()
                 KModel, KPipeline = _import_kokoro_runtime()
@@ -1937,9 +2194,6 @@ class EmbeddedKokoroProvider(TTSProvider):
                     # an already constructed KModel to KPipeline skips its
                     # automatic ``to(device).eval()`` call; leaving dropout in
                     # training mode makes repeated previews sound inconsistent.
-                    import torch
-
-                    device = "cuda" if torch.cuda.is_available() else "cpu"
                     model = KModel(
                         repo_id=_KOKORO_REPO_ID,
                         config=str(assets / "config.json"),
@@ -1963,6 +2217,7 @@ class EmbeddedKokoroProvider(TTSProvider):
                             pipeline = KPipeline(
                                 lang_code=selected_code,
                                 repo_id=_KOKORO_REPO_ID,
+                                device=device,
                             )
                             break
                         except JobCancelledError:
@@ -1985,7 +2240,7 @@ class EmbeddedKokoroProvider(TTSProvider):
                     f"Kokoro 本地模型加载失败：{error}",
                     provider=self.config.name,
                 ) from error
-            self._pipelines[selected_code] = pipeline
+            self._pipelines[cache_key] = pipeline
             raise_if_cancelled()
             return pipeline
 
@@ -2087,6 +2342,184 @@ class EmbeddedKokoroProvider(TTSProvider):
         return buffer.getvalue()
 
 
+class IsolatedKokoroProvider(TTSProvider):
+    """Run one complete Kokoro request in a disposable child process.
+
+    PyTorch's CPU allocator is allowed to retain committed pages after Python
+    references have been released.  Keeping embedded Kokoro in the long-lived
+    production worker therefore makes the following FFmpeg job depend on the
+    allocator's implementation details.  The child owns the model, all native
+    libraries and every sentence in one request; process exit is the only
+    reliable cross-platform release boundary.
+    """
+
+    DEFAULT_MODEL = EmbeddedKokoroProvider.DEFAULT_MODEL
+    DEFAULT_VOICE = EmbeddedKokoroProvider.DEFAULT_VOICE
+
+    @property
+    def default_voice(self) -> str:
+        return str(self.config.options.get("voice") or self.DEFAULT_VOICE)
+
+    def _generate_audio(
+        self, text: str, voice: str, speed: float, output_path: Path
+    ) -> bytes:
+        raise RuntimeError(
+            "IsolatedKokoroProvider synthesizes a complete request in its child process."
+        )
+
+    def synthesize(
+        self,
+        request: TTSRequest | str | Sequence[str],
+        output_dir: str | Path | None = None,
+        *,
+        voice: str = "",
+        speed: float = 1.0,
+        file_stem: str = "sentence",
+    ) -> TTSResult:
+        if isinstance(request, TTSRequest):
+            if output_dir is not None or voice or speed != 1.0 or file_stem != "sentence":
+                raise TypeError("Extra synthesis options cannot accompany a TTSRequest.")
+            sentences = [
+                str(item).strip() for item in request.sentences if str(item).strip()
+            ]
+            target = request.output_dir
+            selected_voice = request.voice
+            selected_speed = request.speed
+            selected_stem = request.file_stem
+        else:
+            if output_dir is None:
+                raise TypeError("output_dir is required unless a TTSRequest is supplied.")
+            sentences = (
+                split_sentences(request)
+                if isinstance(request, str)
+                else [str(item).strip() for item in request if str(item).strip()]
+            )
+            target = output_dir
+            selected_voice = voice
+            selected_speed = speed
+            selected_stem = file_stem
+        if not sentences:
+            raise ValueError("At least one non-empty sentence is required.")
+        if not 0.5 <= float(selected_speed) <= 2.0:
+            raise ValueError("TTS speed must be between 0.5 and 2.0.")
+
+        target_path = Path(target).expanduser().resolve()
+        request_root = target_path.parent if target_path.suffix.casefold() == ".wav" else target_path
+        request_root.mkdir(parents=True, exist_ok=True)
+        request_dir = Path(
+            tempfile.mkdtemp(prefix=".storyforge-kokoro-", dir=request_root)
+        )
+        request_path = request_dir / "request.json"
+        response_path = request_dir / "response.json"
+        payload = {
+            "config": {
+                "name": self.config.name,
+                "model": self.config.model,
+                "endpoint": "",
+                "api_key": "",
+                "timeout_seconds": self.config.timeout_seconds,
+                "options": dict(self.config.options),
+            },
+            "sentences": sentences,
+            "output_dir": str(target_path),
+            "voice": selected_voice,
+            "speed": float(selected_speed),
+            "file_stem": selected_stem,
+        }
+        request_path.write_text(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            encoding="utf-8",
+            newline="\n",
+        )
+        if bool(getattr(sys, "frozen", False)):
+            command = [
+                sys.executable,
+                "--storyforge-kokoro-child",
+                str(request_path),
+                str(response_path),
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "storyforge.kokoro_child",
+                str(request_path),
+                str(response_path),
+            ]
+        try:
+            completed = run_cancellable_process(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=max(
+                    300.0,
+                    min(7200.0, float(self.config.timeout_seconds) * len(sentences)),
+                ),
+                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+            )
+            response: dict[str, Any] = {}
+            try:
+                if response_path.is_file():
+                    value = json.loads(response_path.read_text(encoding="utf-8"))
+                    if isinstance(value, dict):
+                        response = value
+            except (OSError, ValueError, TypeError):
+                response = {}
+            if completed.returncode != 0 or not response.get("ok"):
+                detail = str(
+                    response.get("error")
+                    or completed.stderr
+                    or completed.stdout
+                    or "Kokoro child process failed without diagnostics."
+                ).strip()
+                raise ProviderResponseError(
+                    f"Kokoro 本地配音子进程失败：{detail[-2000:]}",
+                    provider=self.config.name,
+                )
+            result_value = response.get("result")
+            if not isinstance(result_value, Mapping):
+                raise ProviderResponseError(
+                    "Kokoro 本地配音子进程没有返回有效结果。",
+                    provider=self.config.name,
+                )
+            segments_value = result_value.get("segments")
+            if not isinstance(segments_value, list):
+                raise ProviderResponseError(
+                    "Kokoro 本地配音子进程没有返回音频片段。",
+                    provider=self.config.name,
+                )
+            segments = tuple(
+                SpeechSegment(
+                    index=int(item["index"]),
+                    text=str(item["text"]),
+                    path=str(item["path"]),
+                    duration_seconds=float(item["duration_seconds"]),
+                    voice=str(item["voice"]),
+                    provider=str(item["provider"]),
+                )
+                for item in segments_value
+                if isinstance(item, Mapping)
+            )
+            if not segments:
+                raise ProviderResponseError(
+                    "Kokoro 本地配音子进程返回了空音频。",
+                    provider=self.config.name,
+                )
+            return TTSResult(
+                segments=segments,
+                provider=str(result_value.get("provider") or self.config.name),
+                model=str(result_value.get("model") or self.config.model),
+            )
+        finally:
+            try:
+                shutil.rmtree(request_dir)
+            except OSError:
+                pass
+
+
 def release_embedded_kokoro_runtime() -> int:
     """Public rendering-boundary hook for releasing cached Kokoro models."""
 
@@ -2114,7 +2547,9 @@ def create_tts_provider(
         "kokoro_cli",
     }:
         if not normalized.endpoint and not normalized.options.get("command"):
-            return EmbeddedKokoroProvider(normalized, transport)
+            if os.environ.get("STORYFORGE_KOKORO_CHILD") == "1":
+                return EmbeddedKokoroProvider(normalized, transport)
+            return IsolatedKokoroProvider(normalized, transport)
         return KokoroProvider(normalized, transport, runner=runner)
     raise ProviderConfigurationError(
         f"Unsupported TTS provider {normalized.name!r}. Supported providers are "
@@ -2133,6 +2568,7 @@ __all__ = [
     "KokoroProvider",
     "KokoroTTSProvider",
     "EmbeddedKokoroProvider",
+    "IsolatedKokoroProvider",
     "SpeechResult",
     "SpeechSegment",
     "TTSProvider",

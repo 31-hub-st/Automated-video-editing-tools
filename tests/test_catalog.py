@@ -2381,6 +2381,51 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
         serialized_audit = str(audit)
         self.assertNotIn("Chapter one begins", serialized_audit)
 
+    def test_progress_only_updates_do_not_expand_immutable_audit_history(self) -> None:
+        _novel, _binding, _code, draft = self.make_draft()
+        record = self.catalog.save_production_record(
+            {
+                "draft_id": draft["id"],
+                "job_id": "progress-telemetry-job",
+                "variant_index": 1,
+            }
+        )
+
+        for index in range(1, 100):
+            updated = self.catalog.save_production_record(
+                {
+                    "id": record["id"],
+                    "status": "queued",
+                    "progress": index / 100,
+                }
+            )
+        self.assertAlmostEqual(updated["progress"], 0.99)
+        audit = self.catalog.list_audit_events(
+            entity_type="production_record", limit=500
+        )
+        self.assertEqual(audit["total"], 1)
+        self.assertEqual(audit["items"][0]["action"], "production_record.created")
+
+        self.catalog.save_production_record(
+            {"id": record["id"], "status": "running", "progress": 0.99}
+        )
+        self.catalog.save_production_record(
+            {
+                "id": record["id"],
+                "status": "completed",
+                "progress": 1,
+                "output_path": r"D:\output\final.mp4",
+            }
+        )
+        audit = self.catalog.list_audit_events(
+            entity_type="production_record", limit=500
+        )
+        self.assertEqual(audit["total"], 3)
+        self.assertEqual(
+            {item["after"]["status"] for item in audit["items"]},
+            {"queued", "running", "completed"},
+        )
+
     def test_bootstrap_counts_failures_without_loading_record_bodies(self) -> None:
         _novel, _binding, _code, draft = self.make_draft()
         self.catalog.save_production_record(

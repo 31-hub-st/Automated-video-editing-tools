@@ -125,9 +125,17 @@ if (-not $workerFound) {
     Add-ReportLine '未发现本机制作服务。员工电脑请先登录并绑定主电脑，再运行 enable_storyforge_worker.cmd。'
 }
 
-$logRoot = Join-Path $env:LOCALAPPDATA 'StoryForgeStudio\logs'
+$portableDataRoot = Join-Path $exe.DirectoryName 'StoryForgeData'
+$portableLogRoot = Join-Path $portableDataRoot 'logs'
+$legacyLogRoot = Join-Path $env:LOCALAPPDATA 'StoryForgeStudio\logs'
+$logRoot = $(if (Test-Path -LiteralPath $portableDataRoot -PathType Container) {
+    $portableLogRoot
+} else {
+    $legacyLogRoot
+})
 $latestLog = Join-Path $logRoot 'startup-error-latest.log'
 Add-ReportLine ''
+Add-ReportLine ("StoryForge data directory: {0}" -f $(if (Test-Path -LiteralPath $portableDataRoot -PathType Container) { $portableDataRoot } else { 'legacy AppData layout' }))
 Add-ReportLine ("Startup log directory: {0}" -f $logRoot)
 if (Test-Path -LiteralPath $latestLog -PathType Leaf) {
     Add-ReportLine '--- startup-error-latest.log ---'

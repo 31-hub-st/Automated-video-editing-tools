@@ -28,14 +28,18 @@ from .models import (
 from .pipeline import safe_component
 from .providers.base import ProviderConfig, ProviderError
 from .providers.text import TextRequest, create_text_provider
-from .providers.tts import female_voice_candidates, kokoro_language_code
+from .providers.tts import (
+    available_female_voice_candidates,
+    ensure_kokoro_language_available,
+    kokoro_language_code,
+)
 from .style_options import preset_names, validate_style_patch
 from .services.manuscript_import import (
     ImportedManuscript,
     prepare_manuscript,
     prepare_manuscript_file,
 )
-from .services.media import MediaError, canonical_mood
+from .services.media import MediaError, VIDEO_EXTENSIONS, canonical_mood
 from .services.text_processing import count_words
 from .services.voice_preview import VoicePreviewService
 
@@ -73,6 +77,13 @@ _LOCAL_KOKORO_PROVIDER_ALIASES = frozenset(
         "kokoro_cli",
     }
 )
+
+
+# A current StoryForge regular render keeps its narration/caption alignment in
+# the employee workstation's private narration index.  That makes the finished
+# video a valid reuse source on the machine that rendered it, without restoring
+# the legacy extra MP3 output.  Portable audio-only exports remain MP3 files.
+_REUSABLE_NARRATION_EXTENSIONS = frozenset({".mp3"}) | VIDEO_EXTENSIONS
 
 
 class _RenderJobSpool:
@@ -781,6 +792,7 @@ class LibraryService:
                 raise ValueError("video_playback_speed 必须在 0.8 到 3.0 之间。")
             result["video_playback_speed"] = playback_speed
         clamp_int("preview_seconds", 12, 60)
+        clamp_float("intro_card_duration_seconds", 2.5, 8.0)
         if "output_fps" in incoming:
             try:
                 output_fps = int(incoming["output_fps"])
@@ -1543,15 +1555,9 @@ class LibraryService:
             )
             if candidates and matching_candidate is None:
                 raise ValueError("所选声音不在当前的3个试听候选中，请重新试听。")
-            if matching_candidate is not None:
-                try:
-                    preview_wpm = int(matching_candidate.get("narration_wpm") or 0)
-                except (TypeError, ValueError):
-                    preview_wpm = 0
-                if preview_wpm and preview_wpm != int(
-                    production_settings["narration_wpm"]
-                ):
-                    raise ValueError("语速已变化，请按当前 WPM 重新试听并选择女声。")
+            # Voice identity and speaking speed are independent.  A preview is
+            # still cached per WPM because its audio bytes differ, but changing
+            # WPM must never invalidate or silently replace the selected actor.
         episode_ids = [str(item) for item in list(value.get("episode_ids") or []) if str(item)]
         uses_total_count = (
             "target_video_count" in value
@@ -1963,10 +1969,21 @@ class LibraryService:
                 "小说语种尚未可靠确认，请先在小说库手动确认语种，"
                 "再生成女声候选。"
             )
-        tts_provider = str(
-            self._settings_getter().providers.tts_provider or ""
-        ).strip().casefold()
-        if not female_voice_candidates(tts_provider, language_code):
+        settings = self._settings_getter()
+        tts_provider = str(settings.providers.tts_provider or "").strip().casefold()
+        if tts_provider in _LOCAL_KOKORO_PROVIDER_ALIASES:
+            ensure_kokoro_language_available(
+                language_code,
+                provider=tts_provider or "local_kokoro",
+                endpoint=settings.providers.kokoro_endpoint,
+                command=settings.providers.kokoro_command,
+            )
+        if not available_female_voice_candidates(
+            tts_provider,
+            language_code,
+            endpoint=settings.providers.kokoro_endpoint,
+            command=settings.providers.kokoro_command,
+        ):
             language_name = str(novel.get("language_name") or language_code)
             raise ValueError(
                 f"当前配音服务 {tts_provider or '未配置'} 暂无{language_name}女声。"
@@ -2054,7 +2071,22 @@ class LibraryService:
             raise ValueError("请在制作台试听并选择本批女声。")
 
         provider = _canonical_voice_provider(raw_provider)
-        available = list(female_voice_candidates(provider, language))
+        settings = self._settings_getter()
+        if provider in _LOCAL_KOKORO_PROVIDER_ALIASES:
+            ensure_kokoro_language_available(
+                language,
+                provider=provider,
+                endpoint=settings.providers.kokoro_endpoint,
+                command=settings.providers.kokoro_command,
+            )
+        available = list(
+            available_female_voice_candidates(
+                provider,
+                language,
+                endpoint=settings.providers.kokoro_endpoint,
+                command=settings.providers.kokoro_command,
+            )
+        )
         if not available:
             language_name = str(novel.get("language_name") or language)
             raise ValueError(
@@ -2313,6 +2345,7 @@ class LibraryService:
             "subtitle_animation": settings.subtitle_animation,
             "intro_animation": settings.intro_animation,
             "preview_seconds": settings.preview_seconds,
+            "intro_card_duration_seconds": settings.intro_card_duration_seconds,
             "max_episode_minutes": settings.max_episode_minutes,
             "cover_animation": settings.cover_animation,
             "cover_outro_enabled": settings.cover_outro_enabled,
@@ -2444,7 +2477,13 @@ class LibraryService:
             or frozen_recipe.get("source_narration_audio")
             or ""
         ).strip()
+        source_narration_suffix = Path(source_narration_audio).suffix.casefold()
+        source_is_storyforge_video = (
+            output_mode == "reuse_audio" and source_narration_suffix in VIDEO_EXTENSIONS
+        )
         bgm_mode = str(frozen_recipe.get("bgm_mode") or "auto").strip().casefold()
+        if source_is_storyforge_video:
+            bgm_mode = "none"
         bgm_file = str(
             value.get("bgm_file") or frozen_recipe.get("bgm_file") or ""
         ).strip()
@@ -2469,9 +2508,11 @@ class LibraryService:
             raise ValueError("复用的旁白音频不存在，请重新选择。")
         if (
             output_mode == "reuse_audio"
-            and Path(source_narration_audio).suffix.casefold() != ".mp3"
+            and source_narration_suffix not in _REUSABLE_NARRATION_EXTENSIONS
         ):
-            raise ValueError("复用旁白目前只接受 StoryForge 配音文件。")
+            raise ValueError(
+                "复用旁白只接受 StoryForge 输出的 MP3 配音或 MP4/MOV/MKV/WEBM 成品视频。"
+            )
         if not folders["output_folder"]:
             raise ValueError("请选择输出文件夹。")
         Path(folders["output_folder"]).expanduser().mkdir(parents=True, exist_ok=True)
@@ -2568,6 +2609,12 @@ class LibraryService:
         )
         settings_snapshot["source_narration_audio"] = source_narration_audio
         settings_snapshot["bgm_file"] = bgm_file
+        if source_is_storyforge_video:
+            # The selected StoryForge video already contains its complete audio
+            # mix.  Adding another BGM track would duplicate the music.  The
+            # pipeline still requires the private StoryForge narration index,
+            # so an arbitrary external video cannot pass as a reuse source.
+            settings_snapshot["bgm_mode"] = "none"
         provider_snapshot = dict(settings_snapshot.get("providers") or {})
         provider_snapshot["tts_provider"] = locked_provider
         settings_snapshot["providers"] = provider_snapshot

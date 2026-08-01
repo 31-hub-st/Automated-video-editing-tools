@@ -30,6 +30,11 @@ from ..cancellation import (
     raise_if_cancelled,
     run_cancellable_process,
 )
+from ..tts_components import (
+    kokoro_component_manifest,
+    kokoro_language_component_health,
+    probe_kokoro_language_runtime,
+)
 from .base import (
     HTTPTransport,
     ProviderConfig,
@@ -145,6 +150,33 @@ class TTSVoiceOption:
     voice_id: str
     label: str
     profile: str
+
+
+class KokoroComponentError(ProviderConfigurationError):
+    """Structured, user-actionable failure for an incomplete local TTS pack."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "local_kokoro",
+        error_code: str = "tts_component_unavailable",
+        component_id: str = "kokoro.engine",
+        component_health: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, provider=provider, retryable=False)
+        self.error_code = str(error_code or "tts_component_unavailable")
+        self.component_id = str(component_id or "kokoro.engine")
+        self.component_health = dict(component_health or {})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "error_code": self.error_code,
+            "component_id": self.component_id,
+            "provider": self.provider,
+            "message": str(self),
+            "component_health": dict(self.component_health),
+        }
 
 
 _TTS_LANGUAGE_ALIASES = {
@@ -432,18 +464,6 @@ def edge_female_voice_candidates(
         _EDGE_VOICE_CACHE[cache_key] = (now, options)
     return options
 
-_KOKORO_LANGUAGE_DEPENDENCIES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "j": (
-        "pyopenjtalk-plus==0.4.1.post8",
-        ("pyopenjtalk", "fugashi", "jaconv", "mojimoji", "unidic_lite"),
-    ),
-    "z": (
-        "misaki[zh]",
-        ("jieba", "ordered_set", "pypinyin", "cn2an", "pypinyin_dict"),
-    ),
-}
-
-
 def normalize_tts_language(value: object = "en") -> str:
     """Normalize an app/BCP-47 language value to the TTS catalog key."""
 
@@ -479,6 +499,54 @@ def female_voice_candidates(
     if normalized_provider in _EDGE_PROVIDER_ALIASES:
         return edge_female_voice_candidates(normalized_language)
     return ()
+
+
+def available_female_voice_candidates(
+    provider: object,
+    language: object = "en",
+    *,
+    endpoint: object = "",
+    command: object = "",
+) -> tuple[TTSVoiceOption, ...]:
+    """Return voices the configured runtime can actually attempt to use.
+
+    The public catalog above remains the authoritative list of real provider
+    ids.  This narrower projection prevents the UI from offering Japanese or
+    Chinese local voices when that workstation is missing their tokenizer
+    pack.  An explicit HTTP/CLI service owns its own runtime and is therefore
+    not inspected through the desktop process.
+    """
+
+    catalog = female_voice_candidates(provider, language)
+    if not catalog:
+        return ()
+    normalized_provider = str(provider or "").strip().casefold().replace("-", "_")
+    if normalized_provider not in {
+        "kokoro",
+        "local",
+        "local_kokoro",
+        "kokoro_local",
+        "kokoro_http",
+        "kokoro_cli",
+    }:
+        return catalog
+    if str(endpoint or "").strip() or str(command or "").strip():
+        return catalog
+    try:
+        lang_code = KOKORO_LANGUAGE_CODES[normalize_tts_language(language)]
+    except (KeyError, ValueError):
+        return ()
+    health = kokoro_language_component_health(lang_code)
+    if not health.ready:
+        return ()
+
+    # If a local bundle exists, expose only voice tensors actually present in
+    # it.  With no bundle at all Kokoro can still obtain official voices from
+    # its configured Hugging Face cache/network, so keep the real catalog.
+    installed = _available_offline_kokoro_voice_ids()
+    if not installed:
+        return catalog
+    return tuple(option for option in catalog if option.voice_id in installed)
 
 
 def _voice_kokoro_language_codes(voice: object) -> set[str]:
@@ -524,31 +592,56 @@ def kokoro_language_code(language: object = "", voice: object = "") -> str:
 
 
 def _missing_kokoro_language_modules(lang_code: str) -> tuple[str, ...]:
-    dependency = _KOKORO_LANGUAGE_DEPENDENCIES.get(lang_code)
-    if dependency is None:
-        return ()
-    missing: list[str] = []
-    for module in dependency[1]:
-        try:
-            available = importlib.util.find_spec(module) is not None
-        except (ImportError, ModuleNotFoundError, ValueError):
-            available = False
-        if not available:
-            missing.append(module)
-    return tuple(missing)
+    health = kokoro_language_component_health(
+        lang_code,
+        module_finder=importlib.util.find_spec,
+    )
+    return tuple(
+        issue.subject
+        for issue in health.issues
+        if issue.code == "tts_component_module_missing"
+    )
 
 
 def _ensure_kokoro_language_dependencies(lang_code: str, provider: str) -> None:
+    # Keep the import-only probe as a small compatibility surface for existing
+    # diagnostics while the full health object also verifies package data.
     missing = _missing_kokoro_language_modules(lang_code)
-    if not missing:
+    health = probe_kokoro_language_runtime(lang_code)
+    if not missing and health.ready:
         return
     language_name = "日语" if lang_code == "j" else "中文"
-    raise ProviderConfigurationError(
-        f"Kokoro {language_name}组件未安装（缺少 {', '.join(missing)}）。"
-        "源码版请在 StoryForge 项目目录运行 "
-        "python -m pip install -r requirements-ai.txt 后重启；"
-        "其他电脑请安装包含对应语种组件的 StoryForge 版本。",
+    broken = missing or tuple(issue.subject for issue in health.issues)
+    first_code = (
+        "tts_component_module_missing"
+        if missing
+        else health.issues[0].code
+    )
+    raise KokoroComponentError(
+        f"Kokoro {language_name}组件不完整（{', '.join(broken)}）。"
+        "请安装包含对应语种资源的 StoryForge 完整版后重启；"
+        "源码版请运行 python -m pip install -r requirements-ai.txt。",
         provider=provider,
+        error_code=first_code,
+        component_id=health.component_id,
+        component_health=health.to_dict(),
+    )
+
+
+def ensure_kokoro_language_available(
+    language: object,
+    *,
+    provider: str = "local_kokoro",
+    endpoint: object = "",
+    command: object = "",
+) -> None:
+    """Fail early with structured details for an embedded language pack."""
+
+    if str(endpoint or "").strip() or str(command or "").strip():
+        return
+    _ensure_kokoro_language_dependencies(
+        kokoro_language_code(language),
+        provider,
     )
 
 
@@ -591,6 +684,21 @@ def _offline_kokoro_assets() -> Path | None:
         except OSError:
             continue
     return None
+
+
+def _available_offline_kokoro_voice_ids() -> frozenset[str]:
+    """Return non-empty voice tensors found in any configured local bundle."""
+
+    result: set[str] = set()
+    for root in _kokoro_runtime_roots():
+        voice_root = root / "voices"
+        try:
+            for path in voice_root.glob("*.pt"):
+                if path.is_file() and path.stat().st_size > 0:
+                    result.add(path.stem.casefold())
+        except OSError:
+            continue
+    return frozenset(result)
 
 
 def _prepare_huggingface_cache() -> Path:
@@ -2446,6 +2554,17 @@ class IsolatedKokoroProvider(TTSProvider):
                 str(request_path),
                 str(response_path),
             ]
+        child_environment = os.environ.copy()
+        component_paths = str(
+            child_environment.get("STORYFORGE_COMPONENT_PATHS") or ""
+        ).strip()
+        if component_paths and not bool(getattr(sys, "frozen", False)):
+            existing_python_path = str(child_environment.get("PYTHONPATH") or "").strip()
+            child_environment["PYTHONPATH"] = os.pathsep.join(
+                item
+                for item in (component_paths, existing_python_path)
+                if item
+            )
         try:
             completed = run_cancellable_process(
                 command,
@@ -2459,6 +2578,7 @@ class IsolatedKokoroProvider(TTSProvider):
                     min(7200.0, float(self.config.timeout_seconds) * len(sentences)),
                 ),
                 creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+                env=child_environment,
             )
             response: dict[str, Any] = {}
             try:
@@ -2475,6 +2595,20 @@ class IsolatedKokoroProvider(TTSProvider):
                     or completed.stdout
                     or "Kokoro child process failed without diagnostics."
                 ).strip()
+                error_code = str(response.get("error_code") or "").strip()
+                if error_code:
+                    health = response.get("component_health")
+                    raise KokoroComponentError(
+                        f"Kokoro 本地配音组件不可用：{detail[-1800:]}",
+                        provider=self.config.name,
+                        error_code=error_code,
+                        component_id=str(
+                            response.get("component_id") or "kokoro.engine"
+                        ),
+                        component_health=(
+                            dict(health) if isinstance(health, Mapping) else {}
+                        ),
+                    )
                 raise ProviderResponseError(
                     f"Kokoro 本地配音子进程失败：{detail[-2000:]}",
                     provider=self.config.name,
@@ -2565,6 +2699,7 @@ __all__ = [
     "EdgeTTSProvider",
     "KOKORO_FEMALE_VOICES",
     "KOKORO_LANGUAGE_CODES",
+    "KokoroComponentError",
     "KokoroProvider",
     "KokoroTTSProvider",
     "EmbeddedKokoroProvider",
@@ -2575,13 +2710,16 @@ __all__ = [
     "TTSRequest",
     "TTSResult",
     "TTSVoiceOption",
+    "available_female_voice_candidates",
     "create_tts_provider",
     "clear_edge_voice_cache",
     "prune_tts_cache",
     "release_embedded_kokoro_runtime",
     "edge_female_voice_candidates",
     "edge_tts_runtime_available",
+    "ensure_kokoro_language_available",
     "female_voice_candidates",
+    "kokoro_component_manifest",
     "kokoro_language_code",
     "normalize_tts_language",
     "split_sentences",

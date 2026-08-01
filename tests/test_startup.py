@@ -773,6 +773,7 @@ class StartupDiagnosticsTests(unittest.TestCase):
         build = (project / "scripts" / "build_exe.ps1").read_text(
             encoding="utf-8"
         )
+        spec = (project / "StoryForge.spec").read_text(encoding="utf-8")
 
         self.assertIn("--local-worker", enable)
         self.assertIn("Split-Path -Parent $PSScriptRoot", enable)
@@ -787,6 +788,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
         self.assertIn("loadFromRemoteSources enabled=\"true\"", build)
         self.assertIn("--kokoro-self-test", build)
         self.assertIn("BUILD_KOKORO_VALIDATION.json", build)
+        self.assertIn('collect_data_files("unidic_lite"', spec)
+        self.assertIn('copy_metadata("unidic-lite")', spec)
         self.assertIn("os.environ['STORYFORGE_DATA_DIR']", build)
         self.assertIn("storyforge-connection.json", build)
         self.assertIn("write_connection_profile", build)
@@ -807,6 +810,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
             "disable_storyforge_worker.ps1",
             "enable_storyforge_worker.cmd",
             "disable_storyforge_worker.cmd",
+            "restore_hub_backup.ps1",
+            "restore_hub_backup.cmd",
             "EMPLOYEE_QUICK_START.md",
         ):
             self.assertIn(name, build)
@@ -825,6 +830,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
             "enable_storyforge_worker.cmd",
             "disable_storyforge_worker.ps1",
             "disable_storyforge_worker.cmd",
+            "restore_hub_backup.ps1",
+            "restore_hub_backup.cmd",
             "run_dev.ps1",
         ):
             content = (project / "scripts" / name).read_bytes()
@@ -843,6 +850,35 @@ class StartupDiagnosticsTests(unittest.TestCase):
             launcher.index(".build-venv\\Scripts\\python.exe"),
             launcher.index("Get-Command -Name 'python'"),
         )
+
+    def test_offline_restore_command_uses_verified_backup_manager_and_exits(self) -> None:
+        manager = unittest.mock.Mock()
+        manager.restore_snapshot.return_value = {
+            "restored": True,
+            "requires_restart": True,
+        }
+        output = io.StringIO()
+        with (
+            patch("storyforge.backup.HubBackupManager", return_value=manager),
+            patch("storyforge.config.default_data_dir", return_value=Path("data")),
+            redirect_stdout(output),
+        ):
+            result = storyforge_main.main(
+                ["--restore-hub-backup", "verified-backup.sfbak"]
+            )
+
+        self.assertEqual(result, 0)
+        manager.restore_snapshot.assert_called_once_with("verified-backup.sfbak")
+        self.assertTrue(json.loads(output.getvalue())["restored"])
+
+    def test_offline_restore_picker_prefers_storyforge_backup_extension(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        script = (project / "scripts" / "restore_hub_backup.ps1").read_text(
+            encoding="ascii"
+        )
+
+        self.assertIn("StoryForge Hub backup (*.sfbak)|*.sfbak", script)
+        self.assertIn("Legacy StoryForge backup (*.zip)|*.zip", script)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ from .services.text_processing import count_words
 from .production_presets import ProductionPresetStore
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 
 ROLE_ADMIN = "admin"
@@ -204,6 +204,7 @@ PORTABLE_CONFIG_NUMBER_RANGES: dict[str, tuple[float, float, bool]] = {
     "output_height": (480, 3840, True),
     "bgm_volume": (0.0, 1.0, False),
     "preview_seconds": (5, 60, True),
+    "intro_card_duration_seconds": (2.5, 8.0, False),
     "max_episode_minutes": (1.0, 60.0, False),
     "end_card_seconds": (5.0, 7.0, False),
 }
@@ -1053,6 +1054,7 @@ CREATE TABLE IF NOT EXISTS promo_codes (
     status TEXT NOT NULL CHECK (status IN ('active', 'inactive', 'expired', 'revoked')),
     label TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT,
     row_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -1433,6 +1435,8 @@ class CatalogRepository:
             CatalogRepository._migrate_production_ledger_schema(connection)
             if 12 not in applied:
                 CatalogRepository._migrate_authored_episode_choices(connection)
+            if 13 not in applied:
+                CatalogRepository._migrate_soft_delete_schema(connection)
             return
 
         # Version 3 temporarily introduced a supervisor role. Version 4 folds
@@ -1540,6 +1544,37 @@ class CatalogRepository:
         CatalogRepository._migrate_device_management_schema(connection)
         CatalogRepository._migrate_production_ledger_schema(connection)
         CatalogRepository._migrate_authored_episode_choices(connection)
+        CatalogRepository._migrate_soft_delete_schema(connection)
+
+    @staticmethod
+    def _migrate_soft_delete_schema(connection: sqlite3.Connection) -> None:
+        """Hide administrator-deleted promo codes without breaking history.
+
+        Production drafts and records intentionally keep their immutable code
+        snapshots.  A tombstone column removes a code from day-to-day selectors
+        while preserving the historical five-slot rule and old audit links.
+        """
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(promo_codes)").fetchall()
+        }
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if "deleted_at" not in columns:
+                connection.execute("ALTER TABLE promo_codes ADD COLUMN deleted_at TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_promo_codes_visible "
+                "ON promo_codes(binding_id, deleted_at, slot_no)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (13, utc_now()),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     @staticmethod
     def _migrate_language_schema(connection: sqlite3.Connection) -> None:
@@ -3295,6 +3330,9 @@ class CatalogRepository:
             "status": str(row["status"]),
             "label": str(row["label"]),
             "notes": str(row["notes"]),
+            "deleted_at": str(row["deleted_at"] or "")
+            if "deleted_at" in row.keys()
+            else "",
             "row_version": int(row["row_version"]),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
@@ -3324,11 +3362,18 @@ class CatalogRepository:
         }
         if include_codes:
             codes = connection.execute(
-                "SELECT * FROM promo_codes WHERE binding_id = ? ORDER BY slot_no",
+                "SELECT * FROM promo_codes "
+                "WHERE binding_id = ? AND deleted_at IS NULL ORDER BY slot_no",
                 (row["id"],),
             ).fetchall()
             result["promo_codes"] = [self._promo_code_dict(item) for item in codes]
-            result["promo_code_slots_remaining"] = 5 - len(codes)
+            historical_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM promo_codes WHERE binding_id = ?",
+                    (row["id"],),
+                ).fetchone()[0]
+            )
+            result["promo_code_slots_remaining"] = max(0, 5 - historical_count)
         return result
 
     def get_novel(self, novel_id: str) -> dict[str, Any]:
@@ -3896,6 +3941,57 @@ class CatalogRepository:
             )
         return self.get_novel(novel_id)
 
+    def delete_novel(
+        self,
+        novel_id: str,
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove a novel from active work while retaining production history."""
+
+        novel_id = _required_text(novel_id, "novel_id", maximum=120)
+        now = utc_now()
+        with self._write_connection() as connection:
+            row = self._require_row(
+                connection,
+                "SELECT * FROM novels WHERE id = ? AND site_id = ?",
+                (novel_id, self.site_id),
+                "novel",
+            )
+            before = {"title": str(row["title"]), "archived": bool(row["archived"])}
+            connection.execute(
+                "UPDATE novels SET archived = 1, row_version = row_version + 1, "
+                "updated_at = ? WHERE id = ?",
+                (now, novel_id),
+            )
+            connection.execute(
+                "UPDATE novel_platform_bindings SET archived = 1, "
+                "row_version = row_version + 1, updated_at = ? WHERE novel_id = ?",
+                (now, novel_id),
+            )
+            connection.execute(
+                "UPDATE promo_codes SET status = 'revoked', "
+                "row_version = row_version + 1, updated_at = ? "
+                "WHERE binding_id IN (SELECT id FROM novel_platform_bindings WHERE novel_id = ?)",
+                (now, novel_id),
+            )
+            connection.execute(
+                "UPDATE production_drafts SET status = 'archived', "
+                "row_version = row_version + 1, updated_at = ? WHERE novel_id = ?",
+                (now, novel_id),
+            )
+            result = {"id": novel_id, "archived": True, "deleted_at": now}
+            self._audit(
+                connection,
+                action="novel.deleted",
+                entity_type="novel",
+                entity_id=novel_id,
+                actor_user_id=actor_user_id,
+                before=before,
+                after=result,
+            )
+            return result
+
     def save_novel_classification(
         self,
         novel_id: str,
@@ -4398,6 +4494,58 @@ class CatalogRepository:
         except sqlite3.IntegrityError as error:
             raise CatalogConflictError("platform name already exists") from error
 
+    def delete_platform(
+        self,
+        platform_id: str,
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Archive a platform and its active bindings without erasing records."""
+
+        platform_id = _required_text(platform_id, "platform_id", maximum=120)
+        now = utc_now()
+        with self._write_connection() as connection:
+            row = self._require_row(
+                connection,
+                "SELECT * FROM platforms WHERE id = ? AND site_id = ?",
+                (platform_id, self.site_id),
+                "platform",
+            )
+            before = {"name": str(row["name"]), "archived": bool(row["archived"])}
+            connection.execute(
+                "UPDATE platforms SET archived = 1, row_version = row_version + 1, "
+                "updated_at = ? WHERE id = ?",
+                (now, platform_id),
+            )
+            connection.execute(
+                "UPDATE novel_platform_bindings SET archived = 1, "
+                "row_version = row_version + 1, updated_at = ? WHERE platform_id = ?",
+                (now, platform_id),
+            )
+            connection.execute(
+                "UPDATE promo_codes SET status = 'revoked', "
+                "row_version = row_version + 1, updated_at = ? "
+                "WHERE binding_id IN (SELECT id FROM novel_platform_bindings WHERE platform_id = ?)",
+                (now, platform_id),
+            )
+            connection.execute(
+                "UPDATE production_drafts SET status = 'archived', "
+                "row_version = row_version + 1, updated_at = ? "
+                "WHERE binding_id IN (SELECT id FROM novel_platform_bindings WHERE platform_id = ?)",
+                (now, platform_id),
+            )
+            result = {"id": platform_id, "archived": True, "deleted_at": now}
+            self._audit(
+                connection,
+                action="platform.deleted",
+                entity_type="platform",
+                entity_id=platform_id,
+                actor_user_id=actor_user_id,
+                before=before,
+                after=result,
+            )
+            return result
+
     def list_platforms(
         self, *, include_archived: bool = False
     ) -> dict[str, Any]:
@@ -4798,11 +4946,57 @@ class CatalogRepository:
             )
             return result
 
+    def delete_promo_code(
+        self,
+        promo_code_id: str,
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Hide a code from selectors while preserving its historical slot."""
+
+        promo_code_id = _required_text(
+            promo_code_id, "promo_code_id", maximum=120
+        )
+        now = utc_now()
+        with self._write_connection() as connection:
+            row = self._require_row(
+                connection,
+                """
+                SELECT c.* FROM promo_codes c
+                JOIN novel_platform_bindings b ON b.id = c.binding_id
+                WHERE c.id = ? AND b.site_id = ?
+                """,
+                (promo_code_id, self.site_id),
+                "promo code",
+            )
+            before = self._promo_code_dict(row)
+            connection.execute(
+                "UPDATE promo_codes SET status = 'revoked', deleted_at = ?, "
+                "row_version = row_version + 1, updated_at = ? WHERE id = ?",
+                (now, now, promo_code_id),
+            )
+            result = {
+                "id": promo_code_id,
+                "binding_id": str(row["binding_id"]),
+                "deleted_at": now,
+            }
+            self._audit(
+                connection,
+                action="promo_code.deleted",
+                entity_type="promo_code",
+                entity_id=promo_code_id,
+                actor_user_id=actor_user_id,
+                before=before,
+                after=result,
+            )
+            return result
+
     def list_promo_codes(
         self,
         binding_id: str,
         *,
         include_inactive: bool = True,
+        include_deleted: bool = False,
     ) -> dict[str, Any]:
         binding_id = _required_text(binding_id, "binding_id", maximum=120)
         with self._read_connection() as connection:
@@ -4815,10 +5009,12 @@ class CatalogRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM promo_codes
-                WHERE binding_id = ? AND (? OR status = 'active')
+                WHERE binding_id = ?
+                  AND (? OR status = 'active')
+                  AND (? OR deleted_at IS NULL)
                 ORDER BY slot_no
                 """,
-                (binding_id, int(include_inactive)),
+                (binding_id, int(include_inactive), int(include_deleted)),
             ).fetchall()
             historical_count = int(
                 connection.execute(
@@ -4960,6 +5156,41 @@ class CatalogRepository:
             raise CatalogConflictError(
                 "this publishing account already exists"
             ) from error
+
+    def delete_publishing_account(
+        self,
+        account_id: str,
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove an account from current assignment while retaining reports."""
+
+        account_id = _required_text(account_id, "account_id", maximum=120)
+        now = utc_now()
+        with self._write_connection() as connection:
+            row = self._require_row(
+                connection,
+                "SELECT * FROM publishing_accounts WHERE id = ? AND site_id = ?",
+                (account_id, self.site_id),
+                "publishing account",
+            )
+            before = self._publishing_account_dict(row)
+            connection.execute(
+                "UPDATE publishing_accounts SET status = 'archived', "
+                "row_version = row_version + 1, updated_at = ? WHERE id = ?",
+                (now, account_id),
+            )
+            result = {"id": account_id, "status": "archived", "deleted_at": now}
+            self._audit(
+                connection,
+                action="publishing_account.deleted",
+                entity_type="publishing_account",
+                entity_id=account_id,
+                actor_user_id=actor_user_id,
+                before=before,
+                after=result,
+            )
+            return result
 
     def list_publishing_accounts(
         self,
@@ -5862,6 +6093,62 @@ class CatalogRepository:
                 after={"active": after["active"], "revoked_tokens": revoked_count},
             )
             return {"device": after, "revoked_tokens": revoked_count}
+
+    def delete_hub_device(
+        self,
+        device_id: str,
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Permanently remove one disabled workstation registration.
+
+        Production records keep their historical device labels/identifiers. The
+        registration, its obsolete login credentials and device-config targets
+        are removed so old reinstalls do not clutter the active fleet.  An
+        active workstation must be disabled first to avoid deleting a live
+        employee session by mistake.
+        """
+
+        clean_id = _required_text(device_id, "device_id", maximum=120)
+        with self._write_connection() as connection:
+            before = self._hub_device_dict(
+                self._hub_device_row(connection, clean_id)
+            )
+            if before["active"]:
+                raise CatalogConflictError(
+                    "active Hub devices must be disabled before deletion"
+                )
+            token_cursor = connection.execute(
+                "DELETE FROM hub_access_tokens WHERE site_id = ? AND device_id = ?",
+                (self.site_id, clean_id),
+            )
+            connection.execute(
+                "DELETE FROM hub_devices WHERE site_id = ? AND id = ?",
+                (self.site_id, clean_id),
+            )
+            self._audit(
+                connection,
+                action="hub_device.deleted",
+                entity_type="hub_device",
+                entity_id=clean_id,
+                actor_user_id=actor_user_id,
+                before={
+                    "name": before["name"],
+                    "hostname": before["hostname"],
+                    "app_version": before["app_version"],
+                    "active": before["active"],
+                },
+                after={
+                    "deleted": True,
+                    "deleted_tokens": max(0, int(token_cursor.rowcount)),
+                },
+            )
+            return {
+                "deleted": True,
+                "device_id": clean_id,
+                "name": before["name"],
+                "deleted_tokens": max(0, int(token_cursor.rowcount)),
+            }
 
     @staticmethod
     def _device_config_revision_dict(row: sqlite3.Row) -> dict[str, Any]:

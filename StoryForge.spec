@@ -33,7 +33,25 @@ if bundle_local_ai:
     # found through it) produces a much larger executable.
     hiddenimports += collect_submodules("kokoro")
     hiddenimports += collect_submodules("en_core_web_sm")
+    # Kokoro imports language G2P stacks dynamically.  In particular,
+    # collecting only ``unidic_lite.__init__`` leaves Japanese apparently
+    # installed but crashes at runtime when it opens ``dicdir/version``.
+    for package in (
+        "pyopenjtalk",
+        "fugashi",
+        "jaconv",
+        "mojimoji",
+        "unidic_lite",
+        "jieba",
+        "ordered_set",
+        "pypinyin",
+        "cn2an",
+        "pypinyin_dict",
+    ):
+        hiddenimports += collect_submodules(package)
     datas += collect_data_files("kokoro", include_py_files=False)
+    datas += collect_data_files("unidic_lite", include_py_files=False)
+    datas += collect_data_files("pypinyin_dict", include_py_files=False)
     # Misaki uses espeakng-loader for English fallback phonemization. PyInstaller
     # does not discover the loader's DLL or pronunciation tables automatically.
     datas += collect_data_files("espeakng_loader", include_py_files=False)
@@ -49,6 +67,7 @@ if bundle_local_ai:
     datas += copy_metadata("en-core-web-sm")
     datas += copy_metadata("phonemizer-fork")
     datas += copy_metadata("espeakng-loader")
+    datas += copy_metadata("unidic-lite")
     # Kokoro otherwise tries to install this model dynamically on first use,
     # which cannot work reliably from a frozen single-file application.
     datas += collect_data_files("en_core_web_sm", include_py_files=False)

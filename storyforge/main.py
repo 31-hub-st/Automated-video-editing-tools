@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -31,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Initialize the packaged database, UI, FFmpeg, WebView2 bridge and "
             "localhost worker; write a JSON result and exit"
+        ),
+    )
+    parser.add_argument(
+        "--restore-hub-backup",
+        metavar="SNAPSHOT_FILE",
+        help=(
+            "Replace the offline Hub library/settings with one verified backup "
+            "snapshot, create a pre-restore safety snapshot, and exit"
         ),
     )
     runtime = parser.add_mutually_exclusive_group()
@@ -216,6 +225,15 @@ def _open_existing_worker_window(endpoint: object, *, debug: bool = False) -> in
 def main(argv: list[str] | None = None) -> int:
     global _PROCESS_WORKER_MUTEX
     args = build_parser().parse_args(argv)
+    if args.restore_hub_backup:
+        from .backup import HubBackupManager
+        from .config import default_data_dir
+
+        result = HubBackupManager(default_data_dir()).restore_snapshot(
+            args.restore_hub_backup
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        return 0
     if args.kokoro_self_test:
         from .diagnostics import run_kokoro_self_test
 

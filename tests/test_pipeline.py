@@ -45,6 +45,7 @@ from storyforge.pipeline import (
     job_workspace_directory,
     narration_speed_for_wpm,
     narration_units,
+    production_exports_narration_audio,
     production_output_mode,
 )
 from storyforge.providers.text import TextRequest, TextResult
@@ -161,6 +162,48 @@ class NarrationAssemblyTests(unittest.TestCase):
                 PipelineRunner._embedded_narration_metadata(copied), metadata
             )
 
+    def test_arbitrary_video_without_storyforge_index_is_rejected_for_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manuscript = root / "B56826_Story.txt"
+            manuscript.write_text(
+                "Chapter 1\nShe opened the door and heard his voice.",
+                encoding="utf-8",
+            )
+            external_video = root / "ordinary-video.mp4"
+            external_video.write_bytes(b"ordinary external video")
+            video_folder = root / "videos"
+            video_folder.mkdir()
+            output_folder = root / "output"
+            runner = PipelineRunner(
+                lambda: AppSettings(),
+                ffmpeg_path=Path("fake-ffmpeg.exe"),
+                work_root=root / "render-work",
+            )
+            job = RenderJob(
+                batch_id="reuse-batch",
+                platform_id="goodnovel",
+                source_file=str(manuscript),
+                title="Story",
+                code="B56826",
+                video_folder=str(video_folder),
+                music_folder="",
+                output_folder=str(output_folder),
+                novel_id="novel-1",
+                settings_snapshot={
+                    "output_mode": "reuse_audio",
+                    "source_narration_audio": str(external_video),
+                    "bgm_mode": "none",
+                },
+            )
+
+            with self.assertRaisesRegex(PipelineError, "缺少 StoryForge"):
+                runner._run_job(
+                    job,
+                    PlatformProfile(id="goodnovel", name="GoodNovel"),
+                    lambda *_args: None,
+                )
+
     def test_output_preflight_writes_probe_and_checks_free_space(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "new-output"
@@ -221,6 +264,15 @@ class NarrationAssemblyTests(unittest.TestCase):
             serial_staging=True,
         )
         self.assertGreater(serial, normal)
+
+    def test_regular_video_reserves_mp3_space_only_for_frozen_legacy_export(self) -> None:
+        current = _required_output_bytes(600, "video_and_mp3")
+        legacy = _required_output_bytes(
+            600,
+            "video_and_mp3",
+            export_narration_audio=True,
+        )
+        self.assertGreater(legacy, current)
 
     def test_workspace_preflight_protects_system_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -305,13 +357,16 @@ class NarrationAssemblyTests(unittest.TestCase):
         )
         job.settings_snapshot = {"export_narration_audio": False}
         self.assertEqual(production_output_mode(job), "video_and_mp3")
+        self.assertFalse(production_exports_narration_audio(job))
         job.settings_snapshot = {"export_narration_audio": True}
         self.assertEqual(production_output_mode(job), "video_and_mp3")
+        self.assertTrue(production_exports_narration_audio(job))
         job.settings_snapshot = {
             "output_mode": "audio_only",
             "export_narration_audio": True,
         }
         self.assertEqual(production_output_mode(job), "audio_only")
+        self.assertFalse(production_exports_narration_audio(job))
 
     def test_compact_preview_uses_one_natural_body_clause_before_cta(self) -> None:
         result = TextResult(
@@ -1700,7 +1755,7 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(manifest["output_mode"], "audio_only")
             self.assertEqual(manifest["result"]["output_file"], str(result_path))
 
-    def test_category_plan_uses_explicit_generic_fallback_without_false_match(self) -> None:
+    def test_video_plan_uses_employee_folder_without_category_matching(self) -> None:
         generic = VideoSegment(
             path=Path("C:/local/videos/general/clip.mp4"),
             source_duration=60.0,
@@ -1711,10 +1766,7 @@ class PipelineRunnerTests(unittest.TestCase):
         warnings = []
         with mock.patch(
             "storyforge.pipeline.plan_video_segments",
-            side_effect=[
-                MediaError("No supported videos for category 'suspense'"),
-                [generic],
-            ],
+            return_value=[generic],
         ) as planner:
             segments = _plan_category_video_segments(
                 "C:/local/videos",
@@ -1727,26 +1779,23 @@ class PipelineRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(segments, [generic])
-        self.assertEqual(planner.call_count, 2)
-        self.assertEqual(planner.call_args_list[0].kwargs["mood"], "suspense")
-        self.assertIsNone(planner.call_args_list[1].kwargs["mood"])
-        self.assertFalse(planner.call_args_list[1].kwargs["commit_usage"])
-        self.assertEqual(report["mode"], "generic_fallback")
-        self.assertTrue(report["fallback"])
+        planner.assert_called_once()
+        self.assertIsNone(planner.call_args.kwargs["mood"])
+        self.assertFalse(planner.call_args.kwargs["commit_usage"])
+        self.assertEqual(report["mode"], "employee_folder")
+        self.assertFalse(report["fallback"])
+        self.assertIsNone(report["requested_category"])
         self.assertIsNone(report["matched_category"])
         self.assertEqual(report["source_scope"], "selected_root_recursive")
         self.assertEqual(report["max_usage_count_before"], 2)
-        self.assertIn("通用素材回退", warnings[0])
+        self.assertEqual(warnings, [])
 
-    def test_category_and_generic_video_failure_remains_a_clear_error(self) -> None:
+    def test_employee_video_folder_failure_remains_a_clear_error(self) -> None:
         with mock.patch(
             "storyforge.pipeline.plan_video_segments",
-            side_effect=[
-                MediaError("category empty"),
-                MediaError("root empty"),
-            ],
+            side_effect=MediaError("root empty"),
         ) as planner:
-            with self.assertRaisesRegex(PipelineError, "总目录"):
+            with self.assertRaisesRegex(PipelineError, "员工选择的视频素材文件夹"):
                 _plan_category_video_segments(
                     "C:/local/videos",
                     30.0,
@@ -1755,7 +1804,7 @@ class PipelineRunnerTests(unittest.TestCase):
                     variant_seed="job-2",
                 )
 
-        self.assertEqual(planner.call_count, 2)
+        planner.assert_called_once()
 
     def test_video_selection_report_marks_in_job_reuse(self) -> None:
         clip = Path("C:/local/videos/general/clip.mp4")
@@ -1786,14 +1835,15 @@ class PipelineRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(segments, repeated)
-        self.assertEqual(report["mode"], "category_match")
-        self.assertEqual(report["matched_category"], "romance")
+        self.assertEqual(report["mode"], "employee_folder")
+        self.assertIsNone(report["matched_category"])
+        self.assertFalse(report["fallback"])
         self.assertEqual(report["unique_asset_count"], 1)
         self.assertEqual(report["repeated_segment_count"], 1)
         self.assertEqual(report["max_usage_count_before"], 4)
         self.assertIn("素材复用提示", warnings[0])
 
-    def test_generic_fallback_recurses_employee_root_and_keeps_usage_priority(self) -> None:
+    def test_employee_folder_recurses_root_and_keeps_usage_priority(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             suspense = root / "suspense" / "pack-a"
@@ -1831,9 +1881,10 @@ class PipelineRunnerTests(unittest.TestCase):
 
             self.assertEqual(segments[0].path, fresh)
             self.assertEqual(segments[0].usage_count_before, 0)
-            self.assertEqual(report["mode"], "generic_fallback")
+            self.assertEqual(report["mode"], "employee_folder")
             self.assertIsNone(report["matched_category"])
-            self.assertIn("通用素材回退", warnings[0])
+            self.assertFalse(report["fallback"])
+            self.assertEqual(warnings, [])
 
     def test_locked_voice_does_not_hide_a_real_engine_failure(self) -> None:
         class BrokenProvider:
@@ -1992,7 +2043,7 @@ class PipelineRunnerTests(unittest.TestCase):
 
             settings = AppSettings(chapter_pause_seconds=0.08)
             settings.video_template = "platform_story_card"
-            settings.export_narration_audio = True
+            settings.export_narration_audio = False
             settings.providers.text_provider = "local"
             settings.providers.tts_provider = "local_kokoro"
             text_requests = []
@@ -2003,7 +2054,7 @@ class PipelineRunnerTests(unittest.TestCase):
                     text_requests.append(request)
                     return TextResult(
                         polished_text=request.text,
-                        hook="That locked door had never opened on its own.",
+                        hook="",
                         ending_cta=(
                             "Download NovelBox and search code 123456 to discover who was there."
                         ),
@@ -2050,7 +2101,7 @@ class PipelineRunnerTests(unittest.TestCase):
                     formal_name = Path(media_path).name.removesuffix(".partial.mp4") + ".mp4"
                     self.assertFalse(
                         (publish / formal_name).exists(),
-                        "a formal MP4 must not exist before quality and MP3 succeed",
+                        "a formal MP4 must not exist before quality succeeds",
                     )
                 return QualityReport(
                     passed=True,
@@ -2151,24 +2202,14 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(output_path.parent, publish_dir)
             self.assertEqual(
                 {item.suffix for item in publish_dir.iterdir() if item.is_file()},
-                {".mp4", ".mp3"},
+                {".mp4"},
             )
             job_dir = job_workspace_directory(job, root / "render-work")
             self.assertTrue((job_dir / "01-original.txt").is_file())
             self.assertTrue((job_dir / "02-narration-script.txt").is_file())
             self.assertFalse((job_dir / ".work" / "narration.wav").exists())
-            narration_audio_path = Path(job.narration_audio_file)
-            self.assertTrue(narration_audio_path.is_file())
-            self.assertEqual(
-                narration_audio_path.name,
-                "001_NovelBox_123456_E002_V01_Bbatch-1.mp3",
-            )
-            self.assertEqual(narration_audio_path.parent, publish_dir)
-            mp3_command = next(command for command in commands if "mp3" in command)
-            self.assertIn("libmp3lame", mp3_command)
-            self.assertEqual(mp3_command[mp3_command.index("-b:a") + 1], "192k")
-            self.assertEqual(mp3_command[mp3_command.index("-ar") + 1], "48000")
-            self.assertEqual(mp3_command[mp3_command.index("-ac") + 1], "2")
+            self.assertEqual(job.narration_audio_file, "")
+            self.assertFalse(any("libmp3lame" in command for command in commands))
             self.assertTrue((job_dir / ".work" / "subtitles.ass").is_file())
             self.assertTrue((job_dir / "render-command.txt").is_file())
             self.assertTrue((job_dir / "manifest.json").is_file())
@@ -2198,6 +2239,14 @@ class PipelineRunnerTests(unittest.TestCase):
             )
             self.assertIn("Search NovelBox: 123456", subtitle_text)
             self.assertIn("FINAL PART", subtitle_text)
+            self.assertFalse(
+                any(
+                    ",IntroHeadline," in line
+                    for line in subtitle_text.splitlines()
+                    if line.startswith("Dialogue:")
+                ),
+                "the full render must leave an empty AI hook empty",
+            )
             self.assertNotRegex(
                 subtitle_text,
                 r"(?m)^Dialogue: .*?,End(?:Title|Action|Code),",
@@ -2213,6 +2262,14 @@ class PipelineRunnerTests(unittest.TestCase):
                 job_dir / ".work" / "preview-subtitles.ass"
             ).read_text(encoding="utf-8-sig")
             self.assertIn("FINAL PART", preview_subtitle_text)
+            self.assertFalse(
+                any(
+                    ",IntroHeadline," in line
+                    for line in preview_subtitle_text.splitlines()
+                    if line.startswith("Dialogue:")
+                ),
+                "the legacy preview must not fall back to the job title",
+            )
             self.assertIn(
                 "Download NovelBox and search code 123456",
                 preview_subtitle_text.replace(r"\N", " "),
@@ -2234,11 +2291,22 @@ class PipelineRunnerTests(unittest.TestCase):
             )
             self.assertEqual(preview_manifest["duration_seconds"], 15.0)
             self.assertEqual(
+                preview_manifest["media"]["intro_card"]["headline"],
+                "",
+            )
+            self.assertEqual(
                 preview_manifest["media"]["video_selection"]["mode"],
-                "category_match",
+                "employee_folder",
             )
             self.assertFalse(
                 preview_manifest["media"]["video_selection"]["fallback"]
+            )
+            self.assertIsNone(
+                preview_manifest["media"]["video_selection"]["matched_category"]
+            )
+            self.assertEqual(
+                preview_manifest["media"]["video_selection"]["source_scope"],
+                "selected_root_recursive",
             )
             self.assertTrue(preview_manifest["review_timeline"]["structured"])
             self.assertEqual(
@@ -2277,35 +2345,39 @@ class PipelineRunnerTests(unittest.TestCase):
                 places=6,
             )
             self.assertEqual(manifest["media"]["mood"], "romance")
+            self.assertEqual(manifest["media"]["intro_card"]["headline"], "")
             self.assertEqual(
                 manifest["media"]["video_selection"]["mode"],
-                "category_match",
+                "employee_folder",
             )
-            self.assertEqual(
-                manifest["media"]["video_selection"]["matched_category"],
-                "romance",
+            self.assertIsNone(
+                manifest["media"]["video_selection"]["matched_category"]
             )
             self.assertFalse(manifest["media"]["video_selection"]["fallback"])
+            self.assertEqual(
+                manifest["media"]["video_selection"]["source_scope"],
+                "selected_root_recursive",
+            )
             self.assertEqual(manifest["media"]["encoder"], "libx264")
             self.assertEqual(manifest["media"]["ending_card"]["kind"], "cover_caption")
             self.assertTrue(manifest["media"]["ending_card"]["narrated_cta"])
             self.assertEqual(manifest["analysis"]["source_chapters"], 2)
             self.assertTrue(manifest["quality_control"]["passed"])
-            self.assertTrue(manifest["media"]["narration_audio"]["enabled"])
+            self.assertFalse(manifest["media"]["narration_audio"]["enabled"])
             self.assertFalse(
                 manifest["media"]["narration_audio"]["contains_background_music"]
             )
             self.assertEqual(
                 manifest["media"]["narration_audio"]["output_file"],
-                str(narration_audio_path),
+                "",
             )
             self.assertEqual(
                 manifest["result"]["narration_audio_file"],
-                str(narration_audio_path),
+                "",
             )
             self.assertEqual(
                 manifest["job"]["narration_audio_file"],
-                str(narration_audio_path),
+                "",
             )
             self.assertTrue(
                 any(
@@ -2336,10 +2408,6 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(quality_expectations[1][1].width, 540)
             self.assertEqual(quality_expectations[1][1].height, 960)
             self.assertEqual(commands[0][-1], str(staged_video))
-            mp3_stage = Path(mp3_command[-1])
-            self.assertEqual(mp3_stage.parent, staged_video.parent)
-            self.assertTrue(mp3_stage.name.endswith(".partial.mp3"))
-            self.assertNotEqual(mp3_stage, narration_audio_path)
             self.assertIn("libx264", commands[0])
             commit_usage.assert_called_once()
             commit_music.assert_called_once()
@@ -2354,6 +2422,10 @@ class PipelineRunnerTests(unittest.TestCase):
                 variant_index=2,
                 batch_ordinal=2,
                 narration_audio_file="",
+                settings_snapshot={
+                    "output_mode": "video_and_mp3",
+                    "export_narration_audio": True,
+                },
             )
             with (
                 mock.patch(
@@ -2374,7 +2446,7 @@ class PipelineRunnerTests(unittest.TestCase):
                     side_effect=PipelineError("synthetic MP3 failure"),
                 ),
             ):
-                with self.assertRaisesRegex(PipelineError, "完整成品已撤回"):
+                with self.assertRaisesRegex(PipelineError, "已撤回视频"):
                     runner(failed_pair, platform, lambda *_args: None)
             failed_publish_dir = Path(failed_pair.publish_batch_folder)
             self.assertFalse(any("V02" in path.name for path in failed_publish_dir.iterdir()))

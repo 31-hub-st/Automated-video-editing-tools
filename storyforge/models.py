@@ -672,6 +672,7 @@ class AppSettings:
     outro_card_preset: str = "editorial_white"
     subtitle_animation: str = "none"
     intro_animation: str = "fade_rise"
+    intro_card_duration_seconds: float = 5.5
     preview_seconds: int = DEFAULT_PREVIEW_SECONDS
     max_episode_minutes: float = 10.0
     cover_animation: str = "gentle_push"
@@ -882,6 +883,7 @@ class AppSettings:
                 "outro_card_preset",
                 "subtitle_animation",
                 "intro_animation",
+                "intro_card_duration_seconds",
                 "preview_seconds",
                 "max_episode_minutes",
                 "cover_animation",
@@ -926,6 +928,15 @@ class AppSettings:
             int(round(narration_wpm))
             if 200 <= narration_wpm <= 280
             else defaults.narration_wpm
+        )
+        try:
+            intro_card_duration = float(scalar["intro_card_duration_seconds"])
+        except (TypeError, ValueError):
+            intro_card_duration = defaults.intro_card_duration_seconds
+        scalar["intro_card_duration_seconds"] = (
+            intro_card_duration
+            if 2.5 <= intro_card_duration <= 8.0
+            else defaults.intro_card_duration_seconds
         )
         for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
             raw_boolean = scalar[boolean_key]

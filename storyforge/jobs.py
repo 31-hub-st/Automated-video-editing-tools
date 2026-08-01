@@ -331,7 +331,11 @@ class JobQueue:
                 output_folder=batch.output_folder,
                 settings_snapshot={
                     "output_mode": batch.output_mode,
-                    "export_narration_audio": batch.output_mode == "video_and_mp3",
+                    # New regular-video work publishes only its final MP4.
+                    # The boolean remains frozen per job so already queued
+                    # legacy batches that explicitly promised an MP3 can
+                    # still honour that contract after an update.
+                    "export_narration_audio": batch.export_narration_audio,
                     "source_narration_audio": batch.source_narration_audio,
                 },
             )

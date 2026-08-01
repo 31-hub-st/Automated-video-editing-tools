@@ -62,12 +62,29 @@ def run_request(request_path: str | Path, response_path: str | Path) -> int:
         _atomic_json(response_file, {"ok": True, "result": result.to_dict()})
         return 0
     except BaseException as error:  # the parent turns this into a safe provider error
+        structured: Mapping[str, Any] = {}
+        try:
+            serializer = getattr(error, "to_dict", None)
+            value = serializer() if callable(serializer) else {}
+            if isinstance(value, Mapping):
+                structured = value
+        except BaseException:
+            structured = {}
         try:
             _atomic_json(
                 response_file,
                 {
                     "ok": False,
                     "error": f"{type(error).__name__}: {error}",
+                    "error_code": str(
+                        structured.get("error_code")
+                        or getattr(error, "error_code", "")
+                    ),
+                    "component_id": str(
+                        structured.get("component_id")
+                        or getattr(error, "component_id", "")
+                    ),
+                    "component_health": structured.get("component_health") or {},
                     "traceback": traceback.format_exc()[-8000:],
                 },
             )

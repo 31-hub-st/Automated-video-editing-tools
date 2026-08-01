@@ -4,13 +4,16 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from storyforge.api import StoryForgeApi
 from storyforge.config import AppSettings, SettingsRepository
 from storyforge.desktop_bridge import (
+    ADMIN_DESKTOP_METHODS,
     DESKTOP_RPC_PERMISSIONS,
     EMPLOYEE_DESKTOP_METHODS,
+    HARD_ADMIN_ONLY_DESKTOP_METHODS,
     StoryForgeDesktopBridge,
 )
 from storyforge.web import WEB_RPC_PERMISSIONS
@@ -43,8 +46,11 @@ class DesktopBridgeAuthorizationTests(unittest.TestCase):
             ("save_platform", [{"name": "Denied Platform"}]),
             ("import_novel_text", [{"title": "Denied Novel", "body": "text"}]),
             ("save_novel", [{"title": "Denied Novel"}]),
+            ("delete_novel", ["denied-novel"]),
             ("add_promo_code", [{}]),
+            ("delete_promo_code", ["denied-code"]),
             ("save_publishing_account", [{}]),
+            ("delete_publishing_account", ["denied-account"]),
             ("save_software_user", [{}]),
             ("save_settings", [{}]),
             ("create_managed_device_config", [{}]),
@@ -75,6 +81,18 @@ class DesktopBridgeAuthorizationTests(unittest.TestCase):
         library = self.bridge.desktop_rpc("get_library_bootstrap", [])
         self.assertTrue(library["ok"], library)
 
+    def test_shared_library_deletes_are_explicit_admin_only_contracts(self) -> None:
+        for method in (
+            "delete_novel",
+            "delete_promo_code",
+            "delete_publishing_account",
+        ):
+            with self.subTest(method=method):
+                self.assertIn(method, ADMIN_DESKTOP_METHODS)
+                self.assertIn(method, HARD_ADMIN_ONLY_DESKTOP_METHODS)
+                self.assertNotIn(method, EMPLOYEE_DESKTOP_METHODS)
+                self.assertEqual(DESKTOP_RPC_PERMISSIONS[method], ("hub.manage",))
+
     def test_employee_library_bootstrap_is_an_explicit_desktop_contract(self) -> None:
         logged_in = self.bridge.desktop_login("employee-one", "xs123456")
         self.assertTrue(logged_in["ok"], logged_in)
@@ -87,6 +105,28 @@ class DesktopBridgeAuthorizationTests(unittest.TestCase):
             DESKTOP_RPC_PERMISSIONS["get_library_bootstrap"],
             WEB_RPC_PERMISSIONS["get_library_bootstrap"],
         )
+
+    def test_narration_source_picker_includes_storyforge_video_containers(self) -> None:
+        selected = Path(self.api._repository.data_dir) / "StoryForge-output.mp4"
+        selected.write_bytes(b"video")
+        captured: dict[str, object] = {}
+
+        class FakeWindow:
+            def create_file_dialog(self, kind, **kwargs):
+                captured["kind"] = kind
+                captured.update(kwargs)
+                return [str(selected)]
+
+        self.api._attach_window(FakeWindow())
+        fake_webview = SimpleNamespace(FileDialog=SimpleNamespace(OPEN="open"))
+        with patch.dict("sys.modules", {"webview": fake_webview}):
+            result = self.api.choose_file("narration_source")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["data"], str(selected))
+        filters = " ".join(captured["file_types"])
+        for extension in ("*.mp3", "*.mp4", "*.mov", "*.mkv", "*.webm"):
+            self.assertIn(extension, filters)
 
     def test_employee_can_read_style_catalog_but_cannot_overwrite_team_defaults(self) -> None:
         logged_in = self.bridge.desktop_login("employee-one", "xs123456")

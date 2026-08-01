@@ -243,6 +243,22 @@ def _run() -> int:
     from storyforge.portable import configure_runtime_environment
 
     data_root = configure_runtime_environment(sys.argv[1:])
+    # Optional language/voice packs live outside the immutable application
+    # bundle. Activate only hash-verified releases before either the desktop or
+    # disposable Kokoro child imports its runtime dependencies. No component
+    # installer script is executed here.
+    try:
+        from storyforge.component_updater import (
+            ComponentPackageError,
+            activate_component_runtime_from_environment,
+        )
+
+        activate_component_runtime_from_environment(data_root)
+    except (ComponentPackageError, OSError):
+        # A damaged optional pack must not prevent StoryForge from starting.
+        # The component status/API reports the unusable pack and permits a
+        # verified reinstall or rollback.
+        pass
     if "--storyforge-kokoro-child" in sys.argv:
         child_index = sys.argv.index("--storyforge-kokoro-child")
         child_args = sys.argv[child_index + 1 :]

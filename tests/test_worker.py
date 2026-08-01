@@ -390,6 +390,10 @@ class LocalWorkerGatewayTests(unittest.TestCase):
         self.assertFalse(health["rendering_busy"])
         self.assertFalse(health["queue_busy"])
         self.assertEqual(health["unfinished_jobs"], 0)
+        self.assertEqual(health["health_state"], "ready")
+        self.assertTrue(health["queue"]["observable"])
+        self.assertTrue(health["storage"]["observable"])
+        self.assertTrue(health["connectivity"]["hub_connected"])
         self.assertNotIn("folders", health)
         self.assertEqual(health["protocol_version"], LOCAL_WORKER_PROTOCOL_VERSION)
         self.assertEqual(
@@ -480,6 +484,56 @@ class LocalWorkerGatewayTests(unittest.TestCase):
         self.assertFalse(health["rendering_busy"])
         self.assertTrue(health["queue_busy"])
         self.assertEqual(health["unfinished_jobs"], 1)
+        self.assertEqual(health["health_state"], "busy")
+        self.assertEqual(health["queue"]["status"], "queued")
+
+    def test_health_reports_stalled_progress_without_exposing_story_or_paths(self) -> None:
+        secret_title = "Secret Novel Title"
+        secret_path = r"D:\employee-private\secret-title.txt"
+        self.api._queue = SimpleNamespace(
+            is_rendering_busy=lambda: True,
+            list_jobs=lambda: [
+                {
+                    "id": "job-1",
+                    "status": "rendering",
+                    "progress": 0.42,
+                    "stage_label": "正在生成字幕",
+                    "title": secret_title,
+                    "source_path": secret_path,
+                    "error_message": "private failure text",
+                }
+            ],
+        )
+        base = self.gateway.started_at_unix
+        with patch("storyforge.worker.time.time", return_value=base + 1):
+            first = self.gateway.health()
+        with patch("storyforge.worker.time.time", return_value=base + 602):
+            stale = self.gateway.health()
+
+        self.assertFalse(first["queue"]["progress_stale"])
+        self.assertTrue(stale["queue"]["progress_stale"])
+        self.assertEqual(stale["health_state"], "degraded")
+        self.assertEqual(stale["queue"]["progress"], 0.42)
+        self.assertEqual(stale["queue"]["stage"], "正在生成字幕")
+        serialized = json.dumps(stale, ensure_ascii=False)
+        self.assertNotIn(secret_title, serialized)
+        self.assertNotIn(secret_path, serialized)
+        self.assertNotIn("private failure text", serialized)
+
+    def test_health_treats_unreadable_queue_as_degraded_and_busy(self) -> None:
+        def fail() -> list[dict]:
+            raise RuntimeError("queue database unavailable")
+
+        self.api._queue = SimpleNamespace(
+            is_rendering_busy=lambda: False,
+            list_jobs=fail,
+        )
+
+        health = self.gateway.health()
+
+        self.assertEqual(health["health_state"], "degraded")
+        self.assertTrue(health["queue_busy"])
+        self.assertFalse(health["queue"]["observable"])
 
     def test_session_is_origin_bound_and_rpc_allowlisted(self) -> None:
         connected = self.gateway.connect(

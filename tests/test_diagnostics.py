@@ -49,6 +49,8 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(payload["sample_rate"], 24_000)
             self.assertEqual(payload["frame_count"], 2_400)
             self.assertTrue(payload["tts_cache_bypassed"])
+            self.assertEqual(payload["tts_component_manifest"]["schema"], 1)
+            self.assertIn("japanese_component_health", payload)
             self.assertTrue(Path(payload["wav_path"]).is_file())
 
     def test_kokoro_self_test_persists_failure_details(self) -> None:

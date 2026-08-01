@@ -18,9 +18,9 @@ from ..pipeline import UsageLedger, narration_speed_for_wpm
 from ..providers.base import ProviderConfig, ProviderConfigurationError
 from ..providers.tts import (
     TTSVoiceOption,
+    available_female_voice_candidates,
     create_tts_provider,
     edge_tts_runtime_available,
-    female_voice_candidates,
     kokoro_language_code,
     normalize_tts_language,
 )
@@ -98,9 +98,29 @@ class VoiceCandidate:
     narration_wpm: int
     cached: bool
     cache_key: str
+    selection_key: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _voice_selection_key(
+    *, provider: object, language: object, voice_id: object
+) -> str:
+    """Stable voice identity which intentionally excludes speaking speed."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "schema": 1,
+                "provider": str(provider or "").strip().casefold().replace("-", "_"),
+                "language": str(language or "").strip().casefold().replace("_", "-"),
+                "voice_id": str(voice_id or "").strip(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _split_multilingual_sentences(text: str) -> tuple[str, ...]:
@@ -318,7 +338,12 @@ class VoicePreviewService:
         output.mkdir(parents=True, exist_ok=True)
         provider_name = settings.providers.tts_provider
         normalized_provider = str(provider_name or "").strip().casefold().replace("-", "_")
-        catalog = female_voice_candidates(provider_name, normalized_language)
+        catalog = available_female_voice_candidates(
+            provider_name,
+            normalized_language,
+            endpoint=settings.providers.kokoro_endpoint,
+            command=settings.providers.kokoro_command,
+        )
         if not catalog:
             if normalized_provider in _EDGE_PROVIDER_NAMES:
                 reason = (
@@ -367,6 +392,11 @@ class VoicePreviewService:
         try:
             for index, (profile, option) in enumerate(selected_options, start=1):
                 voice_id = option.voice_id
+                selection_key = _voice_selection_key(
+                    provider=normalized_provider,
+                    language=normalized_language,
+                    voice_id=voice_id,
+                )
                 cache_key = hashlib.sha256(
                     json.dumps(
                         {
@@ -429,6 +459,7 @@ class VoicePreviewService:
                             narration_wpm=requested_wpm,
                             cached=True,
                             cache_key=cache_key,
+                            selection_key=selection_key,
                         )
                     )
                     continue
@@ -499,6 +530,7 @@ class VoicePreviewService:
                         "duration_seconds": duration,
                         "excerpt": excerpt,
                         "narration_wpm": requested_wpm,
+                        "selection_key": selection_key,
                     }
                     temporary_sidecar = sidecar.with_name(
                         f".{sidecar.name}.{uuid4().hex}.tmp"
@@ -530,6 +562,7 @@ class VoicePreviewService:
                         narration_wpm=requested_wpm,
                         cached=False,
                         cache_key=cache_key,
+                        selection_key=selection_key,
                     )
                 )
         finally:

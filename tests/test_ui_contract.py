@@ -196,7 +196,9 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("function applyProductionCardStyles(root, settings)", javascript)
         self.assertIn("function paintOutroCover(container, novel", javascript)
         for control_id in (
-            "production-video-template",
+            "production-intro-card-enabled",
+            "production-intro-card-duration",
+            "production-intro-card-copy",
             "production-intro-card-preset",
             "production-code-card-preset",
             "production-subtitle-preset",
@@ -273,6 +275,59 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertNotIn("mainSampleMarkup(novel", javascript)
         self.assertIn(".production-workbench", css)
         self.assertIn(".workbench-section", css)
+
+    def test_production_quick_navigation_and_preview_feedback_are_wired(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        for section in ("content", "voice", "visual", "output"):
+            self.assertIn(f'data-production-jump="{section}"', html)
+            self.assertIn(f'data-production-jump-status="{section}"', html)
+        self.assertIn("function productionMissingDescriptors(novel, draft)", javascript)
+        self.assertIn("function focusProductionSection(section, selector", javascript)
+        self.assertIn("function updateProductionJumpbar", javascript)
+        self.assertIn("data-production-missing=", javascript)
+        self.assertIn("function openProductionPreview()", javascript)
+        self.assertIn("function replayProductionPreview()", javascript)
+        self.assertIn("data-replay-production-preview", html)
+        self.assertIn('event.target.closest("[data-production-preview-scene]")', javascript)
+        self.assertIn("setProductionPreviewScene(previewScene.dataset.productionPreviewScene)", javascript)
+        self.assertIn("function productionPreviewSceneForControl(control)", javascript)
+        self.assertIn("resetProductionStyleFromPreset(event.target)", javascript)
+        self.assertIn('#production-intro-card-enabled, #production-cover-outro-enabled', javascript)
+        self.assertIn('productionJump.dataset.productionMissing === "platform-binding"', javascript)
+        self.assertIn('await openNovelDetail(state.productionNovel.id, productionJump)', javascript)
+        self.assertIn(".production-section-jumpbar {", css)
+        self.assertIn("position: sticky", css)
+        self.assertIn('[data-view="queue"] .preview-dock { top: 72px; }', css)
+        self.assertIn(".production-focus-pulse", css)
+
+    def test_personal_recipe_visibility_and_delete_permissions_are_normalized(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const isOwnedByCurrentUser = (item)", javascript)
+        self.assertIn('String(item?.owner_user_id || "") === currentUserId', javascript)
+        self.assertIn("return isOwnedByCurrentUser(item) || (includeManaged && !employee)", javascript)
+        self.assertIn("deletable: owned || (!employee && includeManaged) || Boolean(item.deletable)", javascript)
+        self.assertIn('data-delete-production-preset', javascript)
+        self.assertIn('selected?.owned_by_current_user ? "删除我的方案" : "管理员删除"', javascript)
+
+    def test_admin_cleanup_entrances_call_real_delete_apis(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="delete-software-user"', html)
+        self.assertIn('id="delete-platform"', html)
+        self.assertIn('id="delete-publishing-account"', html)
+        self.assertIn('function deleteSelectedPublishingAccount(button)', javascript)
+        self.assertIn('checkedCall("delete_publishing_account", account.id)', javascript)
+        self.assertIn('data-toggle-code=', javascript)
+        self.assertIn('data-delete-code=', javascript)
+        self.assertIn('checkedCall("delete_promo_code", promoCodeId)', javascript)
+        self.assertIn('data-action="delete-novel"', javascript)
+        self.assertIn('checkedCall("delete_novel", novel.id)', javascript)
+        self.assertGreaterEqual((html + javascript).count("settings-admin-only"), 5)
 
     def test_production_workspace_has_batch_slate_and_create_task_tabs(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
@@ -946,10 +1001,11 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('常规视频生成', javascript)
         self.assertIn('仅生成配音', javascript)
         self.assertIn('已有配音更换素材', javascript)
-        self.assertIn('生成完整视频 + 配音', javascript)
+        self.assertIn('生成完整视频', javascript)
+        self.assertNotIn('生成完整视频 + 配音', javascript)
         self.assertIn('生成纯旁白配音', javascript)
         self.assertNotIn('生成完整视频 + MP3', javascript)
-        self.assertNotIn('生成纯旁白 MP3', javascript)
+        self.assertIn('"只生成纯旁白 MP3，不读取视频素材和背景音乐。"', javascript)
         self.assertNotIn('value="video_only"', javascript)
         self.assertIn('!audioOnly && !draft.video_folder', javascript)
         self.assertIn('bgmMode === "auto" && !draft.music_folder', javascript)
@@ -968,6 +1024,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('id="production-source-narration-audio"', javascript)
         self.assertIn('source_narration_audio: String(draft.source_narration_audio || "")', javascript)
         self.assertIn('source_narration_audio: payload.source_narration_audio', javascript)
+        self.assertIn('field === "source_narration_audio" ? "narration_source" : "audio"', javascript)
+        self.assertIn("StoryForge 输出的 MP3 配音或成品视频", javascript)
 
         self.assertIn("const PRODUCTION_WPM_PRESETS = [220, 240, 260, 280]", javascript)
         self.assertIn('id="production-wpm-custom" type="number" min="200" max="280"', javascript)
@@ -983,10 +1041,11 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('productionSettings.video_transition =', javascript)
 
         self.assertIn('id="production-subtitle-word-mode"', javascript)
-        self.assertIn('value="cumulative">逐词累积变色', javascript)
-        self.assertIn('value="single">单词逐个显示', javascript)
+        self.assertIn('value="cumulative">逐词累积高亮', javascript)
+        self.assertIn('value="single">单词逐个出现', javascript)
         self.assertIn("productionSettings.subtitle_word_mode =", javascript)
         self.assertIn('wordMode === "single"', javascript)
+        self.assertIn("productionSettings.export_narration_audio = false", javascript)
 
         for bgm_mode in ("auto", "manual", "none"):
             self.assertIn(f'name="production-bgm-mode" value="{bgm_mode}"', javascript)
@@ -1023,17 +1082,18 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('id="default-template-proof"', html)
         self.assertIn('assignValue("#video-template", settings.video_template', javascript)
         self.assertIn('video_template: $("#video-template").value', javascript)
-        self.assertIn('id="production-video-template"', javascript)
+        self.assertIn('id="production-intro-card-enabled"', javascript)
+        self.assertIn('id="production-intro-card-duration"', javascript)
+        self.assertIn('id="production-intro-card-copy"', javascript)
+        self.assertIn("productionSettings.intro_card_duration_seconds = Math.max", javascript)
+        self.assertIn("production_settings: structuredClone(draft.production_settings || {})", javascript)
         self.assertIn(
-            'productionSettings.video_template = $("#production-video-template")?.value',
+            'productionSettings.video_template = productionSettings.intro_card_enabled ? "platform_story_card" : "classic"',
             javascript,
         )
         self.assertIn("video_template: defaults.video_template", javascript)
         self.assertIn("root.dataset.videoTemplate = videoTemplate", javascript)
-        self.assertIn(
-            'event.target.matches(\'input[name="production-voice"], #production-video-template\')',
-            javascript,
-        )
+        self.assertIn('event.target.matches(\'input[name="production-voice"]\')', javascript)
         self.assertIn(
             '.video-preview[data-video-template="platform_story_card"]',
             css,
@@ -1051,7 +1111,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("function estimateSubtitleBlockWidth", javascript)
         self.assertIn("function applySubtitlePreviewStyles", javascript)
         self.assertGreaterEqual(javascript.count("applySubtitlePreviewStyles("), 5)
-        self.assertIn('class="story-card-label">STORY BRIEF</strong>', html)
+        self.assertNotIn('STORY BRIEF', html)
+        self.assertNotIn('id="preview-story-title"', html)
         self.assertNotIn("STORY PREVIEW", html + javascript + css)
         self.assertNotIn("story-intro-window", html + css)
         self.assertNotIn("story-card-meta", html + css)
@@ -1081,8 +1142,8 @@ class StyleSettingsContractTests(unittest.TestCase):
             '`${platform?.name || "Platform"} · Search “${code}”`',
             javascript,
         )
-        self.assertIn("characters.slice(0, 70)", javascript)
-        self.assertIn("words.slice(0, 28)", javascript)
+        self.assertIn("characters.slice(0, 48)", javascript)
+        self.assertIn("words.slice(0, 20)", javascript)
         self.assertIn(r"\u2e80-\u9fff", javascript)
 
     def test_platform_logo_branding_is_configurable_and_shared_by_previews(self) -> None:
@@ -1196,7 +1257,7 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn(".account-layout", css)
         self.assertIn(".permission-grid", css)
 
-    def test_dynamic_device_fleet_and_safe_config_sync_are_wired(self) -> None:
+    def test_dynamic_device_fleet_is_lifecycle_only_and_presets_are_the_only_defaults(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
@@ -1208,12 +1269,6 @@ class StyleSettingsContractTests(unittest.TestCase):
             "managed-device-online",
             "managed-device-disabled",
             "refresh-managed-devices",
-            "select-all-managed-devices",
-            "push-managed-device-config",
-            "managed-config-history",
-            "device-sync-card",
-            "device-sync-revision",
-            "sync-device-config-now",
             "managed-device-dialog",
             "managed-device-form",
         ):
@@ -1223,32 +1278,55 @@ class StyleSettingsContractTests(unittest.TestCase):
             "get_managed_device",
             "rename_managed_device",
             "set_managed_device_active",
+            "acknowledge_managed_device",
+            "delete_managed_device",
+        ):
+            self.assertIn(f'checkedCall("{method}"', javascript)
+            self.assertIn(f'method === "{method}"', javascript)
+
+        combined_ui = html + javascript
+        for obsolete_copy in ("下发制作默认值", "选择接收设置", "全选设备"):
+            self.assertNotIn(obsolete_copy, combined_ui)
+        for obsolete_selector in (
+            "select-all-managed-devices",
+            "push-managed-device-config",
+            "managed-config-history",
+            "device-sync-card",
+            "device-sync-revision",
+            "sync-device-config-now",
+        ):
+            self.assertNotIn(obsolete_selector, combined_ui)
+        for obsolete_code in (
+            "portableManagedDeviceConfigPayload",
+            "renderManagedConfigHistory",
+            "renderDeviceSyncStatus",
+            "loadDeviceSyncStatus",
             "create_managed_device_config",
             "list_managed_device_configs",
             "get_managed_device_config",
             "get_device_sync_status",
             "sync_device_config_now",
         ):
-            self.assertIn(f'checkedCall("{method}"', javascript)
-            self.assertIn(f'method === "{method}"', javascript)
-        self.assertIn('checkedCall("acknowledge_managed_device"', javascript)
-        self.assertIn("function portableManagedDeviceConfigPayload()", javascript)
-        portable_body = javascript[
-            javascript.index("function portableManagedDeviceConfigPayload") :
-            javascript.index("function setManagedConfigStatus")
-        ]
-        self.assertNotIn("providers", portable_body)
-        self.assertNotIn("api_key", portable_body)
-        self.assertNotIn("video_encoder", portable_body)
-        self.assertNotIn("folder", portable_body)
-        self.assertIn('target_mode: targetMode', javascript)
-        self.assertIn('device_ids: sendAll ? [] : selectedIds', javascript)
+            self.assertNotIn(obsolete_code, javascript)
+
+        self.assertIn("function productionPresetItems", javascript)
+        self.assertIn('id: "team-default"', javascript)
+        self.assertIn('name: "团队默认"', javascript)
+        self.assertIn('checkedCall("save_production_preset"', javascript)
         self.assertIn("20_000", javascript)
-        self.assertIn("真实设备与下发状态", html)
-        self.assertIn("不会覆盖模型密钥、本机路径、编码器或服务地址", html)
+        self.assertIn("制作电脑", html)
+        self.assertIn("团队制作方案在“制作台方案”中统一管理", html)
         self.assertIn(".managed-device-stat-rail", css)
-        self.assertIn(".device-sync-card", css)
+        self.assertIn(".managed-device-workspace { display: block", css)
+        self.assertIn(".managed-device-status", css)
         self.assertIn(".managed-device-new-login", css)
+        for obsolete_style in (
+            ".managed-config-",
+            ".device-sync-",
+            ".managed-device-config-state",
+            ".managed-device-check",
+        ):
+            self.assertNotIn(obsolete_style, css)
         self.assertIn('id="delete-software-user"', html)
 
     def test_current_ui_hides_legacy_preview_approval_flow(self) -> None:
@@ -1436,15 +1514,19 @@ class StyleSettingsContractTests(unittest.TestCase):
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("自由配置（不套用方案）", javascript)
-        self.assertIn("另存为我的方案", javascript)
+        self.assertIn("保存为我的方案", javascript)
         self.assertIn("function productionPresetManagementItems()", javascript)
         self.assertIn('item.scope === "curated" || item.scope === "team"', javascript)
-        self.assertIn("Boolean(item.owned_by_current_user) || (includeManaged && !isEmployeeSession())", javascript)
+        self.assertIn("const isOwnedByCurrentUser = (item) => Boolean(item?.owned_by_current_user)", javascript)
+        self.assertIn("String(item?.owner_user_id || \"\") === currentUserId", javascript)
+        self.assertIn("deletable: owned || (!employee && includeManaged) || Boolean(item.deletable)", javascript)
         self.assertIn('checkedCall("save_production_preset"', javascript)
         self.assertIn("recipe: { production_settings: portableProductionSettings(settings) }", javascript)
         self.assertIn("制作台现在可以直接选择", javascript)
         self.assertIn("管理员删除", javascript)
-        self.assertIn('<b>我的制作方案 <em>${status}</em></b>', javascript)
+        self.assertIn('<b>制作方案 <em>${status}</em></b>', javascript)
+        self.assertIn('id: "team-default"', javascript)
+        self.assertIn('name: "团队默认"', javascript)
         self.assertNotIn('"员工制作方案"', javascript)
 
         self.assertIn("保存到制作台", html)

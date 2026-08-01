@@ -9,7 +9,11 @@ from unittest.mock import patch
 from storyforge import maintenance
 from storyforge.models import AppSettings
 from storyforge.providers.base import ProviderConfigurationError
-from storyforge.providers.tts import SpeechSegment, TTSResult
+from storyforge.providers.tts import (
+    SpeechSegment,
+    TTSResult,
+    female_voice_candidates,
+)
 from storyforge.services.voice_preview import VoicePreviewService, audition_excerpt
 
 
@@ -181,6 +185,38 @@ class VoicePreviewTests(unittest.TestCase):
             [item["cache_key"] for item in second],
         )
 
+    def test_wpm_changes_audio_cache_but_keeps_selected_voice_identity(self) -> None:
+        settings = AppSettings()
+        fake = _TimedFakeProvider()
+        story = " ".join(
+            f"word{index}{'.' if index % 12 == 0 else ''}"
+            for index in range(1, 241)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = VoicePreviewService(
+                lambda: settings,
+                tts_provider_factory=lambda _config: fake,
+            )
+            comfortable = service.generate(
+                story, "suspense", temporary, narration_wpm=220
+            )
+            very_fast = service.generate(
+                story, "suspense", temporary, narration_wpm=280
+            )
+
+        self.assertEqual(
+            [item["voice_id"] for item in comfortable],
+            [item["voice_id"] for item in very_fast],
+        )
+        self.assertEqual(
+            [item["selection_key"] for item in comfortable],
+            [item["selection_key"] for item in very_fast],
+        )
+        self.assertNotEqual(
+            [item["cache_key"] for item in comfortable],
+            [item["cache_key"] for item in very_fast],
+        )
+
     def test_cache_hit_survives_aggressive_size_prune_with_its_sidecar(self) -> None:
         settings = AppSettings()
         fake = _TimedFakeProvider()
@@ -253,7 +289,12 @@ class VoicePreviewTests(unittest.TestCase):
             configs.append(config)
             return fake
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "storyforge.services.voice_preview.available_female_voice_candidates",
+            side_effect=lambda provider, language, **_kwargs: female_voice_candidates(
+                provider, language
+            ),
+        ):
             service = VoicePreviewService(
                 lambda: settings,
                 tts_provider_factory=factory,

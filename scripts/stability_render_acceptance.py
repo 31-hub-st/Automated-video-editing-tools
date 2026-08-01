@@ -953,6 +953,66 @@ def verify_mp3(ffprobe: Path, path: Path) -> dict[str, object]:
     return {"codec": codec, "duration": duration, "audio_streams": len(audios)}
 
 
+def verify_regular_publish_contract(
+    *,
+    output_root: Path,
+    video_path: Path,
+    video_probe: dict[str, object],
+    job: RenderJob,
+    manifest: dict[str, object],
+) -> dict[str, object]:
+    """Verify the current regular-video contract: one MP4 and no MP3 sidecar."""
+
+    if int(video_probe.get("audio_streams") or 0) < 1:
+        raise AcceptanceError("Regular video does not contain an embedded audio stream.")
+    if str(job.narration_audio_file or "").strip():
+        raise AcceptanceError(
+            "Regular video unexpectedly published a separate narration artifact."
+        )
+    media = manifest.get("media") if isinstance(manifest.get("media"), dict) else {}
+    narration = (
+        media.get("narration_audio")
+        if isinstance(media.get("narration_audio"), dict)
+        else {}
+    )
+    if narration.get("enabled") is not False or str(
+        narration.get("output_file") or ""
+    ).strip():
+        raise AcceptanceError(
+            "Regular-video manifest still advertises a narration sidecar."
+        )
+    for section_name in ("job", "result"):
+        section = (
+            manifest.get(section_name)
+            if isinstance(manifest.get(section_name), dict)
+            else {}
+        )
+        if str(section.get("narration_audio_file") or "").strip():
+            raise AcceptanceError(
+                f"Regular-video manifest {section_name} contains a narration sidecar path."
+            )
+
+    published = [path for path in output_root.rglob("*") if path.is_file()]
+    mp4_files = [path.resolve() for path in published if path.suffix.casefold() == ".mp4"]
+    mp3_files = [path.resolve() for path in published if path.suffix.casefold() == ".mp3"]
+    if mp3_files:
+        raise AcceptanceError(
+            f"Regular video published {len(mp3_files)} unexpected MP3 sidecar(s)."
+        )
+    resolved_video = video_path.resolve()
+    if mp4_files != [resolved_video]:
+        raise AcceptanceError(
+            "Regular-video output must contain exactly the returned MP4 artifact."
+        )
+    return {
+        "mode": "regular_video",
+        "mp4_count": 1,
+        "mp3_count": 0,
+        "embedded_audio_streams": int(video_probe.get("audio_streams") or 0),
+        "narration_sidecar_enabled": False,
+    }
+
+
 def prepare_inputs(
     ffmpeg: Path,
     root: Path,
@@ -1149,7 +1209,6 @@ def render_scenario(
     }
     try:
         video_path = Path(runner(job, platform, progress)).resolve()
-        audio_path = Path(job.narration_audio_file).resolve()
         manifest_path = job_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         duration_check = next(
@@ -1170,13 +1229,13 @@ def render_scenario(
             expected_fps=int(output_fps),
             expected_duration_seconds=intended_duration,
         )
-        audio_probe = verify_mp3(ffprobe, audio_path)
-        if float(audio_probe.get("duration") or 0.0) + 0.75 < float(narration_seconds):
-            raise AcceptanceError(
-                "Narration MP3 is shorter than the requested acceptance workload: "
-                f"requested {narration_seconds:.3f}s, got "
-                f"{float(audio_probe.get('duration') or 0.0):.3f}s"
-            )
+        output_contract = verify_regular_publish_contract(
+            output_root=output_root,
+            video_path=video_path,
+            video_probe=video_probe,
+            job=job,
+            manifest=manifest,
+        )
 
         selected_videos = [Path(item) for item in manifest["media"]["videos"]]
         distinct_videos = {str(item.resolve()).casefold() for item in selected_videos}
@@ -1240,9 +1299,7 @@ def render_scenario(
                 "video": str(video_path),
                 "video_bytes": video_path.stat().st_size,
                 "video_probe": video_probe,
-                "mp3": str(audio_path),
-                "mp3_bytes": audio_path.stat().st_size,
-                "mp3_probe": audio_probe,
+                "output_contract": output_contract,
                 "distinct_source_clips": len(distinct_videos),
                 "bgm_mode": manifest["media"]["bgm_mode"],
                 "encoder": actual_encoder,

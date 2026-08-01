@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import stability_render_acceptance as acceptance
+from storyforge.models import RenderJob
 
 
 class StabilityAcceptanceTests(unittest.TestCase):
@@ -40,6 +41,77 @@ class StabilityAcceptanceTests(unittest.TestCase):
         stream = Mock()
         with patch("builtins.print", side_effect=OSError(22, "Invalid argument")):
             acceptance._console_print("progress", file=stream)
+
+    def test_regular_publish_contract_accepts_mp4_without_mp3_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            video = output / "publish" / "story.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"mp4")
+            job = RenderJob(
+                batch_id="batch",
+                platform_id="goodnovel",
+                source_file="B73165_Story.txt",
+                title="Story",
+                code="B73165",
+                video_folder="videos",
+                music_folder="music",
+                output_folder=str(output),
+            )
+            manifest = {
+                "job": {"narration_audio_file": ""},
+                "result": {"narration_audio_file": ""},
+                "media": {
+                    "narration_audio": {"enabled": False, "output_file": ""}
+                },
+            }
+
+            contract = acceptance.verify_regular_publish_contract(
+                output_root=output,
+                video_path=video,
+                video_probe={"audio_streams": 1},
+                job=job,
+                manifest=manifest,
+            )
+
+        self.assertEqual(contract["mp4_count"], 1)
+        self.assertEqual(contract["mp3_count"], 0)
+        self.assertEqual(contract["embedded_audio_streams"], 1)
+
+    def test_regular_publish_contract_rejects_legacy_mp3_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            video = output / "publish" / "story.mp4"
+            audio = output / "publish" / "story.mp3"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"mp4")
+            audio.write_bytes(b"mp3")
+            job = RenderJob(
+                batch_id="batch",
+                platform_id="goodnovel",
+                source_file="B73165_Story.txt",
+                title="Story",
+                code="B73165",
+                video_folder="videos",
+                music_folder="music",
+                output_folder=str(output),
+            )
+            manifest = {
+                "job": {"narration_audio_file": ""},
+                "result": {"narration_audio_file": ""},
+                "media": {
+                    "narration_audio": {"enabled": False, "output_file": ""}
+                },
+            }
+
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "unexpected MP3"):
+                acceptance.verify_regular_publish_contract(
+                    output_root=output,
+                    video_path=video,
+                    video_probe={"audio_streams": 1},
+                    job=job,
+                    manifest=manifest,
+                )
 
     def test_stable_build_switch_validates_report_and_exact_package_hash(self) -> None:
         script = (

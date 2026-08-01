@@ -754,6 +754,51 @@ class LibraryServiceTests(unittest.TestCase):
         )
         self.assertNotIn("voice_lock_history", stored["metadata"])
 
+    def test_changing_wpm_keeps_an_already_selected_voice(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "WPMVOICE1",
+            }
+        )["promo_code"]
+        stored = self.catalog.get_novel(novel["id"])
+        metadata = dict(stored.get("metadata") or {})
+        metadata["voice_candidates"] = [
+            {
+                "provider": "local_kokoro",
+                "voice_id": "af_heart",
+                "label": "Heart",
+                "profile": "dramatic",
+                "narration_wpm": 220,
+                "selection_key": "stable-voice-key",
+            }
+        ]
+        self.catalog.save_novel({"id": novel["id"], "metadata": metadata})
+
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {
+                    "provider": "local_kokoro",
+                    "voice_id": "af_heart",
+                    "label": "Heart",
+                    "profile": "dramatic",
+                },
+                "production_settings": {"narration_wpm": 280},
+            }
+        )["draft"]
+
+        self.assertEqual(draft["voice"]["voice_id"], "af_heart")
+        self.assertEqual(draft["production_settings"]["narration_wpm"], 280)
+
     def test_render_jobs_are_direct_full_jobs_and_keep_one_voice(self) -> None:
         novel = self._import()
         self.service.save_binding(
@@ -1422,8 +1467,8 @@ class LibraryServiceTests(unittest.TestCase):
                 "code": "REUSE01",
             }
         )["promo_code"]
-        narration = self.root / "existing-narration.mp3"
-        narration.write_bytes(b"existing audio")
+        narration = self.root / "existing-storyforge-video.mp4"
+        narration.write_bytes(b"storyforge video")
         draft = self.service.save_draft(
             {
                 "novel_id": novel["id"],
@@ -1437,7 +1482,7 @@ class LibraryServiceTests(unittest.TestCase):
                     "video_playback_speed": 2.5,
                     "video_transition": "fade",
                     "subtitle_word_mode": "cumulative",
-                    "bgm_mode": "none",
+                    "bgm_mode": "auto",
                 },
                 "source_narration_audio": str(narration),
             }
@@ -1461,8 +1506,51 @@ class LibraryServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["video_playback_speed"], 2.5)
         self.assertEqual(snapshot["video_transition"], "fade")
         self.assertEqual(snapshot["subtitle_word_mode"], "cumulative")
+        # A StoryForge video already contains its complete audio mix. Reuse
+        # must not require a music folder or add a second BGM track.
         self.assertEqual(snapshot["bgm_mode"], "none")
         self.assertEqual(jobs[0].music_folder, "")
+
+    def test_reuse_audio_rejects_unsupported_external_video_container(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "REUSE02",
+            }
+        )["promo_code"]
+        external = self.root / "ordinary-video.avi"
+        external.write_bytes(b"not a StoryForge source")
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "target_video_count": 1,
+                "production_settings": {
+                    "output_mode": "reuse_audio",
+                    "bgm_mode": "none",
+                },
+                "source_narration_audio": str(external),
+            }
+        )["draft"]
+        video = self.root / "reuse-video"
+        video.mkdir()
+
+        with self.assertRaisesRegex(ValueError, "MP3.*MP4/MOV/MKV/WEBM"):
+            self.service.build_render_jobs(
+                {
+                    "draft_id": draft["id"],
+                    "video_folder": str(video),
+                    "music_folder": "",
+                    "output_folder": str(self.root / "reuse-output"),
+                }
+            )
 
     def test_audio_only_plan_requires_output_but_not_video_or_music_folders(self) -> None:
         novel = self._import()

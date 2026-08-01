@@ -11,6 +11,7 @@ one argument rather than interpolated into a command string.
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 import hashlib
 import json
@@ -18,9 +19,11 @@ import math
 import os
 from pathlib import Path
 import random
+import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Callable, Iterable, Mapping, Sequence
 
 from ..cancellation import run_cancellable_process
@@ -40,12 +43,26 @@ VIDEO_FADE_SECONDS = 0.2
 MIN_PLAYBACK_SPEED = 0.8
 MAX_PLAYBACK_SPEED = 3.0
 
+# The media index is deliberately technical rather than "smart": it records
+# only paths, file snapshots, and durations.  Employee footage remains a
+# manual choice.  A five-minute refresh window prevents every queued job from
+# recursively walking a large local library, while ``refresh_media_index`` is
+# available when an employee has just copied new files into that library.
+MEDIA_INDEX_REFRESH_SECONDS = 5 * 60.0
+MEDIA_LAZY_PROBE_LIMIT = 32
+MEDIA_INDEX_SCHEMA_VERSION = 1
+
 _DurationCacheKey = tuple[str, int, int]
 _DURATION_CACHE: dict[_DurationCacheKey, float] = {}
 _DURATION_CACHE_LOCKS: dict[_DurationCacheKey, threading.RLock] = {}
 _DURATION_CACHE_GUARD = threading.RLock()
+_INDEXED_DURATION_SNAPSHOTS: dict[str, tuple[int, int, float, float]] = {}
 _USAGE_RECORD_LOCKS: dict[str, threading.RLock] = {}
 _USAGE_RECORD_GUARD = threading.RLock()
+_MEDIA_INDEX_LOCK = threading.RLock()
+_MEDIA_DISCOVERY_CACHE: dict[
+    tuple[str, str, tuple[str, ...]], tuple[float, tuple[Path, ...]]
+] = {}
 
 # Blurring a full 1080x1920 frame is one of the most expensive operations in
 # the render graph.  The blurred layer contains no fine detail by design, so
@@ -279,17 +296,333 @@ def _normalise_extension(path: Path) -> str:
     return path.suffix.casefold()
 
 
-def discover_files(folder: PathLike, extensions: Iterable[str]) -> list[Path]:
-    """Recursively discover matching files in deterministic path order."""
+def _media_index_path() -> Path:
+    """Return the persistent index path without importing application state.
 
-    root = Path(folder)
+    ``configure_runtime_environment`` sets both variables for an employee
+    build before this module is imported.  The explicit path is useful for
+    diagnostics and isolated tests; the data-directory fallback keeps source
+    and Hub runs compatible with the established configuration layout.
+    """
+
+    configured = str(os.environ.get("STORYFORGE_MEDIA_INDEX_PATH") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    data_value = str(os.environ.get("STORYFORGE_DATA_DIR") or "").strip()
+    if data_value:
+        data_root = Path(data_value).expanduser().resolve(strict=False)
+    else:
+        appdata = str(os.environ.get("APPDATA") or "").strip()
+        data_root = (
+            Path(appdata)
+            if appdata
+            else Path.home() / "AppData" / "Roaming"
+        ) / "StoryForgeStudio"
+    return data_root / "cache" / "media-index.sqlite3"
+
+
+def _media_refresh_seconds() -> float:
+    raw = str(os.environ.get("STORYFORGE_MEDIA_INDEX_REFRESH_SECONDS") or "").strip()
+    if not raw:
+        return MEDIA_INDEX_REFRESH_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return MEDIA_INDEX_REFRESH_SECONDS
+    if not math.isfinite(value):
+        return MEDIA_INDEX_REFRESH_SECONDS
+    return max(1.0, min(value, 24 * 60 * 60.0))
+
+
+def _canonical_path_key(path: Path) -> str:
+    return os.path.normcase(str(path.expanduser().resolve(strict=False)))
+
+
+def _open_media_index() -> sqlite3.Connection:
+    path = _media_index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=5.0)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS roots (
+            root_key TEXT PRIMARY KEY,
+            root_path TEXT NOT NULL,
+            scanned_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS files (
+            root_key TEXT NOT NULL,
+            path_key TEXT NOT NULL,
+            path TEXT NOT NULL,
+            suffix TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            PRIMARY KEY (root_key, path_key)
+        );
+        CREATE INDEX IF NOT EXISTS files_root_suffix
+            ON files(root_key, suffix, path_key);
+        CREATE TABLE IF NOT EXISTS durations (
+            path_key TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            duration REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (path_key, size_bytes, mtime_ns)
+        );
+        """
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', ?)",
+        (str(MEDIA_INDEX_SCHEMA_VERSION),),
+    )
+    connection.commit()
+    return connection
+
+
+def _scan_media_files(root: Path) -> list[tuple[str, str, str, int, int]]:
+    """Walk a local media root once without following links or reparse trees."""
+
+    discovered: list[tuple[str, str, str, int, int]] = []
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_names[:] = sorted(
+            (
+                name
+                for name in directory_names
+                if not (Path(directory) / name).is_symlink()
+            ),
+            key=str.casefold,
+        )
+        for name in sorted(file_names, key=str.casefold):
+            path = Path(directory) / name
+            suffix = path.suffix.casefold()
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                stat = path.stat()
+            except OSError:
+                continue
+            path_key = _canonical_path_key(path)
+            discovered.append(
+                (
+                    path_key,
+                    str(path.resolve(strict=False)),
+                    suffix,
+                    max(0, int(stat.st_size)),
+                    int(stat.st_mtime_ns),
+                )
+            )
+    discovered.sort(key=lambda item: item[1].casefold())
+    return discovered
+
+
+def _remember_indexed_durations(
+    rows: Iterable[tuple[str, int, int, float | None]],
+    *,
+    expires_at: float,
+) -> None:
+    with _DURATION_CACHE_GUARD:
+        for path_key, size_bytes, mtime_ns, raw_duration in rows:
+            if raw_duration is None:
+                continue
+            duration = float(raw_duration)
+            if not math.isfinite(duration) or duration <= 0:
+                continue
+            key = (str(path_key), int(size_bytes), int(mtime_ns))
+            _DURATION_CACHE[key] = duration
+            _INDEXED_DURATION_SNAPSHOTS[str(path_key)] = (
+                int(size_bytes),
+                int(mtime_ns),
+                duration,
+                expires_at,
+            )
+
+
+def _indexed_discover_files(
+    root: Path,
+    allowed: frozenset[str],
+    *,
+    force_refresh: bool = False,
+) -> list[Path]:
+    database_key = _canonical_path_key(_media_index_path())
+    root_key = _canonical_path_key(root)
+    extension_key = tuple(sorted(allowed))
+    cache_key = (database_key, root_key, extension_key)
+    now_monotonic = time.monotonic()
+    refresh_seconds = _media_refresh_seconds()
+
+    with _MEDIA_INDEX_LOCK:
+        cached = _MEDIA_DISCOVERY_CACHE.get(cache_key)
+        if not force_refresh and cached is not None and cached[0] > now_monotonic:
+            return list(cached[1])
+
+        with closing(_open_media_index()) as connection:
+            row = connection.execute(
+                "SELECT scanned_at FROM roots WHERE root_key = ?",
+                (root_key,),
+            ).fetchone()
+            scanned_at = float(row[0]) if row is not None else 0.0
+            current_time = time.time()
+            fresh = (
+                not force_refresh
+                and scanned_at > 0
+                and current_time - scanned_at < refresh_seconds
+            )
+            if not fresh:
+                entries = _scan_media_files(root)
+                old_keys = {
+                    str(item[0])
+                    for item in connection.execute(
+                        "SELECT path_key FROM files WHERE root_key = ?",
+                        (root_key,),
+                    )
+                }
+                new_keys = {item[0] for item in entries}
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("DELETE FROM files WHERE root_key = ?", (root_key,))
+                connection.executemany(
+                    """
+                    INSERT INTO files(
+                        root_key, path_key, path, suffix, size_bytes, mtime_ns
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ((root_key, *item) for item in entries),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO roots(root_key, root_path, scanned_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(root_key) DO UPDATE SET
+                        root_path = excluded.root_path,
+                        scanned_at = excluded.scanned_at
+                    """,
+                    (root_key, str(root), current_time),
+                )
+                for path_key, _path, _suffix, size_bytes, mtime_ns in entries:
+                    connection.execute(
+                        """
+                        DELETE FROM durations
+                        WHERE path_key = ?
+                          AND NOT (size_bytes = ? AND mtime_ns = ?)
+                        """,
+                        (path_key, size_bytes, mtime_ns),
+                    )
+                removed_keys = old_keys - new_keys
+                if removed_keys:
+                    connection.executemany(
+                        "DELETE FROM durations WHERE path_key = ?",
+                        ((item,) for item in removed_keys),
+                    )
+                # Bound orphaned entries from roots that were removed outside
+                # StoryForge.  This is a cache only; failures never block a job.
+                connection.execute(
+                    "DELETE FROM durations WHERE updated_at < ?",
+                    (current_time - 30 * 24 * 60 * 60,),
+                )
+                stale_root_keys = tuple(
+                    str(item[0])
+                    for item in connection.execute(
+                        "SELECT root_key FROM roots WHERE scanned_at < ?",
+                        (current_time - 30 * 24 * 60 * 60,),
+                    )
+                )
+                if stale_root_keys:
+                    connection.executemany(
+                        "DELETE FROM files WHERE root_key = ?",
+                        ((item,) for item in stale_root_keys),
+                    )
+                    connection.executemany(
+                        "DELETE FROM roots WHERE root_key = ?",
+                        ((item,) for item in stale_root_keys),
+                    )
+                connection.commit()
+                scanned_at = current_time
+
+            placeholders = ",".join("?" for _item in extension_key)
+            query = f"""
+                SELECT f.path_key, f.path, f.size_bytes, f.mtime_ns, d.duration
+                FROM files AS f
+                LEFT JOIN durations AS d
+                  ON d.path_key = f.path_key
+                 AND d.size_bytes = f.size_bytes
+                 AND d.mtime_ns = f.mtime_ns
+                WHERE f.root_key = ? AND f.suffix IN ({placeholders})
+                ORDER BY f.path COLLATE NOCASE
+            """
+            rows = list(connection.execute(query, (root_key, *extension_key)))
+
+        expires_at = now_monotonic + refresh_seconds
+        _remember_indexed_durations(
+            (
+                (str(path_key), int(size_bytes), int(mtime_ns), duration)
+                for path_key, _path, size_bytes, mtime_ns, duration in rows
+            ),
+            expires_at=expires_at,
+        )
+        paths = tuple(Path(str(row[1])) for row in rows)
+        _MEDIA_DISCOVERY_CACHE[cache_key] = (expires_at, paths)
+        return list(paths)
+
+
+def discover_files(folder: PathLike, extensions: Iterable[str]) -> list[Path]:
+    """Return an indexed, deterministic recursive media listing.
+
+    The first call scans the selected root.  Later queued jobs reuse the
+    persistent snapshot instead of performing another complete ``rglob``.
+    Index corruption or a read-only cache never makes production fail: the
+    function falls back to a direct read-only walk for that call.
+    """
+
+    root = Path(folder).expanduser().resolve(strict=False)
     if not root.is_dir():
         raise MediaError(f"Media folder does not exist: {root}")
-    allowed = {extension.casefold() for extension in extensions}
-    return sorted(
-        (path for path in root.rglob("*") if path.is_file() and _normalise_extension(path) in allowed),
-        key=lambda path: path.as_posix().casefold(),
-    )
+    allowed = frozenset(extension.casefold() for extension in extensions)
+    if not allowed:
+        return []
+    try:
+        return _indexed_discover_files(root, allowed)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
+        # The index is an optimization, never a production dependency.
+        return sorted(
+            (
+                path
+                for path in root.rglob("*")
+                if path.is_file() and _normalise_extension(path) in allowed
+            ),
+            key=lambda path: path.as_posix().casefold(),
+        )
+
+
+def refresh_media_index(
+    folder: PathLike,
+    extensions: Iterable[str] = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS,
+) -> list[Path]:
+    """Force one incremental technical refresh after files were added."""
+
+    root = Path(folder).expanduser().resolve(strict=False)
+    if not root.is_dir():
+        raise MediaError(f"Media folder does not exist: {root}")
+    allowed = frozenset(extension.casefold() for extension in extensions)
+    try:
+        return _indexed_discover_files(root, allowed, force_refresh=True)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
+        return discover_files(root, allowed)
+
+
+def clear_media_index_memory_cache() -> None:
+    """Forget process-local snapshots while retaining the persistent index."""
+
+    with _MEDIA_INDEX_LOCK:
+        _MEDIA_DISCOVERY_CACHE.clear()
+    with _DURATION_CACHE_GUARD:
+        _DURATION_CACHE.clear()
+        _DURATION_CACHE_LOCKS.clear()
+        _INDEXED_DURATION_SNAPSHOTS.clear()
 
 
 def _duration_cache_key(path: Path) -> _DurationCacheKey | None:
@@ -312,11 +645,76 @@ def clear_duration_cache() -> None:
     with _DURATION_CACHE_GUARD:
         _DURATION_CACHE.clear()
         _DURATION_CACHE_LOCKS.clear()
+        _INDEXED_DURATION_SNAPSHOTS.clear()
 
 
-def _cached_duration(path: Path, resolver: DurationResolver) -> float:
+def _persistent_duration(key: _DurationCacheKey) -> float | None:
+    try:
+        with _MEDIA_INDEX_LOCK, closing(_open_media_index()) as connection:
+            row = connection.execute(
+                """
+                SELECT duration FROM durations
+                WHERE path_key = ? AND size_bytes = ? AND mtime_ns = ?
+                """,
+                key,
+            ).fetchone()
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
+        return None
+    if row is None:
+        return None
+    try:
+        duration = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    return duration if math.isfinite(duration) and duration > 0 else None
+
+
+def _store_persistent_duration(key: _DurationCacheKey, duration: float) -> None:
+    try:
+        with _MEDIA_INDEX_LOCK, closing(_open_media_index()) as connection:
+            connection.execute(
+                "DELETE FROM durations WHERE path_key = ?",
+                (key[0],),
+            )
+            connection.execute(
+                """
+                INSERT INTO durations(
+                    path_key, size_bytes, mtime_ns, duration, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (*key, duration, time.time()),
+            )
+            connection.commit()
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
+        # A cache write can fail on antivirus locks or a read-only volume.
+        # The successfully probed duration remains valid in memory.
+        return
+
+
+def _trusted_index_duration(path: Path) -> float | None:
+    key = _canonical_path_key(path)
+    with _DURATION_CACHE_GUARD:
+        snapshot = _INDEXED_DURATION_SNAPSHOTS.get(key)
+    if snapshot is None:
+        return None
+    _size_bytes, _mtime_ns, duration, expires_at = snapshot
+    if expires_at <= time.monotonic():
+        return None
+    return duration
+
+
+def _cached_duration(
+    path: Path,
+    resolver: DurationResolver,
+    *,
+    trust_index: bool = False,
+) -> float:
     """Resolve one duration once per canonical path/size/mtime snapshot."""
 
+    if trust_index:
+        indexed = _trusted_index_duration(path)
+        if indexed is not None:
+            return indexed
     key = _duration_cache_key(path)
     if key is None:
         return float(resolver(path))
@@ -326,6 +724,17 @@ def _cached_duration(path: Path, resolver: DurationResolver) -> float:
             cached = _DURATION_CACHE.get(key)
         if cached is not None:
             return cached
+        persisted = _persistent_duration(key)
+        if persisted is not None:
+            with _DURATION_CACHE_GUARD:
+                _DURATION_CACHE[key] = persisted
+                _INDEXED_DURATION_SNAPSHOTS[key[0]] = (
+                    key[1],
+                    key[2],
+                    persisted,
+                    time.monotonic() + _media_refresh_seconds(),
+                )
+            return persisted
         duration = float(resolver(path))
         if math.isfinite(duration) and duration > 0:
             with _DURATION_CACHE_GUARD:
@@ -340,6 +749,13 @@ def _cached_duration(path: Path, resolver: DurationResolver) -> float:
                     _DURATION_CACHE.pop(item, None)
                     _DURATION_CACHE_LOCKS.pop(item, None)
                 _DURATION_CACHE[key] = duration
+                _INDEXED_DURATION_SNAPSHOTS[key[0]] = (
+                    key[1],
+                    key[2],
+                    duration,
+                    time.monotonic() + _media_refresh_seconds(),
+                )
+            _store_persistent_duration(key, duration)
         return duration
 
 
@@ -496,7 +912,11 @@ def select_video_assets(
         VideoAsset(
             path=path,
             usage_count=usage.get(_usage_key(path, root), 0),
-            duration=_cached_duration(path, duration_resolver) if duration_resolver else None,
+            duration=(
+                _planning_duration(path, duration_resolver)
+                if duration_resolver
+                else None
+            ),
         )
         for path in paths
     ]
@@ -553,6 +973,17 @@ def probe_duration(
         return duration
 
     return _cached_duration(path, resolve)
+
+
+def _planning_duration(path: Path, resolver: DurationResolver) -> float:
+    """Resolve a duration while trusting the fresh technical media snapshot."""
+
+    indexed = _trusted_index_duration(path)
+    if indexed is not None:
+        return indexed
+    if resolver is probe_duration:
+        return probe_duration(path)
+    return _cached_duration(path, resolver, trust_index=True)
 
 
 def _stable_variant_seed(value: int | str | bytes) -> int:
@@ -644,25 +1075,6 @@ def plan_video_segments(
 
     initial_usage = load_usage_record(root, usage_filename=usage_filename)
     working_usage = dict(initial_usage)
-    durations: dict[Path, float] = {}
-    probe_errors: list[str] = []
-    for path in paths:
-        try:
-            duration = _cached_duration(path, duration_resolver)
-        except (MediaError, OSError, TypeError, ValueError) as exc:
-            probe_errors.append(f"{path.name}: {exc}")
-            continue
-        if math.isfinite(duration) and duration > 0:
-            durations[path] = duration
-        else:
-            probe_errors.append(f"{path.name}: invalid duration {duration!r}")
-    if not durations:
-        details = "; ".join(probe_errors) or "no probe results"
-        raise MediaError(f"No usable videos found in {root}: {details}")
-
-    segments: list[VideoSegment] = []
-    uses_this_plan: dict[str, int] = {}
-    remaining = target_duration
     seed_value = _stable_variant_seed(variant_seed) if variant_seed is not None else None
     randomiser = random.Random(seed_value) if seed_value is not None else None
 
@@ -686,6 +1098,54 @@ def plan_video_segments(
                 tied = tied[offset:] + tied[:offset]
             ordered.extend(tied)
         return ordered
+
+    durations: dict[Path, float] = {}
+    probe_errors: list[str] = []
+    sufficient_candidate: Path | None = None
+    usable_span = 0.0
+    uncached_probes = 0
+    # A fresh library can contain thousands of files. Probe only enough
+    # least-used candidates to produce this job; cached candidates remain
+    # effectively free and are still considered. Subsequent jobs gradually
+    # fill the persistent duration index as usage rotates through the library.
+    for path in rotate_equal_usage(paths):
+        indexed_duration = _trusted_index_duration(path)
+        if (
+            indexed_duration is None
+            and uncached_probes >= MEDIA_LAZY_PROBE_LIMIT
+            and usable_span + 1e-6 >= target_duration
+        ):
+            continue
+        if indexed_duration is None:
+            uncached_probes += 1
+        try:
+            duration = _planning_duration(path, duration_resolver)
+        except (MediaError, OSError, TypeError, ValueError) as exc:
+            probe_errors.append(f"{path.name}: {exc}")
+            continue
+        if math.isfinite(duration) and duration > 0:
+            durations[path] = duration
+            available = duration / speed
+            if available + 1e-6 >= target_duration:
+                sufficient_candidate = path
+                break
+            if video_transition == "fade" and durations:
+                contribution = max(
+                    0.0,
+                    available - (transition_overlap if len(durations) > 1 else 0.0),
+                )
+            else:
+                contribution = available
+            usable_span += contribution
+        else:
+            probe_errors.append(f"{path.name}: invalid duration {duration!r}")
+    if not durations:
+        details = "; ".join(probe_errors) or "no probe results"
+        raise MediaError(f"No usable videos found in {root}: {details}")
+
+    segments: list[VideoSegment] = []
+    uses_this_plan: dict[str, int] = {}
+    remaining = target_duration
 
     def append_segment(chosen: Path, desired_duration: float) -> float:
         """Append one segment and return its effective timeline contribution."""
@@ -726,27 +1186,8 @@ def plan_video_segments(
         working_usage[key] = count_before + 1
         return desired_duration - (transition_overlap if len(segments) > 1 else 0.0)
 
-    sufficient = [
-        path
-        for path, source_duration in durations.items()
-        if source_duration / speed + 1e-6 >= target_duration
-    ]
-    if sufficient:
-        lowest_usage = min(usage_count(path, initial_usage) for path in sufficient)
-        eligible = sorted(
-            (
-                path
-                for path in sufficient
-                if usage_count(path, initial_usage) == lowest_usage
-            ),
-            key=lambda path: path.as_posix().casefold(),
-        )
-        chosen = (
-            eligible[seed_value % len(eligible)]
-            if seed_value is not None
-            else eligible[0]
-        )
-        append_segment(chosen, target_duration)
+    if sufficient_candidate is not None:
+        append_segment(sufficient_candidate, target_duration)
         remaining = 0.0
     else:
         distinct_paths = rotate_equal_usage(durations)
@@ -844,20 +1285,18 @@ def _category_media_files(
         raise MediaError(f"Media folder does not exist: {root}")
     category = canonical_mood(mood)
     accepted_names = {name.casefold() for name in MOOD_ALIASES[category]}
-    category_dirs = [
-        root
-        if root.name.casefold() in accepted_names
-        else None
+    indexed = discover_files(root, extensions)
+    if root.name.casefold() in accepted_names:
+        return indexed
+    files = [
+        path
+        for path in indexed
+        if any(
+            parent.name.casefold() in accepted_names
+            for parent in path.parents
+            if parent != root and root in parent.parents
+        )
     ]
-    category_dirs.extend(
-        directory
-        for directory in root.rglob("*")
-        if directory.is_dir() and directory.name.casefold() in accepted_names
-    )
-    files: set[Path] = set()
-    for directory in category_dirs:
-        if directory is not None:
-            files.update(discover_files(directory, extensions))
     return sorted(files, key=lambda path: path.as_posix().casefold())
 
 
@@ -867,31 +1306,24 @@ def _music_candidates(music_folder: PathLike, mood: str) -> tuple[str, list[Path
         raise MediaError(f"Music folder does not exist: {root}")
     category = canonical_mood(mood)
     accepted_names = {name.casefold() for name in MOOD_ALIASES[category]}
-
-    category_dirs = [
-        directory
-        for directory in root.rglob("*")
-        if directory.is_dir() and directory.name.casefold() in accepted_names
-    ]
+    indexed = discover_files(root, AUDIO_EXTENSIONS)
     if root.name.casefold() in accepted_names:
-        category_dirs.append(root)
-
-    candidates: set[Path] = set()
-    for directory in category_dirs:
-        candidates.update(
+        candidates = set(indexed)
+    else:
+        candidates = {
             path
-            for path in directory.rglob("*")
-            if path.is_file() and _normalise_extension(path) in AUDIO_EXTENSIONS
-        )
+            for path in indexed
+            if any(
+                parent.name.casefold() in accepted_names
+                for parent in path.parents
+                if parent != root and root in parent.parents
+            )
+        }
 
-    # A flat music folder remains usable during initial setup.  Once recognised
-    # category folders exist, files from other categories are never mixed in.
-    if not category_dirs:
-        candidates.update(
-            path
-            for path in root.iterdir()
-            if path.is_file() and _normalise_extension(path) in AUDIO_EXTENSIONS
-        )
+    # A flat music folder remains usable during initial setup. Once recognised
+    # category media exists, files from other categories are never mixed in.
+    if not candidates:
+        candidates.update(path for path in indexed if path.parent == root)
     ordered = sorted(candidates, key=lambda path: path.as_posix().casefold())
     return category, ordered
 
@@ -932,7 +1364,7 @@ def select_music_asset(
     errors: list[str] = []
     for path in candidates:
         try:
-            duration = _cached_duration(path, duration_resolver)
+            duration = _planning_duration(path, duration_resolver)
         except (MediaError, OSError, TypeError, ValueError) as exc:
             errors.append(f"{path.name}: {exc}")
             continue
@@ -1886,6 +2318,8 @@ __all__ = [
     "DEFAULT_USAGE_FILENAME",
     "FFmpegPlan",
     "MAX_PLAYBACK_SPEED",
+    "MEDIA_INDEX_REFRESH_SECONDS",
+    "MEDIA_LAZY_PROBE_LIMIT",
     "MIN_PLAYBACK_SPEED",
     "MOOD_ALIASES",
     "MediaError",
@@ -1901,6 +2335,7 @@ __all__ = [
     "build_low_memory_segment_plan",
     "canonical_mood",
     "clear_duration_cache",
+    "clear_media_index_memory_cache",
     "discover_files",
     "escape_filter_path",
     "execute_ffmpeg",
@@ -1908,6 +2343,7 @@ __all__ = [
     "load_usage_record",
     "plan_video_segments",
     "probe_duration",
+    "refresh_media_index",
     "save_usage_record",
     "select_music_asset",
     "select_video_assets",

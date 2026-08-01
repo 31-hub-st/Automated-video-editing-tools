@@ -688,27 +688,49 @@ def configure_runtime_environment(
     paths = {
         "logs": root / "logs",
         "runtime_temp": root / "runtime-temp",
+        "cache": root / "cache",
         "tts": root / "cache" / "tts",
         "huggingface": root / "cache" / "huggingface",
+        "huggingface_datasets": root / "cache" / "huggingface" / "datasets",
         "torch": root / "cache" / "torch",
+        "torchinductor": root / "cache" / "torchinductor",
+        "triton": root / "cache" / "triton",
+        "numba": root / "cache" / "numba",
+        "matplotlib": root / "cache" / "matplotlib",
+        "pip": root / "cache" / "pip",
+        "uv": root / "cache" / "uv",
         "espeak": root / "cache" / "espeak",
         "webview": root / "webview",
         "python": root / "cache" / "python",
+        "data": root / "data",
+        "config": root / "config",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
 
     os.environ["STORYFORGE_TTS_CACHE_DIR"] = str(paths["tts"])
+    os.environ["STORYFORGE_MEDIA_INDEX_PATH"] = str(
+        paths["cache"] / "media-index.sqlite3"
+    )
     os.environ["STORYFORGE_ESPEAK_CACHE"] = str(paths["espeak"])
     os.environ["STORYFORGE_WEBVIEW_DATA_DIR"] = str(paths["webview"])
     if not str(os.environ.get("WEBVIEW2_USER_DATA_FOLDER") or "").strip():
         os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(paths["webview"])
     os.environ["HF_HOME"] = str(paths["huggingface"])
     os.environ["HF_HUB_CACHE"] = str(paths["huggingface"] / "hub")
+    os.environ["HF_DATASETS_CACHE"] = str(paths["huggingface_datasets"])
     os.environ["TRANSFORMERS_CACHE"] = str(paths["huggingface"] / "transformers")
     os.environ["TORCH_HOME"] = str(paths["torch"])
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(paths["torchinductor"])
+    os.environ["TRITON_CACHE_DIR"] = str(paths["triton"])
+    os.environ["NUMBA_CACHE_DIR"] = str(paths["numba"])
+    os.environ["MPLCONFIGDIR"] = str(paths["matplotlib"])
+    os.environ["PIP_CACHE_DIR"] = str(paths["pip"])
+    os.environ["UV_CACHE_DIR"] = str(paths["uv"])
     os.environ["PYTHONPYCACHEPREFIX"] = str(paths["python"])
-    os.environ["XDG_CACHE_HOME"] = str(root / "cache")
+    os.environ["XDG_CACHE_HOME"] = str(paths["cache"])
+    os.environ["XDG_DATA_HOME"] = str(paths["data"])
+    os.environ["XDG_CONFIG_HOME"] = str(paths["config"])
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(paths["runtime_temp"])
     # Some standard-library users cache gettempdir() before the environment is

@@ -223,7 +223,7 @@ class EdgeProviderTests(unittest.TestCase):
             TTSVoiceOption("de-DE-CoraNeural", "Cora", "calm"),
         )
         with tempfile.TemporaryDirectory() as temporary, patch(
-            "storyforge.services.voice_preview.female_voice_candidates",
+            "storyforge.services.voice_preview.available_female_voice_candidates",
             return_value=catalog,
         ):
             result = VoicePreviewService(

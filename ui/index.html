@@ -110,15 +110,12 @@
             </div>
           </section>
 
-          <div class="production-ribbon workbench-recipe" id="production-ribbon" aria-label="本批制作步骤">
-            <div class="ribbon-node is-current" data-stage="script"><span>01</span><b>选择内容</b><small>小说 · 分集 · 口令</small></div>
-            <i></i>
-            <div class="ribbon-node" data-stage="voice"><span>02</span><b>本批设置</b><small>配音 · 字幕 · 素材</small></div>
-            <i></i>
-            <div class="ribbon-node" data-stage="visual"><span>03</span><b>即时预览</b><small>开头 · 字幕 · 封面结尾</small></div>
-            <i></i>
-            <div class="ribbon-node" data-stage="output"><span>04</span><b>完整生成</b><small>直接全自动执行</small></div>
-          </div>
+          <nav class="production-ribbon production-section-jumpbar" id="production-ribbon" aria-label="本批制作快捷导航">
+            <button type="button" data-production-jump="content" aria-controls="production-section-content-body"><span>01</span><b>内容</b><small data-production-jump-status="content">选择小说后检查</small></button>
+            <button type="button" data-production-jump="voice" aria-controls="production-section-voice-body"><span>02</span><b>配音与节奏</b><small data-production-jump-status="voice">选择小说后检查</small></button>
+            <button type="button" data-production-jump="visual" aria-controls="production-section-visual-body"><span>03</span><b>字幕与画面</b><small data-production-jump-status="visual">选择小说后检查</small></button>
+            <button type="button" data-production-jump="output" aria-controls="production-section-output-body"><span>04</span><b>素材与输出</b><small data-production-jump-status="output">选择小说后检查</small></button>
+          </nav>
 
           <div class="production-local-toolbar">
             <div class="production-local-tabs" role="tablist" aria-label="制作台页面">
@@ -187,6 +184,7 @@
               <div class="preview-heading">
                 <div><p class="section-kicker">LIVE FRAME</p><h2>安全区预览</h2></div>
                 <div class="preview-heading-actions">
+                  <button type="button" class="preview-replay-button" data-replay-production-preview aria-label="重新播放当前预览动效">重播动效</button>
                   <label class="mini-toggle"><input id="safe-zone-toggle" type="checkbox" checked /><span></span>安全区</label>
                   <button type="button" class="preview-drawer-close" data-close-production-preview-drawer aria-label="关闭画面预览">×</button>
                 </div>
@@ -213,11 +211,9 @@
                   <div class="code-card" id="preview-code" lang="en-US">Search Platform: 123456</div>
                   <div class="preview-hook" lang="en-US">THE CALL CAME<br />AT 10:00 PM.</div>
                   <div class="story-template-intro" aria-label="平台简介卡开场预览">
-                    <h3 class="story-preview-title" id="preview-story-title" lang="en-US">THE CALL AT TEN</h3>
                     <div class="story-summary-card">
                       <div class="story-card-ticket"><span class="story-card-platform-mark" id="preview-story-platform-mark" aria-hidden="true"><span class="platform-logo-fallback">P</span></span><b id="preview-story-search">Platform · Search “123456”</b></div>
                       <p id="preview-story-copy" lang="en-US">Select a novel to preview its saved synopsis. When AI copy is enabled, it may tighten the wording without changing story facts.</p>
-                      <strong class="story-card-label">STORY BRIEF</strong>
                     </div>
                   </div>
                   <div class="preview-subtitle" id="preview-subtitle" lang="en-US">
@@ -463,7 +459,7 @@
                   </div>
                 </details>
                 <p class="dialog-status" id="software-user-status" role="status">新账号默认使用员工权限。</p>
-                <div class="form-actions"><button type="button" class="button button-danger is-hidden" id="delete-software-user">删除这个账号</button><button type="submit" class="button button-primary" id="save-software-user">保存成员账号</button></div>
+                <div class="form-actions"><button type="button" class="button button-danger is-hidden settings-admin-only" id="delete-software-user">删除这个账号</button><button type="submit" class="button button-primary" id="save-software-user">保存成员账号</button></div>
               </form>
             </section>
           </div>
@@ -512,7 +508,7 @@
                   <span>实际效果</span>
                   <b id="platform-template-preview">Search Platform: 123456</b>
                 </div>
-                <div class="form-actions"><button type="button" class="button button-danger is-hidden" id="delete-platform">删除平台</button><button type="submit" class="button button-primary">保存平台</button></div>
+                <div class="form-actions"><button type="button" class="button button-danger is-hidden settings-admin-only" id="delete-platform">删除平台</button><button type="submit" class="button button-primary">保存平台</button></div>
               </form>
             </section>
           </div>
@@ -553,7 +549,7 @@
                 </div>
                 <label class="field"><span>备注</span><textarea name="notes" rows="3" placeholder="记录发布偏好或账号注意事项"></textarea></label>
                 <label class="switch-row"><span><b>允许在制作台选择</b><small>停用后保留历史记录，但不会出现在新批次中。</small></span><input name="active" type="checkbox" checked /><i></i></label>
-                <div class="form-actions"><button type="submit" class="button button-primary">保存发布账号</button></div>
+                <div class="form-actions"><button type="button" class="button button-danger is-hidden settings-admin-only" id="delete-publishing-account">删除这个账号</button><button type="submit" class="button button-primary">保存发布账号</button></div>
               </form>
             </section>
           </div>
@@ -855,7 +851,7 @@
                 </div>
                 <div class="safe-zone"><span>SAFE FRAME</span></div>
                 <div class="code-card">Search GoodNovel: B56826</div>
-                <div class="story-template-intro" aria-label="平台简介卡开场预览"><h3 class="story-preview-title" lang="en-US">HER HUSBAND HAD ANOTHER LIFE</h3><div class="story-summary-card"><div class="story-card-ticket"><span class="story-card-platform-mark" id="style-story-platform-mark" aria-hidden="true"><span class="platform-logo-fallback">G</span></span><b id="style-story-search">GoodNovel · Search “B56826”</b></div><p lang="en-US">A late-night message exposes the secret he kept for years. She must decide whether revenge is worth the price.</p><strong class="story-card-label">STORY BRIEF</strong></div></div>
+                <div class="story-template-intro" aria-label="平台简介卡开场预览"><div class="story-summary-card"><div class="story-card-ticket"><span class="story-card-platform-mark" id="style-story-platform-mark" aria-hidden="true"><span class="platform-logo-fallback">G</span></span><b id="style-story-search">GoodNovel · Search “B56826”</b></div><p lang="en-US">A late-night message exposes the secret he kept for years. She must decide whether revenge is worth the price.</p></div></div>
                 <div class="preview-subtitle" lang="en-US"><span class="caption-word is-read">She</span> <span class="caption-word is-read">opened</span> <span class="caption-word is-current">the</span> <span class="caption-word">message</span> <span class="caption-word">and</span> <span class="caption-word">realized</span> <span class="caption-word">her</span> <span class="caption-word">husband</span> <span class="caption-word">had</span> <span class="caption-word">another</span> <span class="caption-word">life.</span></div>
                 <div class="preview-subtitle outro-caption-preview" lang="en-US">Download GoodNovel and search B56826 to continue reading.</div>
                 <div class="outro-style-preview" hidden aria-hidden="true"><span class="outro-kicker">KEEP READING</span><h3>The truth was only beginning.</h3><p>Download GoodNovel to uncover what she did next.</p><strong>Search “B56826”</strong></div>
@@ -985,20 +981,6 @@
                 <button type="button" class="button button-secondary" id="copy-hub-client-web-endpoint" disabled>复制制作网址</button>
                 <small>只在这台制作电脑打开。候选配音、素材、字幕、队列和成片都由本机处理，主电脑只提供共享资料和文本 AI。</small>
               </div>
-              <section class="device-sync-card is-hidden" id="device-sync-card" aria-labelledby="device-sync-title">
-                <div class="device-sync-heading">
-                  <span class="device-sync-pulse" id="device-sync-pulse" aria-hidden="true"></span>
-                  <div><small>本机制作设置</small><b id="device-sync-title">等待同步</b></div>
-                  <em id="device-sync-badge">未连接</em>
-                </div>
-                <p id="device-sync-copy">连接主电脑后，这台电脑会自动接收管理员下发的字幕、语速和输出设置。</p>
-                <div class="device-sync-facts">
-                  <span><small>已应用版本</small><b id="device-sync-revision">本机默认</b></span>
-                  <span><small>最近同步</small><b id="device-sync-time">尚未同步</b></span>
-                </div>
-                <p class="device-sync-error is-hidden" id="device-sync-error" role="alert"></p>
-                <button type="button" class="button button-secondary" id="sync-device-config-now">立即同步设置</button>
-              </section>
               <button type="button" class="button button-secondary" id="check-hub-status">检查连接</button>
             </aside>
           </div>
@@ -1006,53 +988,26 @@
             <header class="managed-device-head">
               <div>
                 <p class="section-kicker">WORKSTATION FLEET / 制作电脑</p>
-                <h2 id="managed-device-title">真实设备与下发状态</h2>
-                <p>制作电脑使用账号密码首次登录后会自动出现，无需管理员单独授权。</p>
+                <h2 id="managed-device-title">制作电脑</h2>
+                <p>员工首次登录后自动登记；同一安装会复用原记录。这里仅管理电脑名称、状态和旧设备。</p>
               </div>
               <button type="button" class="button button-secondary" id="refresh-managed-devices">刷新设备</button>
             </header>
             <div class="managed-device-stat-rail" role="status" aria-live="polite">
               <span><small>已登记</small><b id="managed-device-total">0</b></span>
               <span><small>当前在线</small><b id="managed-device-online">0</b></span>
-              <span><small>已停用</small><b id="managed-device-disabled">0</b></span>
+              <span><small>离线或停用</small><b id="managed-device-disabled">0</b></span>
               <span class="managed-device-stat-copy" id="managed-device-refresh-proof">等待读取主电脑设备</span>
             </div>
             <div class="managed-device-workspace">
               <section class="managed-device-directory" aria-label="制作电脑列表">
                 <div class="managed-device-toolbar">
-                  <div><b>选择接收设置的电脑</b><small id="managed-device-selection">尚未选择</small></div>
-                  <button type="button" class="text-button" id="select-all-managed-devices">全选可用设备</button>
+                  <div><b>已登记电脑</b><small>团队制作方案在“制作台方案”中统一管理</small></div>
                 </div>
                 <div class="managed-device-list" id="managed-device-list">
                   <div class="hub-device-empty"><span aria-hidden="true">PC</span><b>还没有登记的制作电脑</b><small>让员工在自己的电脑输入主电脑地址、账号、密码和电脑名，连接成功后会自动出现在这里。</small></div>
                 </div>
               </section>
-              <aside class="managed-config-composer" aria-labelledby="managed-config-title">
-                <div class="managed-config-heading">
-                  <span aria-hidden="true">CFG</span>
-                  <div><small>SAFE SETTINGS</small><b id="managed-config-title">下发制作默认值</b></div>
-                </div>
-                <p>只同步跨电脑安全的制作参数；不会覆盖模型密钥、本机路径、编码器或服务地址。</p>
-                <fieldset class="managed-target-picker">
-                  <legend>发送范围</legend>
-                  <label><input type="radio" name="managed-config-target" value="selected" checked /><span><b>所选电脑</b><small id="managed-target-selected-copy">请先选择设备</small></span></label>
-                  <label><input type="radio" name="managed-config-target" value="all" /><span><b>全部可用电脑</b><small>包含当前离线但仍启用的设备</small></span></label>
-                </fieldset>
-                <div class="managed-config-fields">
-                  <label class="field"><span>旁白语速</span><input id="managed-config-wpm" type="number" min="100" max="400" step="5" value="210" /><small>每分钟单词数</small></label>
-                  <label class="field"><span>背景音乐</span><div class="managed-config-volume"><input id="managed-config-bgm" type="range" min="0" max="100" value="28" /><output id="managed-config-bgm-value">28%</output></div></label>
-                  <label class="field"><span>输出帧率</span><select id="managed-config-fps"><option value="60">60 FPS（推荐）</option><option value="30">30 FPS</option></select></label>
-                  <label class="field"><span>默认语种</span><select id="managed-config-language"><option value="en-US">美式英语</option><option value="en-GB">英式英语</option><option value="ja-JP">日语</option><option value="id-ID">印度尼西亚语</option><option value="es-ES">西班牙语</option></select></label>
-                </div>
-                <div class="managed-config-proof" id="managed-config-proof"><b>同时包含</b><span>当前团队字幕、简介卡、口令卡、封面动画和渲染策略</span></div>
-                <label class="field"><span>本次说明（可选）</span><input id="managed-config-note" maxlength="1000" placeholder="例如：统一改为 60 FPS 和新字幕样式" /></label>
-                <p class="managed-config-status" id="managed-config-status" role="status">选择目标后即可下发。</p>
-                <button type="button" class="button button-primary" id="push-managed-device-config">下发到制作电脑</button>
-                <div class="managed-config-history">
-                  <div><b>最近下发</b><small>电脑联网后会自动应用</small></div>
-                  <div id="managed-config-history"><span class="managed-config-history-empty">还没有下发记录</span></div>
-                </div>
-              </aside>
             </div>
           </section>
           <section class="panel update-center" aria-labelledby="update-center-title">

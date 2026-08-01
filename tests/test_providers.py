@@ -31,6 +31,7 @@ from storyforge.providers.tts import (
     EmbeddedKokoroProvider,
     IsolatedKokoroProvider,
     KOKORO_LANGUAGE_CODES,
+    KokoroComponentError,
     TTSRequest,
     _closed_http_client_error,
     _configure_kokoro_torch,
@@ -39,11 +40,13 @@ from storyforge.providers.tts import (
     _missing_kokoro_language_modules,
     _offline_kokoro_assets,
     _windows_espeak_cache_roots,
+    available_female_voice_candidates,
     create_tts_provider,
     female_voice_candidates,
     kokoro_language_code,
     release_embedded_kokoro_runtime,
 )
+from storyforge.tts_components import TTSComponentHealth, TTSComponentIssue
 
 
 def json_response(value: Any, status: int = 200) -> HTTPResponse:
@@ -712,6 +715,45 @@ class TTSProviderTests(unittest.TestCase):
                 required,
             )
 
+    def test_local_voice_candidates_hide_an_unhealthy_language_pack(self) -> None:
+        issue = TTSComponentIssue(
+            code="tts_component_resource_missing",
+            component_id="kokoro.language.ja",
+            subject="unidic_lite:dicdir/version",
+            message="missing",
+        )
+        unhealthy = TTSComponentHealth(
+            component_id="kokoro.language.ja",
+            language_code="j",
+            ready=False,
+            issues=(issue,),
+        )
+        with patch(
+            "storyforge.providers.tts.kokoro_language_component_health",
+            return_value=unhealthy,
+        ):
+            self.assertEqual(
+                available_female_voice_candidates("local_kokoro", "ja"), ()
+            )
+            # An explicit service owns its own language-pack health.
+            self.assertTrue(
+                available_female_voice_candidates(
+                    "local_kokoro", "ja", endpoint="http://127.0.0.1:8880"
+                )
+            )
+
+    def test_component_error_exposes_machine_readable_recovery_details(self) -> None:
+        error = KokoroComponentError(
+            "Japanese dictionary is incomplete",
+            error_code="tts_component_resource_missing",
+            component_id="kokoro.language.ja",
+            component_health={"ready": False},
+        )
+        payload = error.to_dict()
+        self.assertEqual(payload["error_code"], "tts_component_resource_missing")
+        self.assertEqual(payload["component_id"], "kokoro.language.ja")
+        self.assertFalse(payload["component_health"]["ready"])
+
     def test_missing_kokoro_language_extra_has_requirements_install_command(self) -> None:
         provider = EmbeddedKokoroProvider(
             ProviderConfig(name="local_kokoro", options={"lang_code": "j"})
@@ -944,6 +986,41 @@ class TTSProviderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(result.segments), 2)
         self.assertAlmostEqual(result.duration_seconds, 0.1, places=3)
+
+    def test_isolated_kokoro_preserves_structured_component_failure(self) -> None:
+        provider = create_tts_provider(
+            ProviderConfig(name="local_kokoro", options={"cache_enabled": False})
+        )
+
+        def fake_child(
+            command: list[str], **_kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            response_path = Path(command[-1])
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "unidic_lite/dicdir/version is missing",
+                        "error_code": "tts_component_resource_missing",
+                        "component_id": "kokoro.language.ja",
+                        "component_health": {"ready": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "storyforge.providers.tts.run_cancellable_process",
+            side_effect=fake_child,
+        ):
+            with self.assertRaises(KokoroComponentError) as raised:
+                provider.synthesize("電話が鳴った。", folder, voice="jf_alpha")
+
+        self.assertEqual(
+            raised.exception.error_code, "tts_component_resource_missing"
+        )
+        self.assertEqual(raised.exception.component_id, "kokoro.language.ja")
 
     def test_kokoro_cli_is_configurable_and_runner_is_injectable(self) -> None:
         audio = wav_bytes(0.05)

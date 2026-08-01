@@ -373,7 +373,7 @@ class AssGenerationTests(unittest.TestCase):
         self.assertIn(r"\p1\1c&H00FFFFFF&", document)
         self.assertIn(r"A secret call\Nchanges everything", document)
         self.assertIn("A stranger knows the truth", document)
-        self.assertIn("STORY BRIEF", document)
+        self.assertNotIn("STORY BRIEF", document)
         self.assertNotIn("STORY PREVIEW", document)
         self.assertNotRegex(document, r"(?i)part\s+\d+(?:\s+of\s+\d+)?")
         self.assertIn(r"\move(188,538,188,520", document)
@@ -396,7 +396,7 @@ class AssGenerationTests(unittest.TestCase):
         by_style: dict[str, list[list[str]]] = {}
         for event in events:
             by_style.setdefault(event[3], []).append(event)
-        self.assertEqual(len(by_style["IntroFooter"]), 1)
+        self.assertEqual(len(by_style.get("IntroFooter", [])), 0)
 
         intro_styles = {
             "TemplateShadow",
@@ -491,9 +491,32 @@ class AssGenerationTests(unittest.TestCase):
             final_label="FINAL PART",
         )
 
-        self.assertIn("STORY BRIEF", ordinary)
+        self.assertNotIn("STORY BRIEF", ordinary)
         self.assertNotIn("FINAL PART", ordinary)
+        self.assertFalse(
+            any(
+                ",IntroFooter," in line
+                for line in ordinary.splitlines()
+                if line.startswith("Dialogue:")
+            )
+        )
+        self.assertFalse(
+            any(
+                ",IntroHeadline," in line
+                for line in ordinary.splitlines()
+                if line.startswith("Dialogue:")
+            ),
+            "an empty AI hook must not fall back to the end-card/novel title",
+        )
         self.assertIn("FINAL PART", final)
+        self.assertEqual(
+            sum(
+                ",IntroFooter," in line
+                for line in final.splitlines()
+                if line.startswith("Dialogue:")
+            ),
+            1,
+        )
         with self.assertRaisesRegex(ValueError, "numbered Part"):
             generate_ass(
                 [SubtitleCue(0.0, 7.0, "The truth was waiting behind the door.")],
@@ -811,6 +834,7 @@ class AssGenerationTests(unittest.TestCase):
             intro_card_text="A secret letter changes everything.",
             intro_headline="THE LETTER",
             intro_card_duration=5.5,
+            final_label="FINAL PART",
             config=AssStyleConfig(intro_animation="layered_story"),
         )
         by_style = {

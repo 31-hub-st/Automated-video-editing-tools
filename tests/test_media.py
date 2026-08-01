@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import wave
 
 from storyforge.services.media import (
     COLOR_GRADE_FILTERS,
     DEFAULT_USAGE_FILENAME,
+    MEDIA_LAZY_PROBE_LIMIT,
     MediaError,
     MusicPlan,
     VIDEO_FADE_SECONDS,
@@ -19,11 +22,14 @@ from storyforge.services.media import (
     build_ffmpeg_plan,
     build_low_memory_segment_plan,
     clear_duration_cache,
+    clear_media_index_memory_cache,
+    discover_files,
     escape_filter_path,
     execute_ffmpeg,
     load_usage_record,
     plan_video_segments,
     probe_duration,
+    refresh_media_index,
     select_music_asset,
     select_video_assets,
     summarize_video_usage,
@@ -31,6 +37,106 @@ from storyforge.services.media import (
 
 
 class MediaSelectionTests(unittest.TestCase):
+    def test_persistent_media_index_skips_a_second_library_scan_and_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            root = base / "videos"
+            root.mkdir()
+            (root / "clip.mp4").write_bytes(b"video")
+            index = base / "StoryForgeData" / "cache" / "media-index.sqlite3"
+            calls: list[str] = []
+
+            def resolve(path: Path) -> float:
+                calls.append(path.name)
+                return 12.0
+
+            with patch.dict(
+                os.environ,
+                {"STORYFORGE_MEDIA_INDEX_PATH": str(index)},
+                clear=False,
+            ):
+                clear_media_index_memory_cache()
+                first = plan_video_segments(
+                    root,
+                    4.0,
+                    duration_resolver=resolve,
+                    commit_usage=False,
+                )
+                self.assertEqual(calls, ["clip.mp4"])
+                self.assertEqual(first[0].path.name, "clip.mp4")
+                self.assertTrue(index.is_file())
+
+                # Simulate a new worker process: process memory is empty, but
+                # the persistent index is still fresh and must be sufficient.
+                clear_media_index_memory_cache()
+                calls.clear()
+                with patch(
+                    "storyforge.services.media._scan_media_files",
+                    side_effect=AssertionError("unexpected full library scan"),
+                ):
+                    repeated = plan_video_segments(
+                        root,
+                        4.0,
+                        duration_resolver=resolve,
+                        commit_usage=False,
+                    )
+                self.assertEqual(calls, [])
+                self.assertEqual(repeated[0].path.name, "clip.mp4")
+
+    def test_forced_media_index_refresh_finds_new_files_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            root = base / "videos"
+            root.mkdir()
+            (root / "a.mp4").touch()
+            index = base / "StoryForgeData" / "cache" / "media-index.sqlite3"
+            with patch.dict(
+                os.environ,
+                {"STORYFORGE_MEDIA_INDEX_PATH": str(index)},
+                clear=False,
+            ):
+                clear_media_index_memory_cache()
+                self.assertEqual(
+                    [item.name for item in discover_files(root, {".mp4"})],
+                    ["a.mp4"],
+                )
+                (root / "b.mp4").touch()
+                self.assertEqual(
+                    [item.name for item in refresh_media_index(root, {".mp4"})],
+                    ["a.mp4", "b.mp4"],
+                )
+
+    def test_fresh_library_probes_only_a_bounded_candidate_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            root = base / "videos"
+            root.mkdir()
+            for index in range(100):
+                (root / f"clip-{index:03d}.mp4").touch()
+            index_path = base / "StoryForgeData" / "cache" / "media-index.sqlite3"
+            calls: list[str] = []
+
+            def resolve(path: Path) -> float:
+                calls.append(path.name)
+                return 1.0
+
+            with patch.dict(
+                os.environ,
+                {"STORYFORGE_MEDIA_INDEX_PATH": str(index_path)},
+                clear=False,
+            ):
+                clear_media_index_memory_cache()
+                segments = plan_video_segments(
+                    root,
+                    2.0,
+                    duration_resolver=resolve,
+                    commit_usage=False,
+                )
+
+            self.assertEqual(len(calls), MEDIA_LAZY_PROBE_LIMIT)
+            self.assertLess(len(calls), 100)
+            self.assertAlmostEqual(sum(item.duration for item in segments), 2.0)
+
     def test_filter_path_preserves_apostrophe_across_ffmpeg_parser_layers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             subtitle = (

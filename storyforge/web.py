@@ -53,6 +53,7 @@ UPLOAD_KIND_LIMITS = {
     "cover": 20 * 1024 * 1024,
     "platform_logo": 20 * 1024 * 1024,
     "update_package": 2 * 1024 * 1024 * 1024,
+    "component_package": 2 * 1024 * 1024 * 1024,
 }
 
 
@@ -78,6 +79,12 @@ WEB_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "save_local_update_preferences": ("updates.manage_own", "hub.manage"),
     "publish_update": ("hub.manage",),
     "clear_published_update": ("hub.manage",),
+    "get_component_update_status": (),
+    "check_component_updates": ("updates.manage_own", "hub.manage"),
+    "install_component_update": ("updates.manage_own", "hub.manage"),
+    "rollback_component_update": ("updates.manage_own", "hub.manage"),
+    "publish_component_update": ("hub.manage",),
+    "clear_published_component": ("hub.manage",),
     "save_platform": ("platforms.manage",),
     "delete_platform": ("platforms.manage",),
     "save_settings": ("hub.manage",),
@@ -87,10 +94,13 @@ WEB_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "read_text_document": ("library.edit",),
     "get_novel": ("library.view",),
     "save_novel": ("library.edit",),
+    "delete_novel": ("hub.manage",),
     "save_novel_binding": ("platforms.manage",),
     "add_promo_code": ("promo_codes.manage",),
     "update_promo_code": ("promo_codes.manage",),
+    "delete_promo_code": ("hub.manage",),
     "save_publishing_account": ("publishing_accounts.manage",),
+    "delete_publishing_account": ("hub.manage",),
     "save_production_draft": ("drafts.create", "drafts.manage_all"),
     "queue_production_draft": ("drafts.create", "drafts.manage_all"),
     "generate_voice_candidates": ("voice.preview",),
@@ -106,6 +116,7 @@ WEB_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "acknowledge_managed_device": ("hub.manage",),
     "rename_managed_device": ("hub.manage",),
     "set_managed_device_active": ("hub.manage",),
+    "delete_managed_device": ("hub.manage",),
     "create_managed_device_config": ("hub.manage",),
     "list_managed_device_configs": ("hub.manage",),
     "get_managed_device_config": ("hub.manage",),
@@ -167,6 +178,8 @@ WEB_DESKTOP_ONLY_MEDIA_METHODS = frozenset(
         "open_output_folder",
         "get_local_runtime_snapshot",
         "get_local_self_check",
+        "install_component_update",
+        "rollback_component_update",
     }
 )
 
@@ -194,6 +207,8 @@ CLIENT_LOCAL_MEDIA_METHODS = frozenset(
         "open_output_folder",
         "get_local_runtime_snapshot",
         "get_local_self_check",
+        "install_component_update",
+        "rollback_component_update",
     }
 )
 
@@ -206,6 +221,7 @@ UPLOAD_EXTENSIONS: dict[str, frozenset[str]] = {
     "cover": frozenset({".jpg", ".jpeg", ".png", ".webp"}),
     "platform_logo": frozenset({".jpg", ".jpeg", ".png", ".webp"}),
     "update_package": frozenset({".zip"}),
+    "component_package": frozenset({".zip"}),
 }
 
 
@@ -215,6 +231,7 @@ CONTROLLED_UPLOAD_ARGUMENTS: dict[str, tuple[Any, ...]] = {
     "save_novel": (0, "cover_path"),
     "save_platform": (0, "logo_path"),
     "publish_update": (0,),
+    "publish_component_update": (0,),
     "analyze_story": (0,),
 }
 
@@ -1459,6 +1476,12 @@ class StoryForgeWebApplication:
             raise PermissionError("该功能未开放给网页端。")
         if required and not any(item in session.permissions for item in required):
             raise PermissionError("当前账号没有执行该操作的权限。")
+        if method in {
+            "delete_novel",
+            "delete_promo_code",
+            "delete_publishing_account",
+        } and session.role != "admin":
+            raise PermissionError("only administrators can delete shared library records")
         if method == "get_effective_permissions":
             target = str(args[0] if args else "")
             if target != session.actor_user_id and not {
@@ -2162,7 +2185,7 @@ class StoryForgeWebApplication:
 
     @staticmethod
     def _authorize_upload_kind(session: _WebSession, kind: str) -> None:
-        if kind == "update_package":
+        if kind in {"update_package", "component_package"}:
             if "hub.manage" not in session.permissions:
                 raise PermissionError("Only administrators can upload update packages.")
             return

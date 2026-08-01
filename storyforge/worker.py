@@ -33,6 +33,7 @@ LOCAL_WORKER_PROTOCOL_VERSION = 2
 LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION = 2
 LOCAL_WORKER_TASK_NAME = "StoryForge Local Worker"
 _WINDOWS_ALREADY_EXISTS = 183
+WORKER_STALL_WARNING_SECONDS = 10 * 60
 
 
 _TERMINAL_WORKER_JOB_STATUSES = frozenset(
@@ -657,6 +658,8 @@ class LocalWorkerGateway:
         self._sessions: dict[str, _WorkerSession] = {}
         self._media: dict[str, _WorkerMedia] = {}
         self._lock = threading.RLock()
+        self._last_queue_signature = ""
+        self._last_queue_change_unix = self.started_at_unix
 
     @property
     def configured_device_id(self) -> str:
@@ -671,6 +674,12 @@ class LocalWorkerGateway:
                 "rendering_busy": False,
                 "queue_busy": False,
                 "unfinished_jobs": 0,
+                "observable": False,
+                "current_status": "",
+                "current_progress": 0.0,
+                "current_stage": "",
+                "last_change_unix": self._last_queue_change_unix,
+                "progress_stale": False,
             }
         try:
             rendering_busy = bool(queue.is_rendering_busy())
@@ -682,22 +691,112 @@ class LocalWorkerGateway:
                 "rendering_busy": True,
                 "queue_busy": True,
                 "unfinished_jobs": 0,
+                "observable": False,
+                "current_status": "unknown",
+                "current_progress": 0.0,
+                "current_stage": "",
+                "last_change_unix": self._last_queue_change_unix,
+                "progress_stale": False,
             }
 
         unfinished = 0
+        active: list[tuple[str, float, str, str]] = []
+        signature_items: list[tuple[str, str, float, str]] = []
         for item in jobs:
-            raw_status = (
-                item.get("status")
-                if isinstance(item, Mapping)
-                else getattr(item, "status", "")
-            )
+            def value(key: str, default: Any = "") -> Any:
+                return (
+                    item.get(key, default)
+                    if isinstance(item, Mapping)
+                    else getattr(item, key, default)
+                )
+
+            raw_status = value("status")
             status = str(getattr(raw_status, "value", raw_status) or "").casefold()
+            try:
+                progress = max(0.0, min(1.0, float(value("progress", 0.0) or 0.0)))
+            except (TypeError, ValueError):
+                progress = 0.0
+            raw_stage = str(value("stage_label") or value("stage") or "").strip()
+            # A worker health response must never become a channel for story
+            # titles, source filenames or local paths.  Keep only short stage
+            # labels that look like operational state; the status remains the
+            # fallback when a producer supplied arbitrary text.
+            stage = ""
+            lowered_stage = raw_stage.casefold()
+            safe_prefixes = (
+                "等待",
+                "正在",
+                "生成",
+                "渲染",
+                "配音",
+                "字幕",
+                "保存",
+                "合成",
+                "queued",
+                "waiting",
+                "render",
+                "encod",
+                "narrat",
+                "caption",
+                "saving",
+                "final",
+            )
+            if (
+                raw_stage
+                and len(raw_stage) <= 64
+                and not any(token in raw_stage for token in ("/", "\\", ":\\"))
+                and lowered_stage.startswith(safe_prefixes)
+            ):
+                stage = raw_stage
+            identity = str(value("id") or value("job_id") or "")
+            signature_items.append((identity, status, round(progress, 4), stage))
             if status not in _TERMINAL_WORKER_JOB_STATUSES:
                 unfinished += 1
+                active.append((status, progress, stage, identity))
+
+        signature = hashlib.sha256(
+            json.dumps(
+                [bool(rendering_busy), signature_items],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        now = time.time()
+        with self._lock:
+            if signature != self._last_queue_signature:
+                self._last_queue_signature = signature
+                self._last_queue_change_unix = now
+            last_change = self._last_queue_change_unix
+
+        current_status = ""
+        current_progress = 0.0
+        current_stage = ""
+        if active:
+            running_statuses = {
+                "preparing",
+                "narrating",
+                "rendering",
+                "publishing",
+                "running",
+            }
+            current = next(
+                (entry for entry in active if entry[0] in running_statuses),
+                active[0],
+            )
+            current_status, current_progress, current_stage, _identity = current
+        queue_busy = bool(rendering_busy or unfinished)
         return {
             "rendering_busy": rendering_busy,
-            "queue_busy": bool(rendering_busy or unfinished),
+            "queue_busy": queue_busy,
             "unfinished_jobs": unfinished,
+            "observable": True,
+            "current_status": current_status,
+            "current_progress": current_progress,
+            "current_stage": current_stage,
+            "last_change_unix": last_change,
+            "progress_stale": bool(
+                queue_busy and now - last_change >= WORKER_STALL_WARNING_SECONDS
+            ),
         }
 
     def health(self) -> dict[str, Any]:
@@ -731,6 +830,46 @@ class LocalWorkerGateway:
             if runtime_mode == "host"
             else "standalone"
         )
+        queue_activity = self._queue_activity()
+        try:
+            disk = shutil.disk_usage(self.api._repository.data_dir)
+            disk_total = max(0, int(disk.total))
+            disk_free = max(0, int(disk.free))
+            disk_low = bool(
+                disk_free < 5 * 1024**3
+                or (disk_total > 0 and disk_free / disk_total < 0.05)
+            )
+            storage = {
+                "observable": True,
+                "total_bytes": disk_total,
+                "free_bytes": disk_free,
+                "low_space": disk_low,
+            }
+        except (AttributeError, OSError, TypeError, ValueError):
+            storage = {
+                "observable": False,
+                "total_bytes": 0,
+                "free_bytes": 0,
+                "low_space": False,
+            }
+        operational = bool(
+            (runtime_mode == "client" and ready)
+            or (runtime_mode == "host" and hub_connected)
+        )
+        degraded = bool(
+            not operational
+            or not queue_activity["observable"]
+            or queue_activity["progress_stale"]
+            or not storage["observable"]
+            or storage["low_space"]
+        )
+        health_state = (
+            "degraded"
+            if degraded
+            else "busy"
+            if queue_activity["queue_busy"]
+            else "ready"
+        )
         return {
             "service": "storyforge-local-worker",
             "version": __version__,
@@ -744,7 +883,25 @@ class LocalWorkerGateway:
             "worker_nonce": self.nonce,
             "device_id": self.configured_device_id if runtime_mode == "client" else "",
             "device_name": str(self.api._state.settings.hub.device_name or ""),
-            **self._queue_activity(),
+            **queue_activity,
+            "health_state": health_state,
+            "observed_at_unix": time.time(),
+            "queue": {
+                "observable": queue_activity["observable"],
+                "busy": queue_activity["queue_busy"],
+                "rendering": queue_activity["rendering_busy"],
+                "unfinished_jobs": queue_activity["unfinished_jobs"],
+                "status": queue_activity["current_status"],
+                "progress": queue_activity["current_progress"],
+                "stage": queue_activity["current_stage"],
+                "last_change_unix": queue_activity["last_change_unix"],
+                "progress_stale": queue_activity["progress_stale"],
+            },
+            "storage": storage,
+            "connectivity": {
+                "hub_connected": hub_connected,
+                "runtime_mode": runtime_mode,
+            },
             "capabilities": [
                 "local-video",
                 "local-music",

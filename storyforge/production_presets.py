@@ -77,6 +77,7 @@ _PRODUCTION_NUMBERS: dict[str, tuple[float, float, bool]] = {
     "max_episode_minutes": (1.0, 60.0, False),
     # The full-screen cover ending is deliberately a brief 5–7 second CTA.
     "end_card_seconds": (5.0, 7.0, False),
+    "intro_card_duration_seconds": (2.5, 8.0, False),
 }
 _ALLOWED_RECIPE_KEYS = frozenset(
     {"story_mood", "voice_profile", "target_video_count", "production_settings"}
@@ -115,6 +116,7 @@ _ALLOWED_PRODUCTION_SETTING_KEYS = frozenset(
         "cover_outro_enabled",
         "color_grade",
         "end_card_seconds",
+        "intro_card_duration_seconds",
         "render_mode",
         "video_template",
     }

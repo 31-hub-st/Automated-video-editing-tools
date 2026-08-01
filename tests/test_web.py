@@ -35,6 +35,7 @@ class _ApiStub:
         self.saved_drafts: list[dict] = []
         self.queued_drafts: list[dict] = []
         self.created_backups = 0
+        self.deleted_shared_records: list[tuple[str, str]] = []
         data_dir = media.parent / "api-data"
         data_dir.mkdir()
         allowed_root = data_dir / "authorized"
@@ -131,6 +132,18 @@ class _ApiStub:
                 "status": self._backup_status_value(include_error=True),
             },
         }
+
+    def delete_novel(self, value_id: str) -> dict:
+        self.deleted_shared_records.append(("novel", value_id))
+        return {"ok": True, "data": {"deleted": True, "id": value_id}}
+
+    def delete_promo_code(self, value_id: str) -> dict:
+        self.deleted_shared_records.append(("promo_code", value_id))
+        return {"ok": True, "data": {"deleted": True, "id": value_id}}
+
+    def delete_publishing_account(self, value_id: str) -> dict:
+        self.deleted_shared_records.append(("publishing_account", value_id))
+        return {"ok": True, "data": {"deleted": True, "id": value_id}}
 
     def choose_file(self, _kind: str = "novel") -> dict:
         raise AssertionError("desktop chooser must never be exposed")
@@ -353,6 +366,39 @@ class WebApplicationTests(unittest.TestCase):
             ("library.view",),
         )
         self.assertEqual(payload["data"]["novels"], [])
+
+    def test_shared_library_deletes_require_an_administrator(self) -> None:
+        methods = (
+            ("delete_novel", "novel-1"),
+            ("delete_promo_code", "code-1"),
+            ("delete_publishing_account", "account-1"),
+        )
+        employee_cookie, employee_csrf, _ = self._login(
+            "worker", self.producer_password
+        )
+        for method, value_id in methods:
+            with self.subTest(role="producer", method=method):
+                with self.assertRaises(HTTPError) as denied:
+                    self._rpc(employee_cookie, employee_csrf, method, [value_id])
+                self.assertEqual(denied.exception.code, 403)
+                denied.exception.close()
+
+        admin_cookie, admin_csrf, _ = self._login("owner", self.admin_password)
+        for method, value_id in methods:
+            with self.subTest(role="admin", method=method):
+                with self._rpc(
+                    admin_cookie, admin_csrf, method, [value_id]
+                ) as response:
+                    payload = self._json(response)
+                self.assertTrue(payload["data"]["deleted"])
+        self.assertEqual(
+            self.api.deleted_shared_records,
+            [
+                ("novel", "novel-1"),
+                ("promo_code", "code-1"),
+                ("publishing_account", "account-1"),
+            ],
+        )
 
     def test_login_accepts_only_account_password_not_hub_token(self) -> None:
         for username in ("worker", "owner"):
@@ -717,19 +763,27 @@ class WebApplicationTests(unittest.TestCase):
             "worker", self.producer_password
         )
         parsed = urlsplit(self.server.base_url)
-        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
-        connection.putrequest("POST", "/web/api/upload?kind=update_package")
-        connection.putheader("Content-Type", "multipart/form-data; boundary=x")
-        connection.putheader("Content-Length", str(2 * 1024 * 1024 * 1024))
-        connection.putheader("Cookie", producer_cookie)
-        connection.putheader("X-StoryForge-CSRF", producer_csrf)
-        connection.endheaders()
-        response = connection.getresponse()
-        try:
-            self.assertEqual(response.status, 403)
-        finally:
-            response.read()
-            connection.close()
+        for upload_kind in ("update_package", "component_package"):
+            with self.subTest(upload_kind=upload_kind):
+                connection = http.client.HTTPConnection(
+                    parsed.hostname, parsed.port, timeout=5
+                )
+                connection.putrequest(
+                    "POST", f"/web/api/upload?kind={upload_kind}"
+                )
+                connection.putheader(
+                    "Content-Type", "multipart/form-data; boundary=x"
+                )
+                connection.putheader("Content-Length", str(2 * 1024 * 1024 * 1024))
+                connection.putheader("Cookie", producer_cookie)
+                connection.putheader("X-StoryForge-CSRF", producer_csrf)
+                connection.endheaders()
+                response = connection.getresponse()
+                try:
+                    self.assertEqual(response.status, 403)
+                finally:
+                    response.read()
+                    connection.close()
 
         cookie, csrf, _ = self._login("owner", self.admin_password)
         with self.assertRaises(HTTPError) as mismatch:

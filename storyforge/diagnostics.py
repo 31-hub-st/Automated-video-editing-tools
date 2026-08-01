@@ -16,6 +16,10 @@ from urllib.request import urlopen
 from . import __version__
 from .providers.base import ProviderConfig
 from .providers.tts import create_tts_provider
+from .tts_components import (
+    kokoro_component_manifest,
+    probe_kokoro_language_runtime,
+)
 
 
 ProviderFactory = Callable[[Any], Any]
@@ -67,6 +71,17 @@ def run_kokoro_self_test(
     _write_json(result_path, payload)
 
     try:
+        japanese_health = probe_kokoro_language_runtime("j")
+        payload["tts_component_manifest"] = kokoro_component_manifest()
+        payload["japanese_component_health"] = japanese_health.to_dict()
+        # Source/unit-test environments may deliberately omit optional local
+        # AI extras. A release marked as frozen/full must never pass validation
+        # with an incomplete Japanese dictionary pack.
+        if payload["frozen"] and not japanese_health.ready:
+            raise RuntimeError(
+                "Frozen Japanese Kokoro component is incomplete: "
+                + json.dumps(japanese_health.to_dict(), ensure_ascii=False)
+            )
         with log_path.open("w", encoding="utf-8", newline="\n") as log:
             with redirect_stdout(log), redirect_stderr(log):
                 # A health check must execute the model. Reusing a sentence WAV

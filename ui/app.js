@@ -55,13 +55,9 @@
     managedDevicesLoading: false,
     managedDevicesError: "",
     managedDevicesRequestId: 0,
-    managedDeviceSelection: new Set(),
-    managedDeviceConfigs: [],
-    managedDeviceConfigDetails: new Map(),
     managedDeviceFleetTimer: null,
     runtimeRefreshTimer: null,
     managedDevicesRefreshedAt: "",
-    deviceSyncStatus: null,
     selectedNovelId: "",
     selectedNovel: null,
     productionNovelId: "",
@@ -226,7 +222,8 @@
     "caption_mode", "subtitle_preset", "intro_card_preset", "code_card_preset",
     "outro_card_preset", "subtitle_animation", "intro_animation",
     "max_episode_minutes", "cover_outro_enabled", "cover_animation", "color_grade", "end_card_seconds",
-    "render_mode", "video_template", "output_mode", "export_narration_audio",
+    "render_mode", "video_template", "intro_card_enabled", "intro_card_duration_seconds",
+    "output_mode", "export_narration_audio",
     "video_playback_speed", "video_transition", "subtitle_word_mode", "bgm_mode",
   ]);
   const productionPreferenceSettingKeys = new Set([
@@ -256,6 +253,17 @@
       audio_only: "仅生成配音",
       reuse_audio: "已有配音更换素材",
     }[normalizedProductionOutputMode(mode)];
+  }
+
+  function visibleProductionSubtitlePreset(value) {
+    const key = String(value || "clear_outline");
+    return {
+      cinematic_shadow: "suspense_noir",
+      clean_minimal: "clear_outline",
+      bold_drama: "golden_hook",
+      reader_focus: "clear_outline",
+      midnight_reader: "minimal_bottom",
+    }[key] || key;
   }
 
   function productionSpeedLabel(value) {
@@ -291,7 +299,7 @@
       label: "视频素材",
       defaultLabel: "Hub 默认视频库",
       desktopPlaceholder: "悬疑 / 浪漫 / 悲伤 / 爽文分类文件夹",
-      help: "读取已分类的视频素材；渲染时会自动删除素材原声。",
+      help: "递归读取员工本批选择的视频素材文件夹；渲染时会自动删除素材原声。",
     },
     music_folder: {
       label: "背景音乐",
@@ -545,15 +553,6 @@
       last_deduplicated_at: "",
       last_error: "",
     },
-    device_sync: {
-      state: "ready",
-      enabled: true,
-      device_id: "device-render-01",
-      applied_revision_id: "config-revision-2",
-      last_success_at: "2026-07-27T08:42:00Z",
-      last_error: "",
-      poll_seconds: 20,
-    },
     managed_devices: [
       {
         id: "device-render-01",
@@ -569,7 +568,6 @@
         first_seen_at: "2026-07-22T02:12:00Z",
         last_seen_at: "2026-07-27T08:42:00Z",
         active_token_count: 1,
-        desired_revision_number: 2,
       },
       {
         id: "device-render-02",
@@ -585,7 +583,6 @@
         first_seen_at: "2026-07-23T03:24:00Z",
         last_seen_at: "2026-07-27T06:20:00Z",
         active_token_count: 1,
-        desired_revision_number: 2,
       },
       {
         id: "device-old-01",
@@ -601,25 +598,6 @@
         first_seen_at: "2026-07-20T04:30:00Z",
         last_seen_at: "2026-07-24T01:20:00Z",
         active_token_count: 0,
-        desired_revision_number: 1,
-      },
-    ],
-    managed_device_configs: [
-      {
-        id: "config-revision-2",
-        revision_number: 2,
-        config_schema_version: 1,
-        config: { language: "en-US", narration_wpm: 240, bgm_volume: 0.28, output_fps: 60 },
-        config_hash: "mock-config-hash-2",
-        target_mode: "all",
-        target_count: 2,
-        note: "统一 60 FPS 与旁白节奏",
-        created_by_user_id: "user-owner",
-        created_at: "2026-07-27T08:35:00Z",
-        targets: [
-          { device_id: "device-render-01", device_name: "剪辑电脑-01", device_active: true, assigned_at: "2026-07-27T08:35:00Z", acknowledged_at: "2026-07-27T08:36:00Z", ack_status: "applied", ack_message: "" },
-          { device_id: "device-render-02", device_name: "剪辑电脑-02", device_active: true, assigned_at: "2026-07-27T08:35:00Z", acknowledged_at: "", ack_status: "", ack_message: "" },
-        ],
       },
     ],
     platforms: [
@@ -1758,6 +1736,14 @@
           const novel = browserMockLibrary.novels.find((item) => item.id === args[0]);
           return novel ? { ok: true, data: structuredClone(novel) } : { ok: false, error: "没有找到这部小说。" };
         }
+        if (method === "delete_novel") {
+          const novelId = String(args[0] || "");
+          const before = browserMockLibrary.novels.length;
+          browserMockLibrary.novels = browserMockLibrary.novels.filter((item) => item.id !== novelId);
+          return before === browserMockLibrary.novels.length
+            ? { ok: false, error: "没有找到这部小说。" }
+            : { ok: true, data: { id: novelId, deleted: true } };
+        }
         if (method === "classify_novel") {
           const novel = browserMockLibrary.novels.find((item) => item.id === args[0]);
           if (!novel) return { ok: false, error: "没有找到这部小说。" };
@@ -1837,6 +1823,17 @@
           promo.active = Boolean(payload.active);
           return { ok: true, data: structuredClone({ novel, promo_code: promo }) };
         }
+        if (method === "delete_promo_code") {
+          const promoCodeId = String(args[0] || "");
+          for (const novel of browserMockLibrary.novels) {
+            for (const binding of novel.platform_bindings || []) {
+              const before = binding.codes?.length || 0;
+              binding.codes = (binding.codes || []).filter((item) => item.id !== promoCodeId);
+              if (binding.codes.length !== before) return { ok: true, data: { id: promoCodeId, deleted: true } };
+            }
+          }
+          return { ok: false, error: "没有找到这个口令。" };
+        }
         if (method === "save_publishing_account") {
           const payload = args[0] || {};
           const name = String(payload.name || "").trim();
@@ -1861,6 +1858,14 @@
           if (index >= 0) browserMockLibrary.publishing_accounts[index] = account;
           else browserMockLibrary.publishing_accounts.push(account);
           return { ok: true, data: structuredClone(account) };
+        }
+        if (method === "delete_publishing_account") {
+          const accountId = String(args[0] || "");
+          const before = browserMockLibrary.publishing_accounts.length;
+          browserMockLibrary.publishing_accounts = browserMockLibrary.publishing_accounts.filter((item) => item.id !== accountId);
+          return before === browserMockLibrary.publishing_accounts.length
+            ? { ok: false, error: "没有找到这个发布账号。" }
+            : { ok: true, data: { id: accountId, deleted: true } };
         }
         if (method === "generate_intro_card_copy") {
           const novel = browserMockLibrary.novels.find((item) => item.id === args[0]);
@@ -2174,63 +2179,22 @@
           device.updated_at = new Date().toISOString();
           return { ok: true, data: { device: structuredClone(device), revoked_tokens: device.active ? 0 : 1 } };
         }
-        if (method === "create_managed_device_config") {
-          const payload = args[0] || {};
-          const activeDevices = (browserMockState.managed_devices || []).filter((item) => item.active);
-          const targetIds = payload.target_mode === "all"
-            ? activeDevices.map((item) => item.id)
-            : [...new Set(Array.isArray(payload.device_ids) ? payload.device_ids : [])];
-          if (!targetIds.length) return { ok: false, error: "请至少选择一台可用电脑。" };
-          const revisionNumber = Math.max(0, ...(browserMockState.managed_device_configs || []).map((item) => Number(item.revision_number || 0))) + 1;
-          const now = new Date().toISOString();
-          const revision = {
-            id: `config-${crypto.randomUUID()}`,
-            revision_number: revisionNumber,
-            config_schema_version: 1,
-            config: structuredClone(payload.config || {}),
-            config_hash: `mock-${crypto.randomUUID().replaceAll("-", "")}`,
-            target_mode: payload.target_mode,
-            target_count: targetIds.length,
-            target_device_ids: targetIds,
-            note: String(payload.note || ""),
-            created_by_user_id: "user-owner",
-            created_at: now,
-            targets: targetIds.map((deviceId) => {
-              const device = activeDevices.find((item) => item.id === deviceId);
-              if (device) device.desired_revision_number = revisionNumber;
-              return { device_id: deviceId, device_name: device?.name || deviceId, device_active: true, assigned_at: now, acknowledged_at: "", ack_status: "", ack_message: "" };
-            }),
-          };
-          browserMockState.managed_device_configs ||= [];
-          browserMockState.managed_device_configs.unshift(revision);
-          return { ok: true, data: structuredClone(revision) };
+        if (method === "acknowledge_managed_device") {
+          const device = (browserMockState.managed_devices || []).find((item) => item.id === args[0]);
+          if (!device) return { ok: false, error: "没有找到制作电脑。" };
+          device.needs_admin_review = false;
+          return { ok: true, data: structuredClone(device) };
         }
-        if (method === "list_managed_device_configs") {
-          const limit = Math.max(1, Number(args[0] || 100));
-          const offset = Math.max(0, Number(args[1] || 0));
-          const items = browserMockState.managed_device_configs || [];
-          return { ok: true, data: { items: structuredClone(items.slice(offset, offset + limit).map(({ targets: _targets, ...item }) => item)), total: items.length, limit, offset } };
-        }
-        if (method === "get_managed_device_config") {
-          const revision = (browserMockState.managed_device_configs || []).find((item) => item.id === args[0]);
-          return revision ? { ok: true, data: structuredClone(revision) } : { ok: false, error: "没有找到配置记录。" };
-        }
-        if (method === "get_device_sync_status") {
-          return { ok: true, data: structuredClone(browserMockState.device_sync || {}) };
+        if (method === "delete_managed_device") {
+          const deviceId = String(args[0] || "");
+          const device = (browserMockState.managed_devices || []).find((item) => item.id === deviceId);
+          if (!device) return { ok: false, error: "没有找到制作电脑。" };
+          if (device.active !== false || device.online) return { ok: false, error: "请先停用并确认设备离线。" };
+          browserMockState.managed_devices = (browserMockState.managed_devices || []).filter((item) => item.id !== deviceId);
+          return { ok: true, data: { id: deviceId, deleted: true } };
         }
         if (method === "get_queue_connection") {
           return { ok: true, data: { state: "connected", reconnecting: false, retry_in_seconds: 0, failures: 0, message: "队列连接正常。" } };
-        }
-        if (method === "sync_device_config_now") {
-          const revision = (browserMockState.managed_device_configs || [])[0];
-          Object.assign(browserMockState.device_sync, {
-            state: "ready",
-            enabled: true,
-            applied_revision_id: revision?.id || "",
-            last_success_at: new Date().toISOString(),
-            last_error: "",
-          });
-          return { ok: true, data: structuredClone(browserMockState.device_sync) };
         }
         if (method === "save_platform") {
           const platform = { id: args[0].id || `platform-${Date.now()}`, ...args[0] };
@@ -2488,7 +2452,6 @@
     }
     if (viewName === "hub") {
       renderManagedDeviceWorkspace();
-      renderDeviceSyncStatus();
       void refreshHubDeviceWorkspace({ silent: true });
       void loadHubBackups({ silent: true });
       startManagedDeviceFleetPolling();
@@ -2659,6 +2622,7 @@
     form.elements.active.checked = true;
     state.selectedPublishingAccountId = "";
     $("#publishing-editor-title").textContent = "新建发布账号";
+    $("#delete-publishing-account")?.classList.add("is-hidden");
     renderPublishingAccountOptions();
     renderPublishingAccounts();
   }
@@ -2673,7 +2637,21 @@
     }
     form.elements.active.checked = account.active !== false;
     $("#publishing-editor-title").textContent = `编辑 ${account.name}`;
+    $("#delete-publishing-account")?.classList.remove("is-hidden");
     renderPublishingAccounts();
+  }
+
+  async function deleteSelectedPublishingAccount(button) {
+    const account = state.publishingAccounts.find((item) => item.id === state.selectedPublishingAccountId);
+    if (!account) return;
+    if (!window.confirm(`确定删除发布账号“${account.name}”？已有制作记录不会被删除。`)) return;
+    await withBusyButton(button, "正在删除…", async () => {
+      await checkedCall("delete_publishing_account", account.id);
+      state.selectedPublishingAccountId = "";
+      await loadLibraryBootstrap();
+      resetPublishingAccountEditor();
+      toast(`发布账号“${account.name}”已删除；已有制作记录仍保留。`, "info");
+    });
   }
 
   function renderPublishingAccounts() {
@@ -3526,6 +3504,8 @@
       bgm_volume: Number(defaults.bgm_volume || 0.28),
       adult_mode: defaults.adult_mode || "engaging",
       video_template: defaults.video_template || "classic",
+      intro_card_enabled: defaults.intro_card_enabled === true || defaults.video_template === "platform_story_card",
+      intro_card_duration_seconds: Number(defaults.intro_card_duration_seconds || 5.5),
       intro_card_preset: defaults.intro_card_preset || "editorial_white",
       caption_mode: defaults.caption_mode || "semantic",
       subtitle_preset: defaults.subtitle_preset || "clear_outline",
@@ -3536,7 +3516,7 @@
       preview_seconds: Number(defaults.preview_seconds || DEFAULT_PREVIEW_SECONDS),
       render_mode: defaults.render_mode || "speed",
       output_mode: "video_and_mp3",
-      export_narration_audio: true,
+      export_narration_audio: false,
       cover_outro_enabled: defaults.cover_outro_enabled !== false,
       cover_animation: defaults.cover_animation || "gentle_push",
       color_grade: defaults.color_grade || "neutral",
@@ -3549,6 +3529,16 @@
       outro_card: structuredClone(defaults.outro_card || {}),
     };
     novel.draft.production_settings.video_template ||= defaults.video_template || "classic";
+    novel.draft.production_settings.intro_card_enabled = typeof novel.draft.production_settings.intro_card_enabled === "boolean"
+      ? novel.draft.production_settings.intro_card_enabled
+      : novel.draft.production_settings.video_template === "platform_story_card";
+    novel.draft.production_settings.intro_card_duration_seconds = Math.max(
+      2.5,
+      Math.min(8, Number(novel.draft.production_settings.intro_card_duration_seconds || 5.5)),
+    );
+    novel.draft.production_settings.video_template = novel.draft.production_settings.intro_card_enabled
+      ? "platform_story_card"
+      : "classic";
     novel.draft.production_settings.intro_card_preset ||= defaults.intro_card_preset || "editorial_white";
     novel.draft.production_settings.code_card_preset ||= defaults.code_card_preset || "brand_pill";
     novel.draft.production_settings.outro_card_preset ||= defaults.outro_card_preset || "editorial_white";
@@ -3576,9 +3566,8 @@
       : novel.draft.production_settings.subtitle?.word_sync_enabled === true
         ? "cumulative"
         : "off";
-    // Kept true for older hosts that still understand only this compatibility
-    // flag. The explicit output_mode is the authoritative V0.4 contract.
-    novel.draft.production_settings.export_narration_audio = true;
+    // 常规视频模式只交付 MP4；需要独立旁白时使用“仅生成配音”。
+    novel.draft.production_settings.export_narration_audio = false;
     novel.draft.production_settings.intro_animation ||= defaults.intro_animation || "fade_rise";
     novel.draft.production_settings.color_grade ||= defaults.color_grade || "neutral";
     novel.draft.production_settings.intro_card ||= structuredClone(defaults.intro_card || {});
@@ -3690,6 +3679,8 @@
     });
     const grid = $(".studio-grid");
     if (grid) grid.dataset.productionLocalView = next;
+    const jumpbar = $("#production-ribbon");
+    if (jumpbar) jumpbar.hidden = next !== "create";
     if (next === "tasks") setProductionPreviewDrawerOpen(false);
   }
 
@@ -3705,6 +3696,32 @@
     else if (open === false && document.activeElement?.closest?.("#production-preview-drawer")) triggers[0]?.focus();
   }
 
+  function openProductionPreview() {
+    setProductionLocalTab("create");
+    updateProductionPreview();
+    const drawer = $("#production-preview-drawer");
+    if (!drawer) return;
+    if (window.matchMedia("(max-width: 1180px)").matches) {
+      setProductionPreviewDrawerOpen(true);
+      return;
+    }
+    setProductionPreviewDrawerOpen(false);
+    drawer.scrollIntoView({ behavior: "smooth", block: "start" });
+    drawer.classList.remove("production-focus-pulse");
+    window.requestAnimationFrame(() => drawer.classList.add("production-focus-pulse"));
+    window.setTimeout(() => drawer.classList.remove("production-focus-pulse"), 1500);
+  }
+
+  function replayProductionPreview() {
+    const preview = $("#video-preview");
+    if (!preview) return;
+    preview.classList.remove("is-replaying");
+    // Reading layout forces the browser to restart all seek-safe CSS preview animations.
+    void preview.offsetWidth;
+    preview.classList.add("is-replaying");
+    window.setTimeout(() => preview.classList.remove("is-replaying"), 900);
+  }
+
   function setProductionSectionExpanded(section, expanded) {
     if (!Object.prototype.hasOwnProperty.call(state.productionSectionExpanded, section)) return;
     const next = Boolean(expanded);
@@ -3715,6 +3732,62 @@
     sectionNode?.classList.toggle("is-collapsed", !next);
     toggle?.setAttribute("aria-expanded", String(next));
     if (body) body.hidden = !next;
+  }
+
+  function focusProductionSection(section, selector = "") {
+    if (!Object.prototype.hasOwnProperty.call(state.productionSectionExpanded, section)) return;
+    setProductionLocalTab("create");
+    setProductionSectionExpanded(section, true);
+    window.requestAnimationFrame(() => {
+      const sectionNode = $(`[data-production-section="${section}"]`, productionRoot());
+      if (!sectionNode || sectionNode.hidden) return;
+      const target = selector
+        ? (document.querySelector(selector) || sectionNode)
+        : sectionNode;
+      sectionNode.scrollIntoView({ behavior: "smooth", block: "center" });
+      const focusTarget = target.matches?.("input, select, textarea, button, [tabindex]")
+        ? target
+        : target.querySelector?.("input, select, textarea, button, [tabindex]");
+      window.setTimeout(() => {
+        focusTarget?.focus?.({ preventScroll: true });
+        (focusTarget || target).classList?.add("production-focus-pulse");
+        window.setTimeout(() => (focusTarget || target).classList?.remove("production-focus-pulse"), 1500);
+      }, 220);
+    });
+  }
+
+  function productionMissingChipsMarkup(items) {
+    return items.map((item) => `<button type="button" class="production-missing-chip" data-production-missing="${escapeHtml(item.key)}" data-production-jump="${escapeHtml(item.section)}" data-production-target="${escapeHtml(item.selector)}">${escapeHtml(item.label)}</button>`).join("");
+  }
+
+  function updateProductionJumpbar(novel = state.productionNovel, draft = novel ? activeDraft(novel) : null) {
+    const buttons = $$('[data-production-jump]', $("#production-ribbon"));
+    if (!novel || !draft) {
+      buttons.forEach((button) => {
+        button.disabled = true;
+        button.classList.remove("is-complete", "is-incomplete", "is-optional");
+        const proof = $(`[data-production-jump-status="${button.dataset.productionJump}"]`, button);
+        if (proof) proof.textContent = "选择小说后检查";
+      });
+      return;
+    }
+    const mode = normalizedProductionOutputMode(draft.production_settings?.output_mode);
+    const missing = productionMissingDescriptors(novel, draft);
+    buttons.forEach((button) => {
+      const section = String(button.dataset.productionJump || "");
+      const sectionMissing = missing.filter((item) => item.section === section);
+      const optional = section === "visual" && mode === "audio_only";
+      button.disabled = optional;
+      button.classList.toggle("is-incomplete", sectionMissing.length > 0);
+      button.classList.toggle("is-complete", !optional && sectionMissing.length === 0);
+      button.classList.toggle("is-optional", optional);
+      const proof = $(`[data-production-jump-status="${section}"]`, button);
+      if (proof) proof.textContent = optional
+        ? "本模式无需设置"
+        : sectionMissing.length
+          ? `还缺 ${sectionMissing.length} 项`
+          : section === "visual" ? "可选调整" : "已就绪";
+    });
   }
 
   function productionBatchSlateMarkup(novel, draft) {
@@ -3854,31 +3927,61 @@
     }).join("");
   }
 
-  function productionMissingItems(novel, draft) {
+  function productionMissingDescriptors(novel, draft) {
     const missing = [];
     const mode = normalizedProductionOutputMode(draft.production_settings?.output_mode);
     const audioOnly = mode === "audio_only";
     const reuseAudio = mode === "reuse_audio";
     const bgmMode = String(draft.production_settings?.bgm_mode || "auto");
-    if (!draft.platform_id) missing.push("平台");
-    if (!draft.promo_code_id) missing.push("口令");
-    if (!draft.episode_ids?.length) missing.push("分集");
-    if (!reuseAudio && (!draft.voice?.provider || !draft.voice?.voice_id)) missing.push("本批女声");
-    if (reuseAudio && !String(draft.source_narration_audio || "").trim()) missing.push("已有配音");
-    if (!audioOnly && !draft.video_folder) missing.push("视频素材");
-    if (!audioOnly && bgmMode === "auto" && !draft.music_folder) missing.push("背景音乐库");
-    if (!audioOnly && bgmMode === "manual" && !String(draft.production_settings?.bgm_file || "").trim()) missing.push("指定音乐文件");
-    if (!draft.output_folder) missing.push("输出目录");
-    if (!(novel.platform_bindings || []).length) missing.push("小说平台绑定");
-    return [...new Set(missing)];
+    const add = (key, label, section, selector) => missing.push({ key, label, section, selector });
+    if (!draft.platform_id) add("platform", "平台", "content", "#production-platform-select");
+    if (!draft.promo_code_id) add("promo-code", "口令", "content", "#production-code-select");
+    if (!draft.episode_ids?.length) add("episodes", "分集", "content", "[data-episode-id]");
+    if (!reuseAudio && (!draft.voice?.provider || !draft.voice?.voice_id)) add("voice", "本批女声", "voice", 'input[name="production-voice"], [data-generate-voices]');
+    if (reuseAudio && !String(draft.source_narration_audio || "").trim()) add("source-audio", "已有配音", "voice", "#production-source-narration-audio");
+    if (!audioOnly && !draft.video_folder) add("video-folder", "视频素材", "output", "#draft-video-folder");
+    if (!audioOnly && bgmMode === "auto" && !draft.music_folder) add("music-folder", "背景音乐库", "output", "#draft-music-folder");
+    if (!audioOnly && bgmMode === "manual" && !String(draft.production_settings?.bgm_file || "").trim()) add("bgm-file", "指定音乐文件", "voice", "#production-bgm-file");
+    if (!draft.output_folder) add("output-folder", "输出目录", "output", "#draft-output-folder");
+    if (!(novel.platform_bindings || []).length) add("platform-binding", "小说平台绑定", "content", "[data-open-production-novel-profile]");
+    return missing.filter((item, index) => missing.findIndex((candidate) => candidate.key === item.key) === index);
+  }
+
+  function productionMissingItems(novel, draft) {
+    return productionMissingDescriptors(novel, draft).map((item) => item.label);
   }
 
   function productionPresetItems({ includeManaged = false } = {}) {
+    const teamDefault = {
+      id: "team-default",
+      name: "团队默认",
+      description: "管理员维护的基础制作设置；套用后仍可自由调整本批参数。",
+      scope: "team-default",
+      team_default: true,
+      editable: false,
+      deletable: false,
+      owned_by_current_user: false,
+      recipe: { production_settings: portableProductionSettings(state.settings || {}) },
+    };
+    const currentUserId = String(state.webSession?.user?.id || "");
+    const employee = isEmployeeSession();
+    const isOwnedByCurrentUser = (item) => Boolean(item?.owned_by_current_user)
+      || Boolean(currentUserId && String(item?.owner_user_id || "") === currentUserId);
     const remoteItems = (Array.isArray(state.productionPresets) ? state.productionPresets : [])
       .filter((item) => {
         if (!item || item.curated || item.scope === "curated" || item.scope === "team") return false;
         if (!String(item.owner_user_id || "").trim()) return false;
-        return Boolean(item.owned_by_current_user) || (includeManaged && !isEmployeeSession());
+        return isOwnedByCurrentUser(item) || (includeManaged && !employee);
+      })
+      .map((item) => {
+        const owned = isOwnedByCurrentUser(item);
+        return {
+          ...item,
+          owned_by_current_user: owned,
+          // All personal recipes can be removed by their owner; administrators
+          // can remove any employee recipe from the management shelf.
+          deletable: owned || (!employee && includeManaged) || Boolean(item.deletable),
+        };
       });
     const remoteIds = new Set(remoteItems.map((item) => String(item.id || "")));
     const remoteNames = new Set(remoteItems.map((item) => String(item.name || "").trim().toLocaleLowerCase()));
@@ -3904,7 +4007,7 @@
         local_style_id: item.id,
         recipe: { production_settings: structuredClone(item.settings) },
       }));
-    return [...remoteItems, ...legacyLocalItems];
+    return [...(includeManaged ? [] : [teamDefault]), ...remoteItems, ...legacyLocalItems];
   }
 
   function productionPresetManagementItems() {
@@ -3912,6 +4015,7 @@
   }
 
   function productionPresetScopeLabel(item) {
+    if (item?.team_default) return "团队默认";
     if (item?.owned_by_current_user) return "我的方案";
     const owner = String(item?.owner_display_name || "").trim();
     return owner ? `${owner}的方案` : "员工方案";
@@ -3921,7 +4025,11 @@
     const items = productionPresetItems();
     const selected = items.find((item) => String(item.id) === state.selectedProductionPresetId) || null;
     const draft = state.productionNovel ? activeDraft(state.productionNovel) : null;
-    const isApplied = Boolean(selected && draft?.applied_production_preset_id === selected.id);
+    const isApplied = Boolean(selected && (
+      selected.team_default
+        ? draft?.applied_team_default === true
+        : draft?.applied_production_preset_id === selected.id
+    ));
     const canUpdate = Boolean(isApplied && selected?.editable);
     const canDelete = Boolean(selected?.deletable);
     const status = isApplied ? (draft?.production_preset_dirty ? "已套用 · 有调整" : "已套用") : (selected ? "待套用" : "自由配置");
@@ -3930,27 +4038,27 @@
       ? `${productionPresetScopeLabel(selected)}${selected.editable ? " · 可修改和删除" : " · 仅可套用"}`
       : "当前没有套用方案，下方所有选项均可自由配置";
     const emptyHint = !items.length
-      ? `<small class="production-recipe-empty">还没有个人方案。先自由配置本批，满意后点击“另存为我的方案”。</small>`
+      ? `<small class="production-recipe-empty">还没有个人方案。先自由配置本批，满意后点击“保存为我的方案”。</small>`
       : "";
-    return `<section class="production-recipe-bar ${items.length ? "" : "is-empty"}" aria-label="个人制作方案">
+    return `<section class="production-recipe-bar ${items.length ? "" : "is-empty"}" aria-label="团队默认与个人制作方案">
       <span class="production-recipe-icon" aria-hidden="true">P</span>
-      <span class="production-recipe-copy"><b>我的制作方案 <em>${status}</em></b><small>${escapeHtml(selected?.description || "自由配置配音、字幕、卡片、画面和输出；常用组合可保存后重复使用。")}</small>${emptyHint}</span>
+      <span class="production-recipe-copy"><b>制作方案 <em>${status}</em></b><small>${escapeHtml(selected?.description || "可从团队默认开始，也可保存自己的常用配音、字幕、卡片、画面和输出组合。")}</small>${emptyHint}</span>
       <label class="field production-recipe-select"><span>选择已保存方案</span><select id="production-recipe-select"><option value="">自由配置（不套用方案）</option>${options}</select></label>
       <span class="production-recipe-actions">
         <button type="button" class="button button-primary" data-apply-production-preset ${selected ? "" : "disabled"}>套用方案</button>
         <button type="button" class="button button-secondary" data-save-production-preset ${canUpdate ? "" : "disabled"}>更新当前方案</button>
-        <button type="button" class="button button-ghost" data-save-production-preset-as>另存为我的方案</button>
+        <button type="button" class="button button-ghost" data-save-production-preset-as>保存为我的方案</button>
         <button type="button" class="text-button" data-delete-production-preset ${canDelete ? "" : "disabled"}>${canDelete ? (selected?.owned_by_current_user ? "删除我的方案" : "管理员删除") : ""}</button>
       </span>
-      <small class="production-recipe-safety">${escapeHtml(ownershipHint)}。方案不会保存小说、平台、口令、发布账号、分集、已选女声或本机文件夹。</small>
+      <small class="production-recipe-safety">${escapeHtml(ownershipHint)}。团队默认和个人方案都不会保存小说、平台、口令、发布账号、分集、已选女声或本机文件夹。</small>
     </section>`;
   }
 
   function productionModeRouterMarkup(settings = {}) {
     const mode = normalizedProductionOutputMode(settings.output_mode);
     const modes = [
-      ["video_and_mp3", "常规视频生成", "从正文生成配音、字幕和视频，同时交付同名配音。", "视频 + 配音"],
-      ["audio_only", "仅生成配音", "只生成纯旁白配音，不读取视频素材和背景音乐。", "配音"],
+      ["video_and_mp3", "常规视频生成", "从正文生成配音、字幕和视频，只交付可直接发布的 MP4。", "MP4"],
+      ["audio_only", "仅生成配音", "只生成纯旁白 MP3，不读取视频素材和背景音乐。", "配音"],
       ["reuse_audio", "已有配音更换素材", "复用已有配音，重新匹配视频素材并生成新画面。", "换素材"],
     ];
     return `<section class="production-mode-router" aria-labelledby="production-mode-title">
@@ -4000,7 +4108,7 @@
     const value = String(draft?.source_narration_audio || "");
     return `<div class="production-source-audio">
       <span class="production-source-audio-mark" aria-hidden="true">配音</span>
-      <label class="field"><span>已有配音</span><div class="production-file-picker"><input id="production-source-narration-audio" value="${escapeHtml(value)}" placeholder="选择 StoryForge 输出的纯旁白配音" /><button type="button" class="button button-secondary" data-choose-production-file="source_narration_audio">选择配音</button></div><small>配音文件内含小说、口令和精确字幕索引，可复制到其他员工电脑复用；不会重新调用配音服务。</small></label>
+      <label class="field"><span>已有配音或成品视频</span><div class="production-file-picker"><input id="production-source-narration-audio" value="${escapeHtml(value)}" placeholder="选择 StoryForge 输出的 MP3 配音或成品视频" /><button type="button" class="button button-secondary" data-choose-production-file="source_narration_audio">选择配音/视频</button></div><small>仅接受带 StoryForge 小说、口令和字幕索引的文件；成品视频需在原生成电脑使用，并会沿用原音轨、不再叠加背景音乐。MP3 配音可复制到其他员工电脑复用。</small></label>
     </div>`;
   }
 
@@ -4094,9 +4202,10 @@
       }
     }
     state.selectedProductionPresetId = String(preset.id);
-    draft.applied_production_preset_id = String(preset.id);
-    draft.applied_production_preset_revision = Number(preset.revision || 1);
-    draft.applied_production_preset_hash = String(preset.content_hash || "");
+    draft.applied_team_default = preset.team_default === true;
+    draft.applied_production_preset_id = preset.team_default ? "" : String(preset.id);
+    draft.applied_production_preset_revision = preset.team_default ? 0 : Number(preset.revision || 1);
+    draft.applied_production_preset_hash = preset.team_default ? "" : String(preset.content_hash || "");
     draft.production_preset_dirty = false;
     renderProductionWorkbench();
     toast(`已套用“${preset.name}”，小说、口令、分集和本机目录保持不变。`, "info");
@@ -4122,6 +4231,7 @@
       const saved = await checkedCall("save_production_preset", payload);
       state.selectedProductionPresetId = String(saved.id || "");
       const draft = activeDraft(state.productionNovel);
+      draft.applied_team_default = false;
       draft.applied_production_preset_id = state.selectedProductionPresetId;
       draft.applied_production_preset_revision = Number(saved.revision || 1);
       draft.applied_production_preset_hash = String(saved.content_hash || "");
@@ -4153,6 +4263,7 @@
       state.selectedProductionPresetId = "";
       const draft = state.productionNovel ? activeDraft(state.productionNovel) : null;
       if (draft) {
+        draft.applied_team_default = false;
         draft.applied_production_preset_id = "";
         draft.applied_production_preset_revision = 0;
         draft.applied_production_preset_hash = "";
@@ -4180,6 +4291,7 @@
         ${productionNovelPickerMarkup()}
       </div>`;
       setProductionLocalTab(state.productionLocalTab);
+      updateProductionJumpbar(null, null);
       return;
     }
     const draft = activeDraft(novel);
@@ -4230,7 +4342,7 @@
     const sectionOpen = state.productionSectionExpanded;
     const selectedPlatformName = platformById(draft.platform_id)?.name || binding?.platform_name || "平台待选";
     const selectedVoiceLabel = draft.voice?.label || draft.voice?.voice_id || (reuseAudio ? "已有配音" : "女声待选");
-    const visualSummary = `${settings.video_template === "platform_story_card" ? "平台简介卡" : "经典模板"} · ${settings.subtitle_word_mode === "single" ? "单词逐个" : settings.subtitle_word_mode === "cumulative" ? "逐词变色" : "整句字幕"}`;
+    const visualSummary = `${settings.intro_card_enabled ? "简介卡开启" : "简介卡关闭"} · ${settings.subtitle_word_mode === "single" ? "单词逐个" : settings.subtitle_word_mode === "cumulative" ? "逐词变色" : "整句字幕"}`;
     const outputSummary = audioOnly
       ? "纯旁白配音"
       : `${Number(settings.output_fps || 60)} FPS · ${draft.target_video_count} 个视频`;
@@ -4309,9 +4421,15 @@
           <div class="production-visual-semantics">
             <section class="production-semantic-panel" data-visual-panel="picture" aria-labelledby="production-picture-panel-title">
               <div class="production-semantic-heading"><span aria-hidden="true">▧</span><div><h4 id="production-picture-panel-title">画面效果</h4><p>模板、素材速度与封面结尾</p></div></div>
-              <div class="production-template-row" data-template="${escapeHtml(settings.video_template || "classic")}">
-                <label class="field"><span>视频模板</span><select id="production-video-template"><option value="classic">经典模板</option><option value="platform_story_card">平台简介卡（推荐）</option></select></label>
+              <div class="production-intro-card-controls" data-intro-card-enabled="${settings.intro_card_enabled ? "true" : "false"}">
+                <label class="option-toggle production-intro-toggle">
+                  <input id="production-intro-card-enabled" type="checkbox" ${settings.intro_card_enabled ? "checked" : ""} />
+                  <span><b>使用简介卡</b><small>开头展示平台、口令和精简故事钩子。</small></span>
+                  <i aria-hidden="true"></i>
+                </label>
+                <label class="field"><span>出现时长</span><input id="production-intro-card-duration" type="number" min="2.5" max="8" step="0.5" value="${Number(settings.intro_card_duration_seconds || 5.5)}" /><small>2.5–8 秒</small></label>
                 <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset"><option value="editorial_white">杂志白卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
+                <label class="field production-intro-copy-field"><span>简介短文案</span><textarea id="production-intro-card-copy" rows="3" maxlength="155" placeholder="${escapeHtml(storyPreviewText(novel, draft))}">${escapeHtml(draft.intro_card_text || "")}</textarea><small>留空则使用 AI 精简结果；只保留最有吸引力的冲突，不显示小说名和多余标签。</small></label>
               </div>
               ${productionVideoSpeedMarkup(settings)}
               <label class="option-toggle production-cover-toggle">
@@ -4323,8 +4441,8 @@
             <section class="production-semantic-panel" data-visual-panel="captions" aria-labelledby="production-captions-panel-title">
               <div class="production-semantic-heading"><span aria-hidden="true">Aa</span><div><h4 id="production-captions-panel-title">字幕与口令</h4><p>文字怎样出现、怎样更易读</p></div></div>
               <div class="workbench-field-grid workbench-field-grid-two production-caption-primary-grid">
-                <label class="field"><span>字幕预设</span><select id="production-subtitle-preset"><option value="clear_outline">清晰描边</option><option value="cinematic_shadow">电影阴影</option><option value="clean_minimal">极简阅读</option><option value="bold_drama">强力戏剧</option><option value="reader_focus">阅读聚焦</option><option value="soft_box">柔和底板</option><option value="word_pop_sync">逐词弹出（配音同步）</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="midnight_reader">午夜阅读</option><option value="minimal_bottom">底部极简</option></select></label>
-                <label class="field"><span>跟随旁白</span><select id="production-subtitle-word-mode"><option value="off">普通整句</option><option value="cumulative">逐词累积变色</option><option value="single">单词逐个显示</option></select></label>
+                <label class="field"><span>字幕预设</span><select id="production-subtitle-preset"><option value="clear_outline">清晰描边</option><option value="soft_box">柔和底板</option><option value="word_pop_sync">逐词弹出</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="minimal_bottom">底部极简</option></select></label>
+                <label class="field"><span>字幕行为</span><select id="production-subtitle-word-mode"><option value="off">整句稳定</option><option value="cumulative">逐词累积高亮</option><option value="single">单词逐个出现</option></select></label>
                 <label class="field"><span>口令卡样式</span><select id="production-code-card-preset"><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
                 <label class="field"><span>字幕切分</span><select id="production-caption-mode"><option value="semantic">按语义停顿</option><option value="sentence">按完整句子</option></select></label>
               </div>
@@ -4339,7 +4457,7 @@
             <label class="field"><span>素材拼接</span><select id="production-video-transition"><option value="cut">直接切换（默认）</option><option value="fade">淡化衔接（固定 0.2 秒）</option></select></label>
             <label class="field"><span>渲染模式</span><select id="production-render-mode"><option value="speed">速度优先</option><option value="quality">质量优先</option><option value="compatibility">兼容模式</option></select></label>
             <label class="field"><span>输出帧率</span><select id="production-output-fps"><option value="60">60 FPS（推荐）</option><option value="30">30 FPS（更快）</option></select></label>
-            <label class="field"><span>字体</span><select id="production-subtitle-font"><option>Arial</option><option>Segoe UI</option><option>Georgia</option><option>Bahnschrift</option></select></label>
+            <label class="field"><span>字体</span><select id="production-subtitle-font"><option>Arial</option><option>Segoe UI</option><option>Segoe UI Semibold</option><option>Verdana</option><option>Trebuchet MS</option><option>Tahoma</option><option>Arial Black</option><option>Georgia</option><option>Bahnschrift</option></select></label>
             <label class="field"><span>字号</span><input id="production-subtitle-size" type="number" min="32" max="80" value="${Number(subtitle.font_size || 52)}" /></label>
             <label class="field"><span>每行字符</span><input id="production-subtitle-chars" type="number" min="16" max="40" value="${Number(subtitle.max_chars_per_line || 28)}" /></label>
             <label class="field"><span>底部安全距离</span><input id="production-subtitle-bottom" type="number" min="220" max="600" value="${Number(subtitle.bottom_margin || 310)}" /></label>
@@ -4366,7 +4484,7 @@
           ${draftFolderFieldMarkup("output_folder", draft)}
         </div>
         <div class="production-output-extras" aria-label="选择输出内容">
-          <p class="production-audio-contract-note"><b>${productionModeLabel(outputMode)}</b> · ${audioOnly ? "只交付纯旁白配音。" : reuseAudio ? "复用已有配音并交付新 MP4；不会重新调用配音。" : "交付最终 MP4 与同名纯旁白配音。"} 字幕、日志、中间 WAV 与 JSON 不会混入员工发布文件夹。</p>
+          <p class="production-audio-contract-note"><b>${productionModeLabel(outputMode)}</b> · ${audioOnly ? "只交付纯旁白 MP3。" : reuseAudio ? "复用已有配音并交付新 MP4；不会重新调用配音。" : "只交付可直接发布的最终 MP4。"} 字幕、日志、中间 WAV 与 JSON 不会混入员工发布文件夹。</p>
         </div>
         </div>
       </section>
@@ -4376,14 +4494,13 @@
           <div class="production-action-summary" id="production-action-summary"></div>
           <div class="production-action-dock-actions">
             <button type="button" class="button button-ghost production-action-preview production-preview-drawer-trigger" data-open-production-preview-drawer aria-controls="production-preview-drawer" aria-expanded="false">预览画面</button>
-            <button type="button" class="button button-primary production-direct-button" data-queue-production-draft ${structureLocked ? "disabled" : ""}>${audioOnly ? "生成纯旁白配音" : reuseAudio ? "使用已有配音生成新视频" : "生成完整视频 + 配音"}</button>
+            <button type="button" class="button button-primary production-direct-button" data-queue-production-draft ${structureLocked ? "disabled" : ""}>${audioOnly ? "生成纯旁白配音" : reuseAudio ? "使用已有配音生成新视频" : "生成完整视频"}</button>
           </div>
         </div>
       </section>`;
 
-    $("#production-video-template").value = settings.video_template || "classic";
     $("#production-intro-card-preset").value = settings.intro_card_preset || "editorial_white";
-    $("#production-subtitle-preset").value = settings.subtitle_preset || "clear_outline";
+    $("#production-subtitle-preset").value = visibleProductionSubtitlePreset(settings.subtitle_preset);
     $("#production-code-card-preset").value = settings.code_card_preset || "brand_pill";
     $("#production-outro-card-preset").value = settings.outro_card_preset || "editorial_white";
     $("#production-caption-mode").value = settings.caption_mode || "semantic";
@@ -4613,15 +4730,15 @@
   async function chooseProductionAudioFile(button) {
     const novel = state.productionNovel;
     if (!novel) return;
+    const field = String(button.dataset.chooseProductionFile || "");
     if (isWebRuntime && !isBrowserDemo && !hasDesktopBridge()) {
-      toast("浏览器不能取得本机文件路径。请在桌面版选择，或把本机音频完整路径粘贴到输入框。", "error");
+      toast(field === "source_narration_audio" ? "浏览器不能取得本机文件路径。请在桌面版选择，或把 StoryForge 配音/成品视频的完整路径粘贴到输入框。" : "浏览器不能取得本机文件路径。请在桌面版选择，或把本机音频完整路径粘贴到输入框。", "error");
       return;
     }
     try {
       await withBusyButton(button, "正在选择…", async () => {
-        const value = await checkedCall("choose_file", "audio");
+        const value = await checkedCall("choose_file", field === "source_narration_audio" ? "narration_source" : "audio");
         if (!value) return;
-        const field = String(button.dataset.chooseProductionFile || "");
         if (field === "source_narration_audio") {
           activeDraft(novel).source_narration_audio = String(value);
           const input = $("#production-source-narration-audio");
@@ -4676,7 +4793,13 @@
       productionSettings.video_playback_speed = selectedProductionVideoSpeed();
     }
     productionSettings.video_transition = $("#production-video-transition")?.value === "fade" ? "fade" : "cut";
-    productionSettings.video_template = $("#production-video-template")?.value || productionSettings.video_template || "classic";
+    productionSettings.intro_card_enabled = $("#production-intro-card-enabled")?.checked === true;
+    productionSettings.intro_card_duration_seconds = Math.max(
+      2.5,
+      Math.min(8, Number($("#production-intro-card-duration")?.value || productionSettings.intro_card_duration_seconds || 5.5)),
+    );
+    productionSettings.video_template = productionSettings.intro_card_enabled ? "platform_story_card" : "classic";
+    if ($("#production-intro-card-copy")) draft.intro_card_text = $("#production-intro-card-copy").value.trim();
     productionSettings.intro_card_preset = $("#production-intro-card-preset")?.value || productionSettings.intro_card_preset || "editorial_white";
     productionSettings.subtitle_preset = $("#production-subtitle-preset")?.value || productionSettings.subtitle_preset || "clear_outline";
     productionSettings.code_card_preset = $("#production-code-card-preset")?.value || productionSettings.code_card_preset || "brand_pill";
@@ -4690,7 +4813,7 @@
     productionSettings.output_mode = normalizedProductionOutputMode(
       $('input[name="production-output-mode"]:checked', root)?.value || productionSettings.output_mode,
     );
-    productionSettings.export_narration_audio = true;
+    productionSettings.export_narration_audio = false;
     productionSettings.cover_animation = normalizedCoverAnimation($("#production-cover-animation")?.value || productionSettings.cover_animation);
     productionSettings.color_grade = $("#production-color-grade")?.value || productionSettings.color_grade || "neutral";
     productionSettings.intro_animation = $("#production-intro-animation")?.value || productionSettings.intro_animation || "fade_rise";
@@ -4698,6 +4821,13 @@
     if (coverMotionControl) {
       coverMotionControl.disabled = !productionSettings.cover_outro_enabled;
       coverMotionControl.closest(".production-cover-motion")?.classList.toggle("is-disabled", !productionSettings.cover_outro_enabled);
+    }
+    const introCardControls = $(".production-intro-card-controls", root);
+    if (introCardControls) {
+      introCardControls.dataset.introCardEnabled = String(productionSettings.intro_card_enabled);
+      [$("#production-intro-card-duration"), $("#production-intro-card-preset"), $("#production-intro-animation")]
+        .filter(Boolean)
+        .forEach((control) => { control.disabled = !productionSettings.intro_card_enabled; });
     }
     productionSettings.subtitle ||= {};
     Object.assign(productionSettings.subtitle, {
@@ -4719,9 +4849,11 @@
     const musicFolderField = $('[data-draft-path="music_folder"]', root)?.closest(".draft-folder-field");
     if (videoFolderField) videoFolderField.hidden = audioOnly;
     if (musicFolderField) musicFolderField.hidden = audioOnly || productionSettings.bgm_mode !== "auto";
-    const missing = productionMissingItems(novel, draft);
+    const missingDescriptors = productionMissingDescriptors(novel, draft);
+    const missing = missingDescriptors.map((item) => item.label);
     updateProductionBatchSlate(novel, draft, missing);
     updateProductionSectionSummaries(novel, draft);
+    updateProductionJumpbar(novel, draft);
     const structureLocked = productionStructureLocked(novel, draft);
     const summary = $("#production-action-summary");
     const deliverableLabel = audioOnly ? "配音" : reuseAudio ? "换素材视频" : "完整成品";
@@ -4729,8 +4861,8 @@
     if (summary) summary.innerHTML = structureLocked
       ? `<span class="summary-status is-running">已加入队列</span><b>${draft.episode_ids.length}个分集合并 · ${effectiveOutputCount}个${deliverableLabel}</b><small>当前批次正在处理，无需额外确认。</small>`
       : missing.length
-        ? `<span class="summary-status is-incomplete">还缺 ${missing.length} 项</span><b>${escapeHtml(missing.join("、"))}</b><small>补齐后即可按“${productionModeLabel(mode)}”开始。</small>`
-        : `<span class="summary-status is-ready">配置完整</span><b>${draft.episode_ids.length}个分集合并 · ${effectiveOutputCount}个${deliverableLabel}</b><small>${audioOnly ? "将跳过素材、音乐、字幕与视频渲染，只生成一份可复用配音。" : reuseAudio ? "将复用已有配音，更换视频素材后生成新 MP4。" : "右侧即时预览确认后，直接生成 MP4 与同名配音。"}</small>`;
+        ? `<span class="summary-status is-incomplete">还缺 ${missing.length} 项</span><span class="production-missing-chips">${productionMissingChipsMarkup(missingDescriptors)}</span><small>点击缺项即可定位，补齐后按“${productionModeLabel(mode)}”开始。</small>`
+        : `<span class="summary-status is-ready">配置完整</span><b>${draft.episode_ids.length}个分集合并 · ${effectiveOutputCount}个${deliverableLabel}</b><small>${audioOnly ? "将跳过素材、音乐、字幕与视频渲染，只生成一份可复用配音。" : reuseAudio ? "将复用已有配音，更换视频素材后生成新 MP4。" : "右侧即时预览确认后，直接生成可发布 MP4。"}</small>`;
     const totalProof = $("#production-total-proof");
     if (totalProof) totalProof.textContent = audioOnly
       ? "本批生成 1 份配音"
@@ -4765,14 +4897,17 @@
       ? "纯旁白配音 · 跳过视频渲染"
       : reuseAudio
         ? `已有配音 · ${productionSpeedLabel(productionSettings.video_playback_speed)}× · 新 MP4`
-        : `1080 × 1920 · ${productionSettings.output_fps} FPS · H.264 + 同名配音`;
+        : `1080 × 1920 · ${productionSettings.output_fps} FPS · H.264 MP4`;
     const launchButton = $("[data-queue-production-draft]", root);
     if (launchButton) launchButton.textContent = audioOnly
       ? "生成纯旁白配音"
       : reuseAudio
         ? "使用已有配音生成新视频"
-        : "生成完整视频 + 配音";
-    $("[data-queue-production-draft]", root)?.toggleAttribute("disabled", structureLocked || missing.length > 0);
+        : "生成完整视频";
+    if (launchButton && !structureLocked && missingDescriptors.length) {
+      launchButton.textContent = `去补齐：${missingDescriptors[0].label}`;
+    }
+    $("[data-queue-production-draft]", root)?.toggleAttribute("disabled", structureLocked);
     updateProductionCustomChoiceState();
     persistProductionPreferences(novel, draft);
     if (render) renderProductionWorkbench();
@@ -4825,7 +4960,7 @@
   function productionPreviewSceneForControl(control) {
     const id = control?.id || "";
     const name = control?.name || "";
-    if (["production-video-template", "production-intro-card-preset", "production-code-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
+    if (["production-intro-card-enabled", "production-intro-card-duration", "production-intro-card-copy", "production-intro-card-preset", "production-code-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
     if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset"].includes(id)) return "outro";
     if (id.startsWith("production-subtitle-") || id === "production-caption-mode") return "subtitle";
     return "";
@@ -4992,7 +5127,8 @@
     const settings = draft.production_settings || {};
     const previewLanguage = novelLanguageInfo(novel).code || "en";
     const root = $("#video-preview");
-    const videoTemplate = settings.video_template || "classic";
+    const introCardEnabled = settings.intro_card_enabled === true;
+    const videoTemplate = introCardEnabled ? "platform_story_card" : "classic";
     const coverAnimation = normalizedCoverAnimation(settings.cover_animation);
     const coverOutroEnabled = settings.cover_outro_enabled !== false;
     if (root) {
@@ -5011,8 +5147,9 @@
       applyProductionCardStyles(root, settings);
     }
     if ($("#preview-output")) $("#preview-output").textContent = `1080 × 1920 · ${Number(settings.output_fps || 60)} FPS`;
-    if ($("#preview-template")) $("#preview-template").textContent = videoTemplate === "platform_story_card" ? "平台简介卡 · 5.5秒" : "经典模板";
-    if ($("#preview-story-title")) $("#preview-story-title").textContent = String(novel.title || "STORY HOOK").toUpperCase();
+    if ($("#preview-template")) $("#preview-template").textContent = introCardEnabled
+      ? `简介卡开启 · ${Number(settings.intro_card_duration_seconds || 5.5)}秒`
+      : "简介卡关闭";
     if ($("#preview-story-search")) $("#preview-story-search").textContent = `${platform?.name || "Platform"} · Search “${code}”`;
     paintPlatformLogo(
       $("#preview-story-platform-mark"),
@@ -5070,13 +5207,13 @@
     const compact = sourceText.replace(/\s+/g, " ").trim();
     if (/[\u2e80-\u9fff\u3040-\u30ff\uac00-\ud7af]/u.test(compact)) {
       const characters = Array.from(compact);
-      const clipped = characters.slice(0, 70).join("");
-      return characters.length > 70 ? `${clipped.replace(/[\s，。！？；：、]+$/u, "")}…` : clipped;
+      const clipped = characters.slice(0, 48).join("");
+      return characters.length > 48 ? `${clipped.replace(/[\s，。！？；：、]+$/u, "")}…` : clipped;
     }
     const words = compact.split(" ");
-    const byWords = words.slice(0, 28).join(" ");
-    const clipped = byWords.length > 155 ? byWords.slice(0, 155).replace(/\s+\S*$/, "") : byWords;
-    return words.length > 28 || byWords.length > 155
+    const byWords = words.slice(0, 20).join(" ");
+    const clipped = byWords.length > 110 ? byWords.slice(0, 110).replace(/\s+\S*$/, "") : byWords;
+    return words.length > 20 || byWords.length > 110
       ? `${clipped.replace(/[\s,;:\-]+$/, "")}…`
       : clipped;
   }
@@ -5116,7 +5253,7 @@
     const novel = state.productionNovel;
     if (!novel) return;
     const draft = activeDraft(novel);
-    if (draft.applied_production_preset_id) draft.production_preset_dirty = true;
+    if (draft.applied_production_preset_id || draft.applied_team_default) draft.production_preset_dirty = true;
     if (!productionStructureLocked(novel, draft)) return;
     draft.recipe_dirty = true;
   }
@@ -5164,7 +5301,7 @@
             <button type="button" class="button button-ghost" data-redetect-novel-language>${languageInfo.manual ? "恢复自动识别" : "重新检测正文"}</button>
           </div>
           <label class="field"><span class="field-label-actions"><span>故事简介</span><button type="button" class="text-button" data-import-synopsis>从 TXT / DOCX 导入</button></span><textarea id="detail-edit-synopsis" rows="5">${escapeHtml(novel.synopsis || "")}</textarea><small id="synopsis-import-proof">可直接编辑，或导入文档后再保存。</small></label>
-          <div class="meta-editor-actions"><button type="button" class="button button-ghost" data-update-manuscript>更新正文版本</button><button type="button" class="button button-secondary" data-save-novel-metadata>保存小说资料</button></div>
+          <div class="meta-editor-actions"><button type="button" class="button button-ghost" data-update-manuscript>更新正文版本</button><button type="button" class="button button-danger settings-admin-only" data-action="delete-novel" data-delete-novel>删除小说</button><button type="button" class="button button-secondary" data-save-novel-metadata>保存小说资料</button></div>
         </div>
       </details>
       <section class="drawer-section library-chapter-section">
@@ -5177,7 +5314,7 @@
           <label class="field"><span>小说平台</span><select id="detail-platform-select"><option value="">选择平台</option>${state.platforms.map((platform) => `<option value="${escapeHtml(platform.id)}" ${platform.id === libraryPlatformId ? "selected" : ""}>${escapeHtml(platform.name)}</option>`).join("")}</select></label>
           <button type="button" class="button button-secondary" data-save-binding>${libraryBinding ? "查看这个平台" : "绑定平台"}</button>
         </div>
-        <div class="promo-code-list" id="detail-promo-code-list">${libraryCodes.length ? libraryCodes.map((code) => `<div class="promo-code-ticket ${code.active ? "" : "is-inactive"}"><span><b>${escapeHtml(code.value)}</b><small>${code.active ? "制作台可选择" : "当前已停用"}</small></span><button type="button" class="code-state-button" data-toggle-code="${escapeHtml(code.id)}" data-next-active="${code.active ? "false" : "true"}">${code.active ? "停用" : "启用"}</button></div>`).join("") : '<p class="inline-empty">这个平台还没有口令；添加后员工才能在制作台选择。</p>'}</div>
+        <div class="promo-code-list" id="detail-promo-code-list">${libraryCodes.length ? libraryCodes.map((code) => `<div class="promo-code-ticket ${code.active ? "" : "is-inactive"}"><span><b>${escapeHtml(code.value)}</b><small>${code.active ? "制作台可选择" : "当前已停用"}</small></span><span class="promo-code-actions settings-admin-only"><button type="button" class="code-state-button" data-toggle-code="${escapeHtml(code.id)}" data-next-active="${code.active ? "false" : "true"}">${code.active ? "停用" : "启用"}</button><button type="button" class="code-state-button is-danger" data-delete-code="${escapeHtml(code.id)}">删除</button></span></div>`).join("") : '<p class="inline-empty">这个平台还没有口令；添加后员工才能在制作台选择。</p>'}</div>
         <div class="add-code-row"><label class="field"><span class="sr-only">新增口令</span><input id="new-promo-code" maxlength="24" placeholder="输入字母与数字口令" ${!libraryBinding || libraryCodes.length >= 5 ? "disabled" : ""} /></label><button type="button" class="button button-secondary" data-add-promo-code ${!libraryBinding || libraryCodes.length >= 5 ? "disabled" : ""}>${libraryCodes.length >= 5 ? "历史累计已达5个" : "添加口令"}</button></div>
       </section>`;
     const languageSelect = $("#detail-language-override", root);
@@ -5697,56 +5834,15 @@
     return user ? (user.display_name || user.username) : (userId ? "已登记成员" : "未绑定成员");
   }
 
-  function managedDeviceConfigState(device) {
-    const revisionNumber = Number(device?.desired_revision_number || 0);
-    if (!revisionNumber) return { label: "使用本机设置", className: "", detail: "尚未下发团队配置" };
-    const revision = state.managedDeviceConfigs.find((item) => Number(item.revision_number) === revisionNumber) || null;
-    const configDetail = revision ? state.managedDeviceConfigDetails.get(revision.id) : null;
-    const target = configDetail?.targets?.find((item) => item.device_id === device.id) || null;
-    const ack = String(target?.ack_status || "").toLowerCase();
-    if (ack === "applied") return { label: `配置 r${revisionNumber} 已应用`, className: "is-applied", detail: target.acknowledged_at ? formatDeviceCreatedAt(target.acknowledged_at) : "已确认" };
-    if (ack === "failed") return { label: `配置 r${revisionNumber} 应用失败`, className: "is-failed", detail: target.ack_message || "请在该电脑立即同步" };
-    return { label: `配置 r${revisionNumber} 待应用`, className: "is-pending", detail: device.online ? "等待本机下一次同步" : "电脑联网后自动应用" };
-  }
-
-  function renderManagedConfigHistory() {
-    const root = $("#managed-config-history");
-    if (!root) return;
-    const revisions = state.managedDeviceConfigs.slice(0, 5);
-    if (!revisions.length) {
-      root.innerHTML = '<span class="managed-config-history-empty">还没有下发记录</span>';
-      return;
-    }
-    root.innerHTML = revisions.map((revision) => {
-      const detail = state.managedDeviceConfigDetails.get(revision.id);
-      const targets = Array.isArray(detail?.targets) ? detail.targets : [];
-      const applied = targets.filter((item) => item.ack_status === "applied").length;
-      const failed = targets.filter((item) => item.ack_status === "failed").length;
-      const total = Number(revision.target_count || targets.length || 0);
-      const pending = Math.max(0, total - applied - failed);
-      const status = failed ? `${failed} 台失败` : pending ? `${pending} 台待应用` : total ? "全部已应用" : "等待设备";
-      return `<article class="managed-config-history-row">
-        <b>r${Number(revision.revision_number || 0)}</b>
-        <span><b>${escapeHtml(revision.note || "团队制作默认值")}</b><small>${escapeHtml(formatDeviceCreatedAt(revision.created_at))} · ${total} 台</small></span>
-        <em>${escapeHtml(status)}</em>
-      </article>`;
-    }).join("");
-  }
-
   function renderManagedDeviceWorkspace() {
     const root = $("#managed-device-list");
     if (!root) return;
     const access = hubManagementAccessState();
     const devices = state.managedDevices;
-    const activeDevices = devices.filter((item) => item.active !== false);
-    const onlineCount = activeDevices.filter((item) => item.online).length;
-    const selectedIds = new Set([...state.managedDeviceSelection].filter((deviceId) => activeDevices.some((item) => item.id === deviceId)));
-    state.managedDeviceSelection = selectedIds;
+    const onlineCount = devices.filter((item) => item.active !== false && item.online).length;
     if ($("#managed-device-total")) $("#managed-device-total").textContent = String(devices.length);
     if ($("#managed-device-online")) $("#managed-device-online").textContent = String(onlineCount);
-    if ($("#managed-device-disabled")) $("#managed-device-disabled").textContent = String(devices.length - activeDevices.length);
-    if ($("#managed-device-selection")) $("#managed-device-selection").textContent = selectedIds.size ? `已选择 ${selectedIds.size} 台` : "尚未选择";
-    if ($("#managed-target-selected-copy")) $("#managed-target-selected-copy").textContent = selectedIds.size ? `将发送到 ${selectedIds.size} 台电脑` : "请先选择设备";
+    if ($("#managed-device-disabled")) $("#managed-device-disabled").textContent = String(devices.length - onlineCount);
     const refreshProof = $("#managed-device-refresh-proof");
     if (refreshProof) {
       refreshProof.textContent = state.managedDevicesLoading
@@ -5757,58 +5853,41 @@
             ? `最近刷新 ${formatDeviceCreatedAt(state.managedDevicesRefreshedAt)} · 在线按 2 分钟心跳判断`
             : "等待读取主电脑设备";
     }
-    const selectAll = $("#select-all-managed-devices");
-    if (selectAll) {
-      selectAll.disabled = !access.canManage || !activeDevices.length;
-      selectAll.textContent = activeDevices.length && selectedIds.size === activeDevices.length ? "取消全选" : "全选可用设备";
-    }
-    const targetMode = $('input[name="managed-config-target"]:checked')?.value || "selected";
-    const pushButton = $("#push-managed-device-config");
-    if (pushButton) pushButton.disabled = !access.canManage || !activeDevices.length || (targetMode === "selected" && !selectedIds.size);
-
     if (!access.canManage) {
       const heading = access.restartRequired ? "重启主电脑后管理设备" : "主电脑服务尚未运行";
       root.innerHTML = `<div class="hub-device-empty is-warning"><span aria-hidden="true">!</span><b>${heading}</b><small>保存“设为主电脑”并重启 StoryForge 后，已登记设备和远程设置会出现在这里。</small></div>`;
-      renderManagedConfigHistory();
       return;
     }
     if (state.managedDevicesLoading && !devices.length) {
       root.innerHTML = '<div class="hub-device-loading"><i></i><i></i><i></i></div>';
-      renderManagedConfigHistory();
       return;
     }
     if (state.managedDevicesError && !devices.length) {
       root.innerHTML = `<div class="hub-device-empty is-error"><span aria-hidden="true">!</span><b>设备列表读取失败</b><small>${escapeHtml(state.managedDevicesError)}</small><button type="button" class="button button-ghost" data-refresh-managed-devices>重新读取</button></div>`;
-      renderManagedConfigHistory();
       return;
     }
     if (!devices.length) {
       root.innerHTML = '<div class="hub-device-empty"><span aria-hidden="true">PC</span><b>还没有登记的制作电脑</b><small>让员工在自己的电脑输入主电脑地址、账号、密码和电脑名，连接成功后会自动出现在这里。</small></div>';
-      renderManagedConfigHistory();
       return;
     }
 
     root.innerHTML = devices.map((device) => {
-      const selected = selectedIds.has(device.id);
       const enabled = device.active !== false;
-      const config = managedDeviceConfigState(device);
       const stateLabel = enabled ? (device.online ? "在线" : "离线") : "已停用";
       const systemLabel = [device.hostname, device.os_name, device.architecture].filter(Boolean).join(" · ") || "系统信息待上报";
-      return `<article class="managed-device-row ${device.online && enabled ? "is-online" : ""} ${enabled ? "" : "is-disabled"} ${selected ? "is-selected" : ""}" data-managed-device-row="${escapeHtml(device.id)}">
-        <label class="managed-device-check" title="${enabled ? "选择这台电脑" : "停用设备不能接收设置"}"><input type="checkbox" data-managed-device-select="${escapeHtml(device.id)}" ${selected ? "checked" : ""} ${enabled ? "" : "disabled"} aria-label="选择 ${escapeHtml(device.name || device.hostname || "制作电脑")}" /></label>
+      return `<article class="managed-device-row ${device.online && enabled ? "is-online" : ""} ${enabled ? "" : "is-disabled"}" data-managed-device-row="${escapeHtml(device.id)}">
         <span class="managed-device-state-rail" aria-hidden="true"></span>
         <div class="managed-device-identity">
           <div class="managed-device-name-line"><b>${escapeHtml(device.name || device.hostname || "未命名电脑")}</b><em class="managed-device-member">${escapeHtml(managedDeviceMemberLabel(device.last_user_id))}</em>${device.needs_admin_review ? '<em class="managed-device-new-login">新电脑首次登录</em>' : ""}</div>
           <div class="managed-device-meta"><span>${escapeHtml(stateLabel)}</span><span>${escapeHtml(systemLabel)}</span><span>StoryForge ${escapeHtml(device.app_version || "版本未知")}</span><span>最后在线 ${escapeHtml(formatDeviceCreatedAt(device.last_seen_at))}</span></div>
         </div>
-        <div class="managed-device-config-state">
-          <span class="${config.className}">${escapeHtml(config.label)}</span>
-          <small>${escapeHtml(config.detail)}</small>
-          <div class="managed-device-actions">${device.needs_admin_review ? `<button type="button" class="button button-ghost" data-managed-device-action="review" data-managed-device-id="${escapeHtml(device.id)}">我已知道</button>` : ""}<button type="button" class="button button-ghost" data-managed-device-action="rename" data-managed-device-id="${escapeHtml(device.id)}">改名</button><button type="button" class="button button-ghost ${enabled ? "is-danger" : ""}" data-managed-device-action="toggle" data-managed-device-id="${escapeHtml(device.id)}">${enabled ? "停用" : "重新启用"}</button></div>
+        <div class="managed-device-status">
+          <span class="${device.online && enabled ? "is-applied" : ""}">${escapeHtml(stateLabel)}</span>
+          <small>${device.online ? "当前正在连接" : `最后在线 ${escapeHtml(formatDeviceCreatedAt(device.last_seen_at))}`}</small>
+          <div class="managed-device-actions">${device.needs_admin_review ? `<button type="button" class="button button-ghost" data-managed-device-action="review" data-managed-device-id="${escapeHtml(device.id)}">我已知道</button>` : ""}<button type="button" class="button button-ghost" data-managed-device-action="rename" data-managed-device-id="${escapeHtml(device.id)}">改名</button><button type="button" class="button button-ghost ${enabled ? "is-danger" : ""}" data-managed-device-action="toggle" data-managed-device-id="${escapeHtml(device.id)}">${enabled ? "停用" : "重新启用"}</button>${!enabled && !device.online ? `<button type="button" class="button button-ghost is-danger" data-managed-device-action="delete" data-managed-device-id="${escapeHtml(device.id)}">删除</button>` : ""}</div>
         </div>
       </article>`;
     }).join("");
-    renderManagedConfigHistory();
   }
 
   async function loadManagedDeviceFleet({ silent = false } = {}) {
@@ -5824,29 +5903,10 @@
     if (!silent || !state.managedDevices.length) state.managedDevicesLoading = true;
     renderManagedDeviceWorkspace();
     try {
-      const [deviceData, configData] = await Promise.all([
-        checkedCall("list_managed_devices", { limit: 500, offset: 0 }),
-        checkedCall("list_managed_device_configs", 25, 0),
-      ]);
+      const deviceData = await checkedCall("list_managed_devices", { limit: 500, offset: 0 });
       if (requestId !== state.managedDevicesRequestId) return;
       const devices = Array.isArray(deviceData?.items) ? deviceData.items : [];
-      const revisions = Array.isArray(configData?.items) ? configData.items : [];
-      const nextDetails = new Map(state.managedDeviceConfigDetails);
-      const details = await Promise.all(revisions.slice(0, 10).map(async (revision) => {
-        const cached = nextDetails.get(revision.id);
-        const hasPendingTarget = cached?.targets?.some((item) => !item.ack_status);
-        if (cached && !hasPendingTarget) return cached;
-        try {
-          return await checkedCall("get_managed_device_config", revision.id);
-        } catch (_error) {
-          return cached || null;
-        }
-      }));
-      if (requestId !== state.managedDevicesRequestId) return;
-      details.filter(Boolean).forEach((detail) => nextDetails.set(detail.id, detail));
       state.managedDevices = devices;
-      state.managedDeviceConfigs = revisions;
-      state.managedDeviceConfigDetails = nextDetails;
       state.managedDevicesRefreshedAt = new Date().toISOString();
     } catch (error) {
       if (requestId !== state.managedDevicesRequestId) return;
@@ -5858,64 +5918,6 @@
         renderManagedDeviceWorkspace();
       }
     }
-  }
-
-  function syncManagedConfigControlsFromSettings() {
-    const settings = state.settings || {};
-    assignValue("#managed-config-wpm", settings.narration_wpm ?? 240);
-    assignValue("#managed-config-bgm", Math.round(Number(settings.bgm_volume ?? 0.28) * 100));
-    if ($("#managed-config-bgm-value")) $("#managed-config-bgm-value").textContent = `${Math.round(Number(settings.bgm_volume ?? 0.28) * 100)}%`;
-    assignValue("#managed-config-fps", settings.output_fps || 60);
-    assignValue("#managed-config-language", settings.language || "en-US");
-  }
-
-  function portableManagedDeviceConfigPayload() {
-    const settings = state.settings || {};
-    const {
-      outro_card: _legacyOutroCard,
-      outro_card_preset: _legacyOutroPreset,
-      ...portableStyle
-    } = stylePayload();
-    return {
-      ...portableStyle,
-      language: $("#managed-config-language")?.value || settings.language || "en-US",
-      narration_wpm: Number($("#managed-config-wpm")?.value || settings.narration_wpm || 240),
-      bgm_volume: Number($("#managed-config-bgm")?.value ?? Math.round(Number(settings.bgm_volume ?? 0.28) * 100)) / 100,
-      output_fps: Number($("#managed-config-fps")?.value || settings.output_fps || 60),
-      output_width: Number(settings.output_width || 1080),
-      output_height: Number(settings.output_height || 1920),
-      max_episode_minutes: Number(settings.max_episode_minutes || 10),
-      end_card_seconds: Number(settings.end_card_seconds || 6),
-    };
-  }
-
-  function setManagedConfigStatus(message, stateName = "idle") {
-    const status = $("#managed-config-status");
-    if (!status) return;
-    status.textContent = message;
-    status.dataset.state = stateName;
-  }
-
-  async function pushManagedDeviceConfig(button) {
-    const activeIds = new Set(state.managedDevices.filter((item) => item.active !== false).map((item) => item.id));
-    const selectedIds = [...state.managedDeviceSelection].filter((deviceId) => activeIds.has(deviceId));
-    const sendAll = ($('input[name="managed-config-target"]:checked')?.value || "selected") === "all";
-    if (!sendAll && !selectedIds.length) throw new Error("请先选择至少一台可用电脑。 ");
-    const targetMode = sendAll ? "all" : selectedIds.length === 1 ? "single" : "multiple";
-    const payload = {
-      target_mode: targetMode,
-      device_ids: sendAll ? [] : selectedIds,
-      config: portableManagedDeviceConfigPayload(),
-      note: $("#managed-config-note")?.value.trim() || "",
-    };
-    setManagedConfigStatus("正在建立新的配置版本…", "working");
-    await withBusyButton(button, "正在下发…", async () => {
-      const revision = await checkedCall("create_managed_device_config", payload);
-      if ($("#managed-config-note")) $("#managed-config-note").value = "";
-      setManagedConfigStatus(`配置 r${Number(revision.revision_number || 0)} 已下发，电脑联网后会自动应用。`, "ready");
-      await loadManagedDeviceFleet({ silent: true });
-      toast(`制作设置已发送到 ${sendAll ? "全部可用电脑" : `${selectedIds.length} 台电脑`}。`, "info");
-    });
   }
 
   async function openManagedDeviceDialog(deviceId) {
@@ -5958,91 +5960,29 @@
     if (!nextActive && !window.confirm(`停用“${device.name}”吗？这台电脑会立即断开，需要再次使用账号密码连接才能恢复。`)) return;
     await withBusyButton(button, nextActive ? "正在启用…" : "正在停用…", async () => {
       await checkedCall("set_managed_device_active", device.id, nextActive, true);
-      state.managedDeviceSelection.delete(device.id);
       await loadManagedDeviceFleet({ silent: true });
       toast(nextActive ? `“${device.name}”已重新启用。` : `“${device.name}”已停用并撤销原连接。`, "info");
     });
   }
 
-  function renderDeviceSyncStatus() {
-    const status = state.deviceSyncStatus || state.hubRuntimeStatus?.device_sync || {};
-    const stateName = String(status.state || "idle");
-    const enabled = status.enabled !== false && Boolean(status.device_id || state.settings?.hub?.device_id);
-    const labels = {
-      ready: ["制作设置已同步", "已同步"],
-      syncing: ["正在同步制作设置", "同步中"],
-      offline: ["暂时无法连接主电脑", "离线"],
-      legacy_token: ["请用账号密码重新登录", "需重连"],
-      idle: [enabled ? "等待首次同步" : "尚未登记这台电脑", enabled ? "等待" : "未启用"],
-    };
-    const [title, badge] = labels[stateName] || labels.idle;
-    if ($("#device-sync-title")) $("#device-sync-title").textContent = title;
-    if ($("#device-sync-badge")) $("#device-sync-badge").textContent = badge;
-    const pulse = $("#device-sync-pulse");
-    if (pulse) pulse.className = `device-sync-pulse ${stateName === "ready" ? "is-ready" : stateName === "syncing" ? "is-working" : ["offline", "legacy_token"].includes(stateName) ? "is-error" : ""}`;
-    const copy = $("#device-sync-copy");
-    if (copy) copy.textContent = stateName === "ready"
-      ? `这台电脑会每 ${Number(status.poll_seconds || 20)} 秒检查一次新设置；渲染任务和素材仍在本机处理。`
-      : stateName === "legacy_token"
-        ? "这台电脑使用的连接方式已过期。请在上方使用账号和密码重新登录一次。"
-        : stateName === "offline"
-          ? "本机仍可继续工作；恢复主电脑连接后会自动补齐最新设置。"
-          : "连接主电脑后，这台电脑会自动接收管理员下发的字幕、语速和输出设置。";
-    const revisionId = String(status.applied_revision_id || "");
-    if ($("#device-sync-revision")) $("#device-sync-revision").textContent = revisionId ? `…${revisionId.slice(-8)}` : "本机默认";
-    if ($("#device-sync-time")) $("#device-sync-time").textContent = status.last_success_at ? formatDeviceCreatedAt(status.last_success_at) : "尚未同步";
-    const error = $("#device-sync-error");
-    if (error) {
-      error.textContent = status.last_error || "";
-      error.classList.toggle("is-hidden", !status.last_error);
+  async function deleteManagedDevice(deviceId, button) {
+    const device = managedDeviceById(deviceId);
+    if (!device) throw new Error("设备列表已经变化，请刷新后重试。");
+    if (device.active !== false || device.online) {
+      throw new Error("请先停用这台电脑并确认其离线，再删除旧记录。");
     }
-    const button = $("#sync-device-config-now");
-    if (button) button.disabled = !enabled || stateName === "syncing";
-  }
-
-  async function loadDeviceSyncStatus({ refreshSettings = false, silent = false } = {}) {
-    const runtimeMode = String(state.hubRuntimeStatus?.runtime_mode || state.hubRuntimeStatus?.mode || state.settings?.hub?.mode || "local");
-    if (runtimeMode !== "client" || isAuthenticatedHubBrowser()) {
-      renderDeviceSyncStatus();
-      return;
-    }
-    const previousRevision = String(state.deviceSyncStatus?.applied_revision_id || "");
-    try {
-      const status = await checkedCall("get_device_sync_status");
-      state.deviceSyncStatus = status;
-      const revisionChanged = Boolean(status.applied_revision_id && status.applied_revision_id !== previousRevision);
-      if (refreshSettings || revisionChanged) {
-        const fresh = await checkedCall("get_bootstrap");
-        if (fresh?.settings) state.settings = fresh.settings;
-        if (fresh?.hub_status) state.hubRuntimeStatus = fresh.hub_status;
-        loadSettingsIntoControls();
-      }
-    } catch (error) {
-      state.deviceSyncStatus = { ...(state.deviceSyncStatus || {}), state: "offline", last_error: error.message || "同步状态读取失败。" };
-      if (!silent) toast(state.deviceSyncStatus.last_error, "error");
-    }
-    renderDeviceSyncStatus();
-  }
-
-  async function syncDeviceConfigNow(button) {
-    await withBusyButton(button, "正在同步…", async () => {
-      state.deviceSyncStatus = { ...(state.deviceSyncStatus || {}), state: "syncing", last_error: "" };
-      renderDeviceSyncStatus();
-      const status = await checkedCall("sync_device_config_now");
-      state.deviceSyncStatus = status;
-      await loadDeviceSyncStatus({ refreshSettings: true, silent: true });
-      toast("这台电脑的制作设置已同步。", "info");
+    if (!window.confirm(`确定永久删除旧电脑“${device.name}”吗？历史制作记录仍会保留，但该电脑下次登录会作为新设备重新登记。`)) return;
+    await withBusyButton(button, "正在删除…", async () => {
+      await checkedCall("delete_managed_device", device.id);
+      await loadManagedDeviceFleet({ silent: true });
+      toast(`旧电脑“${device.name}”已删除。`, "info");
     });
   }
 
   async function refreshHubDeviceWorkspace({ silent = false } = {}) {
     const runtimeMode = String(state.hubRuntimeStatus?.runtime_mode || state.hubRuntimeStatus?.mode || state.settings?.hub?.mode || "local");
     if (runtimeMode === "host") await loadManagedDeviceFleet({ silent });
-    else if (runtimeMode === "client") await loadDeviceSyncStatus({ silent });
-    else {
-      renderManagedDeviceWorkspace();
-      renderDeviceSyncStatus();
-    }
+    else renderManagedDeviceWorkspace();
   }
 
   function stopManagedDeviceFleetPolling() {
@@ -6459,6 +6399,21 @@
     }
   }
 
+  async function deleteSelectedNovel(button) {
+    const novel = state.selectedNovel;
+    if (!novel) return;
+    if (!window.confirm(`确定删除小说“${novel.title}”？小说资料、正文分集和口令绑定会从资料库移除；已有生产记录不会删除。`)) return;
+    await withBusyButton(button, "正在删除…", async () => {
+      await checkedCall("delete_novel", novel.id);
+      if (state.productionNovel?.id === novel.id) state.productionNovel = null;
+      state.selectedNovelId = "";
+      state.selectedNovel = null;
+      closeNovelDetail();
+      await loadLibraryBootstrap();
+      toast(`小说“${novel.title}”已从资料库删除。`, "info");
+    });
+  }
+
   async function redetectNovelLanguage(button) {
     const novel = state.selectedNovel;
     if (!novel) return;
@@ -6568,6 +6523,26 @@
     } catch (error) {
       toast(error.message, "error");
     }
+  }
+
+  async function deletePromoCode(button) {
+    const novel = state.selectedNovel;
+    if (!novel) return;
+    const promoCodeId = String(button.dataset.deleteCode || "");
+    const promoCode = (novel.platform_bindings || [])
+      .flatMap((binding) => binding.codes || [])
+      .find((item) => item.id === promoCodeId);
+    if (!promoCodeId || !promoCode) return;
+    if (!window.confirm(`确定删除口令“${promoCode.value}”？删除后无法在新批次中选择，历史生产记录不会改变。`)) return;
+    await withBusyButton(button, "删除中…", async () => {
+      await checkedCall("delete_promo_code", promoCodeId);
+      const updated = novelFromApiResult(await checkedCall("get_novel", novel.id));
+      upsertNovel(updated);
+      state.selectedNovel = updated;
+      renderNovelLibrary();
+      renderNovelDetail();
+      toast(`口令“${promoCode.value}”已删除。`, "info");
+    });
   }
 
   async function generateVoiceCandidates(button) {
@@ -6761,6 +6736,13 @@
   async function queueProductionDraft(button) {
     const novel = state.productionNovel;
     if (!novel) return;
+    syncProductionDraftFromControls();
+    const missing = productionMissingDescriptors(novel, activeDraft(novel));
+    if (missing.length) {
+      focusProductionSection(missing[0].section, missing[0].selector);
+      toast(`请先补齐：${missing[0].label}`, "error");
+      return;
+    }
     try {
       const payload = productionDraftPayload({ forQueue: true });
       await withBusyButton(button, "正在创建完整任务…", async () => {
@@ -8083,8 +8065,6 @@
     updateStyleRangeProofs();
     setStylePreviewScene(state.stylePreviewScene || "intro");
     updateStylePreview();
-    syncManagedConfigControlsFromSettings();
-    renderDeviceSyncStatus();
   }
 
   function hubModeLabel(mode) {
@@ -8116,12 +8096,10 @@
     $("#update-host-panel")?.classList.toggle("is-hidden", mode !== "host");
     $("#hub-backup-center")?.classList.toggle("is-hidden", mode !== "host");
     $("#managed-device-fleet")?.classList.toggle("is-hidden", mode !== "host");
-    $("#device-sync-card")?.classList.toggle("is-hidden", mode !== "client");
     $("#save-hub-settings")?.classList.toggle("is-hidden", mode === "client");
     const card = $(".hub-settings-card");
     if (card) card.dataset.mode = mode;
     renderManagedDeviceWorkspace();
-    renderDeviceSyncStatus();
   }
 
   function hubSettingsPayload() {
@@ -8188,8 +8166,6 @@
       copyClientWeb.disabled = !clientWebReady;
       copyClientWeb.dataset.endpoint = clientWebReady ? clientWebUrl : "";
     }
-    if (data?.device_sync) state.deviceSyncStatus = data.device_sync;
-    renderDeviceSyncStatus();
   }
 
   async function checkHubStatus(button) {
@@ -8210,7 +8186,6 @@
       };
       renderHubStatus(state.hubRuntimeStatus);
       renderManagedDeviceWorkspace();
-      renderDeviceSyncStatus();
       toast(error.message, "error");
     }
   }
@@ -8259,7 +8234,6 @@
         );
         if (data?.settings) state.settings = data.settings;
         state.hubRuntimeStatus = data;
-        state.deviceSyncStatus = data?.device_sync || null;
         loadSettingsIntoControls();
         renderHubStatus(data);
         const workerAutostartWarning = data?.worker_autostart?.state === "warning";
@@ -8270,7 +8244,6 @@
           workerAutostartWarning ? "error" : "ready",
         );
         await loadLibraryBootstrap();
-        await loadDeviceSyncStatus({ silent: true });
         if (!showWorkerAutostartNotice(data)) {
           toast("登录成功。这台电脑已自动登记，以后直接使用即可。", "info");
         }
@@ -9243,12 +9216,30 @@
       }
       const openProductionPreviewDrawer = event.target.closest("[data-open-production-preview-drawer]");
       if (openProductionPreviewDrawer) {
-        setProductionPreviewDrawerOpen(true);
+        openProductionPreview();
+        return;
+      }
+      const replayPreview = event.target.closest("[data-replay-production-preview]");
+      if (replayPreview) {
+        replayProductionPreview();
         return;
       }
       const closeProductionPreviewDrawer = event.target.closest("[data-close-production-preview-drawer]");
       if (closeProductionPreviewDrawer) {
         setProductionPreviewDrawerOpen(false);
+        return;
+      }
+      const productionJump = event.target.closest("[data-production-jump]");
+      if (productionJump) {
+        if (productionJump.dataset.productionMissing === "platform-binding" && state.productionNovel) {
+          navigate("library");
+          await openNovelDetail(state.productionNovel.id, productionJump);
+          return;
+        }
+        focusProductionSection(
+          String(productionJump.dataset.productionJump || ""),
+          String(productionJump.dataset.productionTarget || ""),
+        );
         return;
       }
       const productionSectionToggle = event.target.closest("[data-toggle-production-section]");
@@ -9298,6 +9289,8 @@
             await openManagedDeviceDialog(managedDeviceAction.dataset.managedDeviceId);
           } else if (managedDeviceAction.dataset.managedDeviceAction === "toggle") {
             await toggleManagedDevice(managedDeviceAction.dataset.managedDeviceId, managedDeviceAction);
+          } else if (managedDeviceAction.dataset.managedDeviceAction === "delete") {
+            await deleteManagedDevice(managedDeviceAction.dataset.managedDeviceId, managedDeviceAction);
           } else if (managedDeviceAction.dataset.managedDeviceAction === "review") {
             const reviewed = await checkedCall("acknowledge_managed_device", managedDeviceAction.dataset.managedDeviceId);
             const index = state.managedDevices.findIndex((item) => item.id === reviewed.id);
@@ -9443,6 +9436,11 @@
         await saveNovelMetadata(saveMetadata);
         return;
       }
+      const deleteNovel = event.target.closest("[data-delete-novel]");
+      if (deleteNovel) {
+        await deleteSelectedNovel(deleteNovel);
+        return;
+      }
       const redetectLanguage = event.target.closest("[data-redetect-novel-language]");
       if (redetectLanguage) {
         await redetectNovelLanguage(redetectLanguage);
@@ -9477,6 +9475,12 @@
       if (toggleCode) {
         event.preventDefault();
         await togglePromoCode(toggleCode);
+        return;
+      }
+      const removeCode = event.target.closest("[data-delete-code]");
+      if (removeCode) {
+        event.preventDefault();
+        await deletePromoCode(removeCode);
         return;
       }
       const generateVoices = event.target.closest("[data-generate-voices]");
@@ -9643,17 +9647,6 @@
         renderProductionWorkbench();
         return;
       }
-      if (event.target.matches("[data-managed-device-select]")) {
-        const deviceId = event.target.dataset.managedDeviceSelect;
-        if (event.target.checked) state.managedDeviceSelection.add(deviceId);
-        else state.managedDeviceSelection.delete(deviceId);
-        renderManagedDeviceWorkspace();
-        return;
-      }
-      if (event.target.matches('input[name="managed-config-target"]')) {
-        renderManagedDeviceWorkspace();
-        return;
-      }
       if (event.target.matches('input[name="production-output-mode"]') && state.productionNovel) {
         markProductionRecipeDirty();
         syncProductionDraftFromControls();
@@ -9734,12 +9727,12 @@
         }
         return;
       }
-      if (event.target.closest("#production-workbench-content") && event.target.matches('[data-episode-id], input[name="production-voice"], input[name="production-output-mode"], #production-cover-outro-enabled, select, input[type="color"]')) {
+      if (event.target.closest("#production-workbench-content") && event.target.matches('[data-episode-id], input[name="production-voice"], input[name="production-output-mode"], #production-intro-card-enabled, #production-cover-outro-enabled, select, input[type="color"]')) {
         const previewScene = productionPreviewSceneForControl(event.target);
         if (previewScene) state.productionPreviewScene = previewScene;
         markProductionRecipeDirty();
         resetProductionStyleFromPreset(event.target);
-        syncProductionDraftFromControls({ render: event.target.matches('input[name="production-voice"], #production-video-template') });
+        syncProductionDraftFromControls({ render: event.target.matches('input[name="production-voice"]') });
         updateProductionPreview();
         return;
       }
@@ -9760,7 +9753,7 @@
         updateProductionPreview();
         return;
       }
-      if (event.target.matches('input[type="range"], input[type="number"], [data-draft-path], #production-source-narration-audio, #production-bgm-file')) {
+      if (event.target.matches('input[type="range"], input[type="number"], textarea, [data-draft-path], #production-source-narration-audio, #production-bgm-file')) {
         const previewScene = productionPreviewSceneForControl(event.target);
         if (previewScene) state.productionPreviewScene = previewScene;
         markProductionRecipeDirty();
@@ -9937,6 +9930,13 @@
     $("#choose-platform-logo").addEventListener("click", (event) => choosePlatformLogo(event.currentTarget));
     $("#clear-platform-logo").addEventListener("click", clearPlatformLogo);
     $("#new-publishing-account").addEventListener("click", resetPublishingAccountEditor);
+    $("#delete-publishing-account")?.addEventListener("click", async (event) => {
+      try {
+        await deleteSelectedPublishingAccount(event.currentTarget);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    });
     $("#publishing-platform-filter").addEventListener("change", (event) => {
       state.publishingPlatformFilter = event.target.value;
       renderPublishingAccounts();
@@ -10201,32 +10201,6 @@
       try {
         await withBusyButton(event.currentTarget, "正在刷新…", () => loadManagedDeviceFleet());
       } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-    $("#select-all-managed-devices")?.addEventListener("click", () => {
-      const activeIds = state.managedDevices.filter((item) => item.active !== false).map((item) => item.id);
-      const allSelected = activeIds.length && activeIds.every((deviceId) => state.managedDeviceSelection.has(deviceId));
-      state.managedDeviceSelection = new Set(allSelected ? [] : activeIds);
-      renderManagedDeviceWorkspace();
-    });
-    $("#managed-config-bgm")?.addEventListener("input", (event) => {
-      if ($("#managed-config-bgm-value")) $("#managed-config-bgm-value").textContent = `${Number(event.target.value || 0)}%`;
-    });
-    $("#push-managed-device-config")?.addEventListener("click", async (event) => {
-      try {
-        await pushManagedDeviceConfig(event.currentTarget);
-      } catch (error) {
-        setManagedConfigStatus(error.message || "制作设置下发失败。", "error");
-        toast(error.message, "error");
-      }
-    });
-    $("#sync-device-config-now")?.addEventListener("click", async (event) => {
-      try {
-        await syncDeviceConfigNow(event.currentTarget);
-      } catch (error) {
-        state.deviceSyncStatus = { ...(state.deviceSyncStatus || {}), state: "offline", last_error: error.message || "同步失败。" };
-        renderDeviceSyncStatus();
         toast(error.message, "error");
       }
     });
@@ -10555,7 +10529,6 @@
         }
       }
       state.hubRuntimeStatus = data.hub_status || null;
-      state.deviceSyncStatus = data.device_sync || data.hub_status?.device_sync || null;
       state.updateStatus = data.update_status || null;
       state.previousJobStates = new Map(state.jobs.map((job) => [job.id, job.status]));
       renderPlatformOptions();
@@ -10564,7 +10537,6 @@
       renderHealth();
       loadSettingsIntoControls();
       if (state.hubRuntimeStatus) renderHubStatus(state.hubRuntimeStatus);
-      renderDeviceSyncStatus();
       if (state.updateStatus) renderUpdateStatus(state.updateStatus);
       loadCustomStylePresets();
       updateStyleScopeUI();

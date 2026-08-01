@@ -117,6 +117,7 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                 "STORYFORGE_DATA_DIR": "",
                 "STORYFORGE_PORTABLE_MODE": "",
                 "STORYFORGE_TTS_CACHE_DIR": "",
+                "STORYFORGE_MEDIA_INDEX_PATH": "",
                 "STORYFORGE_ESPEAK_CACHE": "",
                 "STORYFORGE_WEBVIEW_DATA_DIR": "",
                 "WEBVIEW2_USER_DATA_FOLDER": "",
@@ -124,6 +125,14 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                 "HF_HUB_CACHE": "",
                 "TRANSFORMERS_CACHE": "",
                 "TORCH_HOME": "",
+                "TORCHINDUCTOR_CACHE_DIR": "",
+                "TRITON_CACHE_DIR": "",
+                "NUMBA_CACHE_DIR": "",
+                "MPLCONFIGDIR": "",
+                "PIP_CACHE_DIR": "",
+                "UV_CACHE_DIR": "",
+                "XDG_DATA_HOME": "",
+                "XDG_CONFIG_HOME": "",
             }
             with (
                 patch.dict(os.environ, environment, clear=False),
@@ -139,8 +148,18 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                     os.environ["STORYFORGE_TTS_CACHE_DIR"],
                     str(expected / "cache" / "tts"),
                 )
+                self.assertEqual(
+                    os.environ["STORYFORGE_MEDIA_INDEX_PATH"],
+                    str(expected / "cache" / "media-index.sqlite3"),
+                )
                 self.assertEqual(os.environ["HF_HOME"], str(expected / "cache" / "huggingface"))
                 self.assertEqual(os.environ["TORCH_HOME"], str(expected / "cache" / "torch"))
+                self.assertEqual(os.environ["PIP_CACHE_DIR"], str(expected / "cache" / "pip"))
+                self.assertEqual(
+                    os.environ["TORCHINDUCTOR_CACHE_DIR"],
+                    str(expected / "cache" / "torchinductor"),
+                )
+                self.assertEqual(os.environ["XDG_DATA_HOME"], str(expected / "data"))
                 self.assertEqual(os.environ["TEMP"], str(expected / "runtime-temp"))
                 self.assertEqual(
                     os.environ["WEBVIEW2_USER_DATA_FOLDER"],

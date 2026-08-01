@@ -304,6 +304,10 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\enable_storyforge_worker
     -Destination (Join-Path $adminToolsTarget 'enable_storyforge_worker.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\disable_storyforge_worker.ps1') `
     -Destination (Join-Path $adminToolsTarget 'disable_storyforge_worker.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\restore_hub_backup.ps1') `
+    -Destination (Join-Path $adminToolsTarget 'restore_hub_backup.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\restore_hub_backup.cmd') `
+    -Destination (Join-Path $adminToolsTarget 'restore_hub_backup.cmd') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\enable_storyforge_worker.cmd') `
     -Destination (Join-Path $adminToolsTarget 'enable_storyforge_worker.cmd') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\disable_storyforge_worker.cmd') `

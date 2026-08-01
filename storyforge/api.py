@@ -32,6 +32,12 @@ from .catalog import (
     normalize_portable_device_config,
 )
 from .config import ApplicationState, MASKED_SECRET, SettingsRepository
+from .component_updater import (
+    ComponentPackageError,
+    ComponentRepository,
+    ComponentUpdater,
+    validate_component_publication,
+)
 from .credentials import (
     DEFAULT_ADMIN_PASSWORD,
     DEFAULT_ADMIN_USERNAME,
@@ -123,6 +129,20 @@ class StoryForgeApi:
         self._update_repository = UpdateRepository(
             self._repository.data_dir / "updates" / "published"
         )
+        self._component_repository = ComponentRepository(
+            self._repository.data_dir / "updates" / "components" / "published",
+            app_version=__version__,
+        )
+        self._component_updater = ComponentUpdater(
+            self._repository.data_dir / "components",
+            app_version=__version__,
+        )
+        self._component_runtime_error = ""
+        try:
+            self._component_updater.activate_runtime()
+        except (ComponentPackageError, OSError) as error:
+            # Optional packs must never make the core desktop fail to start.
+            self._component_runtime_error = str(error) or type(error).__name__
         self._hub_server: HubServer | None = None
         self._hub_client: HubClient | None = None
         self._hub_client_lock = threading.RLock()
@@ -698,6 +718,7 @@ class StoryForgeApi:
                 data_root=self._repository.data_dir,
                 attachment_root=attachment_root,
                 update_repository=self._update_repository,
+                component_repository=self._component_repository,
                 text_provider_config_getter=lambda: self._state.settings.providers,
             ).start()
         except (HubError, OSError, ValueError, RuntimeError) as error:
@@ -2263,6 +2284,196 @@ class StoryForgeApi:
 
         return self._guard(operation)
 
+    @staticmethod
+    def _installed_component_value(value: Any) -> dict[str, Any]:
+        return {
+            "component_id": str(value.component_id),
+            "version": str(value.version),
+            "sha256": str(value.package_sha256),
+            "app_compatibility": value.manifest.app_compatibility,
+        }
+
+    def _component_update_status_value(self) -> dict[str, Any]:
+        installed = [
+            self._installed_component_value(item)
+            for item in self._component_updater.list_installed()
+        ]
+        published = (
+            [dict(item) for item in self._component_repository.list_manifests()]
+            if self._runtime_hub_mode == "host"
+            else []
+        )
+        return {
+            "installed": installed,
+            "published": published,
+            "runtime_error": self._component_runtime_error,
+        }
+
+    def get_component_update_status(self) -> dict[str, Any]:
+        return self._guard(self._component_update_status_value)
+
+    def check_component_updates(self) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            if self._runtime_hub_mode == "host":
+                available = [
+                    dict(item) for item in self._component_repository.list_manifests()
+                ]
+            elif self._runtime_hub_mode == "client":
+                client = self._update_hub_client()
+                if client is None:
+                    raise RuntimeError("StoryForge Hub is not connected.")
+                available = client.get_component_manifests()
+            else:
+                available = []
+            installed_by_id = {
+                item.component_id: item
+                for item in self._component_updater.list_installed()
+            }
+            releases: list[dict[str, Any]] = []
+            for raw in available:
+                publication = validate_component_publication(raw)
+                current = installed_by_id.get(publication["component_id"])
+                entry = dict(publication)
+                entry["installed_version"] = current.version if current else ""
+                entry["installed_sha256"] = current.package_sha256 if current else ""
+                entry["install_available"] = bool(
+                    current is None
+                    or current.package_sha256 != publication["sha256"]
+                )
+                releases.append(entry)
+            return {
+                **self._component_update_status_value(),
+                "available": releases,
+            }
+
+        return self._guard(operation)
+
+    def install_component_update(
+        self,
+        component_id: str,
+        version: str = "",
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            if self._queue.is_rendering_busy():
+                raise RuntimeError(
+                    "Finish the current local render before installing a voice component."
+                )
+            normalized_id = str(component_id or "").strip().casefold()
+            requested_version = str(version or "").strip()
+            package_path: Path | None = None
+            downloaded = False
+            if self._runtime_hub_mode == "host":
+                publication = self._component_repository.get_manifest(normalized_id)
+                if publication is None:
+                    raise RuntimeError("The requested component is not published.")
+                if requested_version and publication["version"] != requested_version:
+                    raise RuntimeError("The requested component version is not published.")
+                package_path = self._component_repository.resolve_package(publication)
+            elif self._runtime_hub_mode == "client":
+                client = self._update_hub_client()
+                if client is None:
+                    raise RuntimeError("StoryForge Hub is not connected.")
+                publication = next(
+                    (
+                        item
+                        for item in client.get_component_manifests()
+                        if item["component_id"] == normalized_id
+                        and (not requested_version or item["version"] == requested_version)
+                    ),
+                    None,
+                )
+                if publication is None:
+                    raise RuntimeError("The requested component is not published.")
+                cache_root = (
+                    self._repository.data_dir
+                    / "updates"
+                    / "components"
+                    / "downloads"
+                )
+                package_path = cache_root / str(publication["filename"])
+                client.download_component_package(
+                    publication,
+                    destination=package_path,
+                )
+                downloaded = True
+            else:
+                raise RuntimeError("Component updates require a StoryForge Hub.")
+            checked = validate_component_publication(publication)
+            try:
+                with self._heavy_resource_lock:
+                    installed = self._component_updater.install(
+                        package_path,
+                        expected_package_sha256=checked["sha256"],
+                    )
+                    self._component_updater.activate_runtime()
+                    self._component_runtime_error = ""
+            finally:
+                if downloaded and package_path is not None:
+                    try:
+                        package_path.unlink()
+                    except OSError:
+                        pass
+            return {
+                "component": self._installed_component_value(installed),
+                "status": self._component_update_status_value(),
+            }
+
+        return self._guard(operation)
+
+    def rollback_component_update(self, component_id: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            if self._queue.is_rendering_busy():
+                raise RuntimeError(
+                    "Finish the current local render before rolling back a voice component."
+                )
+            with self._heavy_resource_lock:
+                restored = self._component_updater.rollback(
+                    component_id,
+                    activate=self._component_updater.activate_runtime,
+                )
+                self._component_runtime_error = ""
+            return {
+                "component": self._installed_component_value(restored),
+                "status": self._component_update_status_value(),
+            }
+
+        return self._guard(operation)
+
+    def publish_component_update(
+        self,
+        package_path: str,
+        release_notes: str = "",
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            if self._runtime_hub_mode != "host" or self._hub_server is None:
+                raise RuntimeError(
+                    "Only the running StoryForge Hub can publish components."
+                )
+            publication = self._component_repository.publish(
+                package_path,
+                release_notes,
+            )
+            return {
+                "publication": publication,
+                "status": self._component_update_status_value(),
+            }
+
+        return self._guard(operation)
+
+    def clear_published_component(self, component_id: str = "") -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            if self._runtime_hub_mode != "host":
+                raise RuntimeError(
+                    "Only the StoryForge Hub can stop publishing components."
+                )
+            catalog = self._component_repository.clear(component_id or None)
+            return {
+                "catalog": catalog,
+                "status": self._component_update_status_value(),
+            }
+
+        return self._guard(operation)
+
     def reconnect_hub(self) -> dict[str, Any]:
         """Reconnect a client after settings or LAN connectivity are repaired."""
 
@@ -3018,6 +3229,11 @@ class StoryForgeApi:
                 "audio": (
                     "音频文件 (*.wav;*.mp3;*.m4a;*.aac;*.flac;*.ogg)",
                 ),
+                "narration_source": (
+                    "StoryForge 配音或成品视频 (*.mp3;*.mp4;*.mov;*.mkv;*.webm)",
+                    "StoryForge 配音 (*.mp3)",
+                    "StoryForge 成品视频 (*.mp4;*.mov;*.mkv;*.webm)",
+                ),
                 "update": (
                     "StoryForge 更新包 (*.zip)",
                 ),
@@ -3044,10 +3260,14 @@ class StoryForgeApi:
         return self._guard(operation)
 
     def delete_platform(self, platform_id: str) -> dict[str, Any]:
-        def operation() -> dict[str, str]:
+        def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
-            self._state.delete_platform(platform_id)
-            return {"id": platform_id}
+            result = self._catalog.delete_platform(
+                str(platform_id),
+                actor_user_id=self._current_web_actor() or None,
+            )
+            self._refresh_shared_platforms()
+            return result
 
         return self._guard(operation)
 
@@ -3218,6 +3438,16 @@ class StoryForgeApi:
 
         return self._guard(operation)
 
+    def delete_novel(self, novel_id: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            return self._catalog.delete_novel(
+                str(novel_id),
+                actor_user_id=self._current_web_actor() or None,
+            )
+
+        return self._guard(operation)
+
     def save_novel_binding(self, value: dict[str, Any]) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
@@ -3239,10 +3469,30 @@ class StoryForgeApi:
 
         return self._guard(operation)
 
+    def delete_promo_code(self, promo_code_id: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            return self._catalog.delete_promo_code(
+                str(promo_code_id),
+                actor_user_id=self._current_web_actor() or None,
+            )
+
+        return self._guard(operation)
+
     def save_publishing_account(self, value: dict[str, Any]) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
             return self._library.save_publishing_account(value)
+
+        return self._guard(operation)
+
+    def delete_publishing_account(self, account_id: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            return self._catalog.delete_publishing_account(
+                str(account_id),
+                actor_user_id=self._current_web_actor() or None,
+            )
 
         return self._guard(operation)
 
@@ -3927,6 +4177,20 @@ class StoryForgeApi:
                     active,
                     revoke_tokens=revoke_tokens,
                     actor_user_id=actor,
+                ),
+            )
+
+        return self._guard(operation)
+
+    def delete_managed_device(self, device_id: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            params = {"device_id": str(device_id)}
+            actor = self._current_web_actor() or None
+            return self._managed_device_rpc(
+                "device_delete",
+                params,
+                lambda: self._catalog.delete_hub_device(
+                    str(device_id), actor_user_id=actor
                 ),
             )
 
@@ -5376,12 +5640,12 @@ class StoryForgeApi:
         if raw_mode is not None:
             output_mode = str(raw_mode or "").strip().casefold()
             if output_mode not in {"video_and_mp3", "audio_only", "reuse_audio"}:
-                raise ValueError("输出内容必须选择完整视频 + 配音、仅生成配音或复用旁白。")
+                raise ValueError("输出内容必须选择常规视频生成、仅生成配音或已有配音更换素材。")
         elif "export_narration_audio" in value:
             # V0.3 sent a boolean "extra narration export" checkbox. False
-            # meant video-only, not audio-only. V0.4 has no incomplete
-            # video-only product, so either legacy state upgrades to the
-            # complete MP4 + MP3 pair. Pure MP3 requires explicit output_mode.
+            # meant video-only, not audio-only. Keep the legacy boolean as an
+            # immutable compatibility promise; current clients explicitly
+            # submit False because regular video now publishes MP4 only.
             legacy_export = value["export_narration_audio"]
             if not isinstance(legacy_export, bool):
                 raise ValueError("旧版纯旁白导出设置必须是开启或关闭。")
@@ -5389,5 +5653,10 @@ class StoryForgeApi:
         else:
             output_mode = "video_and_mp3"
         cleaned["output_mode"] = output_mode
-        cleaned["export_narration_audio"] = output_mode == "video_and_mp3"
+        raw_export = value.get("export_narration_audio", False)
+        if not isinstance(raw_export, bool):
+            raise ValueError("配音导出设置必须是开启或关闭。")
+        cleaned["export_narration_audio"] = bool(
+            output_mode == "video_and_mp3" and raw_export
+        )
         return BatchSpec(**cleaned)

@@ -37,6 +37,15 @@ from .catalog import (
     installation_id_sha256,
 )
 from .credentials import DUMMY_PASSWORD_VERIFIER, password_matches
+from .component_updater import (
+    ComponentPackageError,
+    ComponentRepository,
+    ComponentUpdater,
+    sign_component_catalog,
+    validate_component_catalog,
+    validate_component_publication,
+    verify_component_catalog_signature,
+)
 from .providers.base import ProviderConfig, ProviderError
 from .providers.text import TextRequest, TextResult, create_text_provider
 from .updater import (
@@ -72,6 +81,7 @@ DEVICE_ADMIN_RPC_METHODS = frozenset(
         "device_acknowledge",
         "device_rename",
         "device_set_active",
+        "device_delete",
         "device_config_create",
         "device_config_list",
         "device_config_get",
@@ -131,14 +141,18 @@ CATALOG_WRITE_METHODS = frozenset(
     {
         "import_novel",
         "save_novel",
+        "delete_novel",
         "save_novel_classification",
         "save_novel_voice_state",
         "save_episode",
         "save_platform",
+        "delete_platform",
         "save_novel_binding",
         "add_promo_code",
         "update_promo_code",
+        "delete_promo_code",
         "save_publishing_account",
+        "delete_publishing_account",
         "save_user",
         "delete_user",
         "set_user_permission",
@@ -226,20 +240,24 @@ _RPC_PERMISSION_ANY: dict[str, tuple[str, ...]] = {
     "get_novel": ("library.view",),
     "import_novel": ("library.edit",),
     "save_novel": ("library.edit",),
+    "delete_novel": ("library.edit",),
     "save_novel_classification": ("text.assist", "library.edit"),
     "save_novel_voice_state": ("voice.preview", "library.edit"),
     "save_episode": ("library.edit",),
     "list_platforms": ("library.view", "platforms.manage"),
     "save_platform": ("platforms.manage",),
+    "delete_platform": ("platforms.manage",),
     "save_novel_binding": ("platforms.manage",),
     "list_promo_codes": ("promo_codes.use", "promo_codes.manage"),
     "add_promo_code": ("promo_codes.manage",),
     "update_promo_code": ("promo_codes.manage",),
+    "delete_promo_code": ("promo_codes.manage",),
     "list_publishing_accounts": (
         "drafts.create",
         "publishing_accounts.manage",
     ),
     "save_publishing_account": ("publishing_accounts.manage",),
+    "delete_publishing_account": ("publishing_accounts.manage",),
     "list_users": ("users.manage",),
     "save_user": ("users.manage",),
     "delete_user": ("users.manage",),
@@ -799,6 +817,49 @@ class _HubRequestHandler(BaseHTTPRequestHandler):
                 self._send_failure(error.status, error.code, error.message)
                 return
             self._serve_update_package(package, manifest)
+            return
+        if path == "/components/manifest":
+            authentication = self._authenticate()
+            if authentication is None:
+                return
+            try:
+                self.owner.authorize_update_access(authentication.actor_user_id)
+                _scheme, _separator, bearer_token = str(
+                    self.headers.get("Authorization", "")
+                ).partition(" ")
+                catalog = self.owner.published_component_catalog()
+                signature = sign_component_catalog(bearer_token, catalog)
+            except _HubHTTPError as error:
+                self._send_failure(error.status, error.code, error.message)
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "catalog": catalog, "signature": signature},
+            )
+            return
+        if path == "/components/package":
+            authentication = self._authenticate()
+            if authentication is None:
+                return
+            try:
+                self.owner.authorize_update_access(authentication.actor_user_id)
+                query = parse_qs(parsed_request.query, keep_blank_values=True)
+                if any(
+                    len(query.get(name, [])) != 1
+                    for name in ("component_id", "version")
+                ):
+                    raise _HubHTTPError(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_component_request",
+                        "component download requires exactly one component_id and version",
+                    )
+                package, publication = self.owner.resolve_component_package(
+                    query["component_id"][0], query["version"][0]
+                )
+            except _HubHTTPError as error:
+                self._send_failure(error.status, error.code, error.message)
+                return
+            self._serve_update_package(package, publication)
             return
         if path == "/file-upload-check":
             authentication = self._authenticate()
@@ -1465,6 +1526,7 @@ class HubServer:
         data_root: str | Path | None = None,
         attachment_root: str | Path | None = None,
         update_repository: UpdateRepository | None = None,
+        component_repository: ComponentRepository | None = None,
         enabled_methods: Sequence[str] | None = None,
         allowed_download_extensions: Sequence[str] | None = None,
         max_request_bytes: int = 16 * 1024 * 1024,
@@ -1527,6 +1589,11 @@ class HubServer:
         ):
             raise TypeError("update_repository must be an UpdateRepository")
         self.update_repository = update_repository
+        if component_repository is not None and not isinstance(
+            component_repository, ComponentRepository
+        ):
+            raise TypeError("component_repository must be a ComponentRepository")
+        self.component_repository = component_repository
 
         methods = set(CATALOG_RPC_METHODS if enabled_methods is None else enabled_methods)
         unknown_methods = methods - CATALOG_RPC_METHODS
@@ -2215,6 +2282,55 @@ class HubServer:
             ) from None
         return package, manifest
 
+    def published_component_catalog(self) -> dict[str, Any]:
+        if self.component_repository is None:
+            return validate_component_catalog(None)
+        return self.component_repository.get_catalog()
+
+    def resolve_component_package(
+        self,
+        component_id: str,
+        version: str,
+    ) -> tuple[Path, dict[str, Any]]:
+        try:
+            requested_id = str(component_id or "").strip().casefold()
+            requested_version = str(version or "").strip()
+            publication = next(
+                (
+                    item
+                    for item in self.published_component_catalog()["components"]
+                    if item["component_id"] == requested_id
+                    and item["version"] == requested_version
+                ),
+                None,
+            )
+        except (KeyError, TypeError, ValueError):
+            publication = None
+        if publication is None:
+            raise _HubHTTPError(
+                HTTPStatus.NOT_FOUND,
+                "component_not_found",
+                "requested component release is not published",
+            )
+        if self.component_repository is None:
+            raise _HubHTTPError(
+                HTTPStatus.NOT_FOUND,
+                "component_not_found",
+                "no component repository is configured",
+            )
+        try:
+            package = self.component_repository.resolve_package(publication)
+            if package.stat().st_size != publication["size_bytes"]:
+                raise ValueError("published component size changed")
+        except (OSError, ValueError, ComponentPackageError) as error:
+            self._record_error(error)
+            raise _HubHTTPError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "component_unavailable",
+                "published component package failed integrity verification",
+            ) from None
+        return package, publication
+
     def _authorize_rpc(
         self,
         method: str,
@@ -2586,6 +2702,15 @@ class HubServer:
                     device_id,
                     actor_user_id=access.user_id,
                     **arguments,
+                )
+            if method == "device_delete":
+                self._require_exact_rpc_params(
+                    params,
+                    frozenset({"device_id"}),
+                )
+                return self.catalog.delete_hub_device(
+                    str(params.get("device_id") or ""),
+                    actor_user_id=access.user_id,
                 )
             if method == "device_config_create":
                 self._require_exact_rpc_params(params, frozenset({"value"}))
@@ -3549,6 +3674,113 @@ class HubClient:
             temporary_path = None
             return {
                 "path": str(destination_path),
+                "version": checked["version"],
+                "size_bytes": total,
+                "sha256": checked["sha256"],
+            }
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
+
+    def get_component_manifests(self) -> list[dict[str, Any]]:
+        payload = self._read_json_response(self._request("/components/manifest"))
+        if not payload.get("ok"):
+            raise HubConnectionError("Hub component response was not successful")
+        raw_catalog = payload.get("catalog")
+        if not isinstance(raw_catalog, Mapping):
+            raise HubConnectionError("Hub component catalog must be an object")
+        try:
+            verify_component_catalog_signature(
+                self.token,
+                raw_catalog,
+                payload.get("signature"),
+            )
+            catalog = validate_component_catalog(raw_catalog)
+        except (ValueError, ComponentPackageError) as error:
+            raise HubConnectionError(str(error)) from error
+        return [dict(item) for item in catalog["components"]]
+
+    def download_component_package(
+        self,
+        publication: Mapping[str, Any],
+        *,
+        destination: str | Path,
+    ) -> dict[str, Any]:
+        """Download, authenticate and structurally inspect one component ZIP."""
+
+        try:
+            checked = validate_component_publication(publication)
+        except (ValueError, ComponentPackageError) as error:
+            raise HubConnectionError(str(error)) from error
+        destination_path = Path(destination).expanduser().resolve()
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        response = self._request(
+            "/components/package?"
+            + urlencode(
+                {
+                    "component_id": checked["component_id"],
+                    "version": checked["version"],
+                }
+            )
+        )
+        temporary_path: Path | None = None
+        try:
+            with response:
+                try:
+                    response_size = int(response.headers.get("Content-Length") or -1)
+                except (TypeError, ValueError):
+                    response_size = -1
+                if response_size != checked["size_bytes"]:
+                    raise HubConnectionError(
+                        "Hub component Content-Length does not match the signed catalog"
+                    )
+                header_digest = str(
+                    response.headers.get(UPLOAD_SHA256_HEADER) or ""
+                ).strip().casefold()
+                if header_digest != checked["sha256"]:
+                    raise HubConnectionError(
+                        "Hub component digest header does not match the signed catalog"
+                    )
+                handle, temporary_name = tempfile.mkstemp(
+                    prefix=f".{destination_path.name}.",
+                    suffix=".part.zip",
+                    dir=destination_path.parent,
+                )
+                temporary_path = Path(temporary_name)
+                digest = hashlib.sha256()
+                total = 0
+                with os.fdopen(handle, "wb") as stream:
+                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                        total += len(chunk)
+                        if total > checked["size_bytes"]:
+                            raise HubConnectionError(
+                                "Hub component body exceeds the signed size"
+                            )
+                        digest.update(chunk)
+                        stream.write(chunk)
+            if total != checked["size_bytes"]:
+                raise HubConnectionError("Hub component body is incomplete")
+            if digest.hexdigest() != checked["sha256"]:
+                raise HubConnectionError("Hub component SHA-256 verification failed")
+            try:
+                inspection = ComponentUpdater.inspect_package(
+                    temporary_path,
+                    expected_package_sha256=checked["sha256"],
+                )
+            except ComponentPackageError as error:
+                raise HubConnectionError(str(error)) from error
+            if inspection.manifest.to_dict() != checked["component_manifest"]:
+                raise HubConnectionError(
+                    "Downloaded component manifest does not match the signed catalog"
+                )
+            os.replace(temporary_path, destination_path)
+            temporary_path = None
+            return {
+                "path": str(destination_path),
+                "component_id": checked["component_id"],
                 "version": checked["version"],
                 "size_bytes": total,
                 "sha256": checked["sha256"],

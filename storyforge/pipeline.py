@@ -208,13 +208,16 @@ def _required_output_bytes(
     output_mode: str,
     *,
     serial_staging: bool = False,
+    export_narration_audio: bool = False,
 ) -> int:
     """Estimate the peak free space needed on the selected output disk.
 
     Full video is encoded directly into a private staging directory on the
     output disk and then atomically renamed, so this estimate covers the
-    staged H.264 file, narration MP3 and a safety margin for CRF variability.
-    Audio-only production needs a much smaller reserve.
+    staged H.264 file and a safety margin for CRF variability.  A narration
+    MP3 is included only for an explicitly frozen legacy export contract;
+    current regular-video jobs publish MP4 only.  Audio-only production needs
+    a much smaller reserve.
     """
 
     try:
@@ -230,9 +233,9 @@ def _required_output_bytes(
     video_bytes_per_second = _VIDEO_OUTPUT_BYTES_PER_SECOND
     if serial_staging:
         video_bytes_per_second += _SERIAL_STAGING_BYTES_PER_SECOND
-    media_bytes = math.ceil(
-        duration * (video_bytes_per_second + _AUDIO_OUTPUT_BYTES_PER_SECOND)
-    )
+    if export_narration_audio:
+        video_bytes_per_second += _AUDIO_OUTPUT_BYTES_PER_SECOND
+    media_bytes = math.ceil(duration * video_bytes_per_second)
     return media_bytes + _VIDEO_OUTPUT_SAFETY_BYTES
 
 
@@ -242,6 +245,7 @@ def _preflight_output_directory(
     duration_seconds: float,
     output_mode: str,
     serial_staging: bool = False,
+    export_narration_audio: bool = False,
 ) -> Path:
     """Verify the exact employee output disk before starting FFmpeg.
 
@@ -302,6 +306,7 @@ def _preflight_output_directory(
         duration_seconds,
         output_mode,
         serial_staging=serial_staging,
+        export_narration_audio=export_narration_audio,
     )
     try:
         free_bytes = int(shutil.disk_usage(output_root).free)
@@ -884,9 +889,10 @@ def job_workspace_directory(job: RenderJob, root: Path | None = None) -> Path:
 def production_output_mode(job: RenderJob) -> str:
     """Return the frozen employee-facing output contract for a full job.
 
-    A production batch either publishes a complete MP4 with its reusable MP3,
-    or the narration MP3 alone.  Missing legacy values deliberately default to
-    the complete pair so an old queued job cannot emit a video-only artifact.
+    A current production batch publishes either a complete MP4, a narration
+    MP3, or a new MP4 built from existing narration.  The historical
+    ``video_and_mp3`` identifier is retained as a wire/storage compatibility
+    value even though new jobs no longer publish the extra MP3.
     """
 
     value = str(job.settings_snapshot.get("output_mode") or "").strip().casefold()
@@ -900,6 +906,20 @@ def production_output_mode(job: RenderJob) -> str:
     if isinstance(legacy_export, bool):
         return "video_and_mp3"
     return "video_and_mp3"
+
+
+def production_exports_narration_audio(job: RenderJob) -> bool:
+    """Return whether a regular-video job has a frozen legacy MP3 export.
+
+    Jobs queued by releases that promised an MP4+MP3 pair stored an explicit
+    boolean in their immutable settings snapshot.  Honour that promise while
+    allowing every newly submitted regular-video job to publish MP4 only.
+    Audio-only jobs follow their own branch and do not use this helper.
+    """
+
+    if production_output_mode(job) != "video_and_mp3":
+        return False
+    return job.settings_snapshot.get("export_narration_audio") is True
 
 
 def read_manuscript(path: Path) -> str:
@@ -1693,26 +1713,25 @@ def _plan_category_video_segments(
     playback_speed: float = 1.0,
     video_transition: str = "cut",
 ) -> list[Any]:
-    """Prefer story-compatible footage, then explicitly use generic footage.
+    """Plan footage only from the employee-selected folder tree.
 
-    Category discovery stays strict in :func:`plan_video_segments`; a missing
-    category therefore cannot be mistaken for a successful genre match.  The
-    production layer may, however, safely recover by scanning the employee's
-    selected media root recursively.  That second pass is labelled
-    ``generic_fallback`` in both warnings and manifests.
+    ``mood`` remains in this compatibility interface because existing queued
+    drafts and callers still provide it. It must not influence video
+    selection: employees choose the footage folder, while story type remains
+    available independently for voice and music decisions.
     """
 
-    requested_category = canonical_mood(mood)
+    _ = mood
     report = selection_report if selection_report is not None else {}
     report.clear()
     report.update(
         {
-            "mode": "category_match",
-            "requested_category": requested_category,
-            "matched_category": requested_category,
+            "mode": "employee_folder",
+            "requested_category": None,
+            "matched_category": None,
             "fallback": False,
             "fallback_reason": "",
-            "source_scope": "category_folder",
+            "source_scope": "selected_root_recursive",
             "source_root": str(Path(video_folder)),
             "warning": "",
         }
@@ -1722,55 +1741,22 @@ def _plan_category_video_segments(
         segments = plan_video_segments(
             video_folder,
             target_duration,
-            mood=requested_category,
+            mood=None,
             duration_resolver=duration_resolver,
             commit_usage=False,
-            variant_seed=variant_seed,
+            variant_seed=(
+                variant_seed if variant_seed is not None else os.urandom(16)
+            ),
             excluded_paths=excluded_paths,
             playback_speed=playback_speed,
             video_transition=video_transition,
         )
-    except MediaError as category_error:
-        # A per-job seed still gives varied equal-use choices while keeping a
-        # retry reproducible.  Legacy jobs without a seed receive fresh random
-        # bytes rather than always taking the alphabetically first clip.
-        generic_seed: int | str | bytes = variant_seed or os.urandom(16)
-        try:
-            segments = plan_video_segments(
-                video_folder,
-                target_duration,
-                mood=None,
-                duration_resolver=duration_resolver,
-                commit_usage=False,
-                variant_seed=generic_seed,
-                excluded_paths=excluded_paths,
-                playback_speed=playback_speed,
-                video_transition=video_transition,
-            )
-        except MediaError as generic_error:
-            raise PipelineError(
-                f"故事类型 {requested_category!r} 的分类目录没有可用视频，"
-                "并且员工所选素材总目录及其子目录中也没有可用的通用视频。"
-                f"分类检查：{category_error}；总目录检查：{generic_error}"
-            ) from generic_error
-
-        fallback_warning = (
-            f"通用素材回退：故事类型 {requested_category!r} 对应分类无可用视频，"
-            "已从员工所选素材总目录及其子目录中按最低使用次数随机选择可用素材；"
-            "这些素材只标记为通用回退，不会记录为题材匹配。"
-        )
-        report.update(
-            {
-                "mode": "generic_fallback",
-                "matched_category": None,
-                "fallback": True,
-                "fallback_reason": str(category_error),
-                "source_scope": "selected_root_recursive",
-                "warning": fallback_warning,
-            }
-        )
-        if warnings is not None:
-            warnings.append(fallback_warning)
+    except MediaError as error:
+        raise PipelineError(
+            "员工选择的视频素材文件夹及其子文件夹中没有可用视频。"
+            "请检查文件夹是否正确、素材是否完整且格式受支持后重试。"
+            f" 详情：{error}"
+        ) from error
 
     path_counts: dict[str, int] = {}
     for segment in segments:
@@ -3083,6 +3069,7 @@ class PipelineRunner:
             duration_seconds=max(1.0, analysis.estimated_duration_seconds),
         )
         output_mode = production_output_mode(job)
+        publish_narration_audio = production_exports_narration_audio(job)
         existing_narration_source: Path | None = None
         reuse_metadata: dict[str, Any] | None = None
         if output_mode == "reuse_audio":
@@ -3109,7 +3096,7 @@ class PipelineRunner:
             else:
                 raise PipelineError(
                     "这段配音缺少 StoryForge 的小说、口令和字幕索引，无法保证配音与字幕一致。"
-                    "请选择本版 StoryForge 输出的配音文件；旧版配音需在原生成电脑上使用。"
+                    "请选择本版 StoryForge 输出的 MP3 配音或原生成电脑上的成品视频。"
                 )
         playback_speed = float(getattr(settings, "video_playback_speed", 1.0) or 1.0)
         if not 0.8 <= playback_speed <= 3.0:
@@ -3129,6 +3116,7 @@ class PipelineRunner:
             job.output_folder,
             duration_seconds=max(1.0, analysis.estimated_duration_seconds),
             output_mode=output_mode,
+            export_narration_audio=publish_narration_audio,
         )
         reminder_seconds = float(settings.max_episode_minutes) * 60.0
         if analysis.estimated_duration_seconds > reminder_seconds:
@@ -3406,7 +3394,11 @@ class PipelineRunner:
 
         end_card_duration = max(5.0, min(7.0, settings.end_card_seconds))
         story_card_template = settings.video_template == "platform_story_card"
-        intro_card_duration = 5.5 if story_card_template else 0.0
+        intro_card_duration = (
+            max(2.5, min(8.0, float(settings.intro_card_duration_seconds)))
+            if story_card_template
+            else 0.0
+        )
         platform_logo_path = self._validated_optional_image(
             _story_card_platform_logo(platform, story_card_template),
             asset_label="平台 Logo",
@@ -3438,7 +3430,7 @@ class PipelineRunner:
             video_duration=render_duration,
             video_template=settings.video_template,
             intro_card_text=job.intro_card_text,
-            intro_headline=text_result.hook or job.title,
+            intro_headline=text_result.hook,
             intro_card_duration=intro_card_duration,
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
@@ -3513,6 +3505,7 @@ class PipelineRunner:
             duration_seconds=render_duration,
             output_mode=output_mode,
             serial_staging=len(segments) > 1,
+            export_narration_audio=publish_narration_audio,
         )
         final_path = publish_dir / f"{final_stem}.mp4"
         # os.replace is atomic only on the same filesystem. Keep the private
@@ -3526,16 +3519,20 @@ class PipelineRunner:
         staged_video_path = publish_staging_dir / f"{final_stem}.partial.mp4"
         narration_audio_path = publish_dir / f"{final_stem}.mp3"
         staged_audio_path = publish_staging_dir / f"{final_stem}.partial.mp3"
+        publish_artifacts: tuple[tuple[str, Path, Path], ...] = (
+            ("video", staged_video_path, final_path),
+        )
+        if publish_narration_audio:
+            # Compatibility for already queued 0.4.x work that explicitly
+            # promised an MP4+MP3 pair. New regular-video jobs omit this flag.
+            publish_artifacts += (
+                ("narration", staged_audio_path, narration_audio_path),
+            )
         journal_path, publish_transaction = self._begin_publish_transaction(
             job_id=job.id,
             mode=output_mode,
             staging_dir=publish_staging_dir,
-            # This order is the publish order.  MP4 first guarantees that a
-            # hard process kill can never expose a standalone narration MP3.
-            artifacts=(
-                ("video", staged_video_path, final_path),
-                ("narration", staged_audio_path, narration_audio_path),
-            ),
+            artifacts=publish_artifacts,
         )
         cover_image_was_present = bool(
             job.cover_path and Path(job.cover_path).expanduser().is_file()
@@ -3717,7 +3714,7 @@ class PipelineRunner:
                 "cover": str(effective_cover or ""),
                 "video_template": settings.video_template,
                 "intro_card": {
-                    "headline": text_result.hook or job.title,
+                    "headline": text_result.hook,
                     "text": job.intro_card_text,
                     "source": job.intro_card_source,
                     "duration_seconds": intro_card_duration if story_card_template else 0.0,
@@ -3741,7 +3738,7 @@ class PipelineRunner:
                     "narrated_cta": text_result.ending_cta,
                 },
                 "narration_audio": {
-                    "enabled": True,
+                    "enabled": publish_narration_audio,
                     "output_file": "",
                     "contains_background_music": False,
                 },
@@ -4163,22 +4160,27 @@ class PipelineRunner:
         # durable media ledgers so a cancelled task never consumes a usage
         # count merely because its checker returned a passing result.
         raise_if_cancelled()
-        progress(JobStatus.RENDERING, 0.96, "导出纯旁白配音")
+        progress(
+            JobStatus.RENDERING,
+            0.96,
+            "导出纯旁白配音" if publish_narration_audio else "发布完整视频",
+        )
         try:
-            self._stage_narration_mp3(
-                narration,
-                staged_audio_path,
-                existing_source=existing_narration_source,
-            )
-            self._embed_narration_metadata(
-                staged_audio_path,
-                self._narration_metadata_value(
-                    job=job,
-                    promo_code=effective_code,
-                    text_result=text_result,
-                    narration=narration,
-                ),
-            )
+            if publish_narration_audio:
+                self._stage_narration_mp3(
+                    narration,
+                    staged_audio_path,
+                    existing_source=existing_narration_source,
+                )
+                self._embed_narration_metadata(
+                    staged_audio_path,
+                    self._narration_metadata_value(
+                        job=job,
+                        promo_code=effective_code,
+                        text_result=text_result,
+                        narration=narration,
+                    ),
+                )
             raise_if_cancelled()
             self._mark_publish_transaction_ready(
                 journal_path, publish_transaction
@@ -4187,7 +4189,7 @@ class PipelineRunner:
                 journal_path, publish_transaction
             )
             self._save_narration_metadata(
-                narration_audio_path,
+                narration_audio_path if publish_narration_audio else final_path,
                 job=job,
                 promo_code=effective_code,
                 text_result=text_result,
@@ -4198,19 +4200,27 @@ class PipelineRunner:
             _remove_empty_directory(publish_dir)
             raise
         except (OSError, PipelineError) as error:
-            # MP4 + MP3 is one publishable product. Never leave a video in the
-            # employee-facing folder when its reusable narration export failed.
+            # Publishing is atomic: never expose a partial video or a legacy
+            # MP4+MP3 pair when either requested artifact could not be committed.
             self._abort_publish_transaction(journal_path, publish_transaction)
             _remove_empty_directory(publish_dir)
             job.narration_audio_file = ""
             detail = f"{type(error).__name__}: {error}"
             export_error_log = job_dir / "narration-export-error.log"
             export_error_log.write_text(detail, encoding="utf-8", newline="\n")
+            failure_label = (
+                "纯旁白导出失败" if publish_narration_audio else "成品发布失败"
+            )
+            failure_message = (
+                "纯旁白配音导出失败，已撤回视频；详情见 narration-export-error.log。"
+                if publish_narration_audio
+                else "完整视频发布失败，已撤回临时文件；详情见 narration-export-error.log。"
+            )
             manifest["job"].update(
                 {
                     "status": "failed",
-                    "stage_label": "纯旁白导出失败",
-                    "message": "纯旁白配音导出失败，已撤回视频；详情见 narration-export-error.log。",
+                    "stage_label": failure_label,
+                    "message": failure_message,
                     "output_file": "",
                     "narration_audio_file": "",
                 }
@@ -4222,23 +4232,23 @@ class PipelineRunner:
                 "error_log": str(export_error_log),
             }
             persist_manifest()
-            raise PipelineError(
-                "纯旁白配音导出失败，完整成品已撤回；详情见 narration-export-error.log。"
-            ) from error
-        job.narration_audio_file = str(narration_audio_path)
+            raise PipelineError(failure_message) from error
+        job.narration_audio_file = (
+            str(narration_audio_path) if publish_narration_audio else ""
+        )
         manifest["media"]["narration_audio"].update(
             {
                 "output_file": job.narration_audio_file,
                 "duration_seconds": narration.duration_seconds,
-                "format": "mp3",
-                "codec": "mp3",
-                "sample_rate_hz": 48000,
-                "bitrate_kbps": 192,
+                "format": "mp3" if publish_narration_audio else "",
+                "codec": "mp3" if publish_narration_audio else "",
+                "sample_rate_hz": 48000 if publish_narration_audio else 0,
+                "bitrate_kbps": 192 if publish_narration_audio else 0,
             }
         )
         # Usage ledgers are advisory deduplication metadata.  A read-only or
         # temporarily disconnected employee material folder must never turn a
-        # fully rendered and committed MP4/MP3 pair into a failed job.  The Hub
+        # fully rendered and committed product into a failed job.  The Hub
         # completion record still captures the selected material paths/counts.
         for usage_label, usage_commit in (
             (
@@ -4550,7 +4560,7 @@ class PipelineRunner:
             end_card_seconds=end_card_duration,
         )
         preview_intro_headline = _concise_preview_sentence(
-            text_result.hook or job.title,
+            text_result.hook,
             max_words=8,
         )
 

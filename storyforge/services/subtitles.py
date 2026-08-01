@@ -34,7 +34,6 @@ _STORY_REFERENCE_HEIGHT = 1920
 _STORY_INTRO_PANEL_Y = 520
 _STORY_INTRO_LOGO_SIZE = 64
 _STORY_INTRO_LOGO_TOP = 550
-_NEUTRAL_STORY_LABEL = "STORY BRIEF"
 _NUMBERED_PART_RE = re.compile(r"\bpart\s+\d+(?:\s+of\s+\d+)?\b", re.IGNORECASE)
 _NO_LINE_START = frozenset("，。！？；：、,.!?;:)]}》〉」』】”’")
 
@@ -2025,7 +2024,7 @@ def generate_ass(
             ),
         )
         headline = _fit_card_lines(
-            intro_headline or end_card_title,
+            intro_headline,
             width=headline_width,
             max_lines=2,
         )
@@ -2043,9 +2042,9 @@ def generate_ass(
             _card_text_width(platform_ticket_copy) * ticket_font_size * 0.54,
         )
         ticket_scale = max(62, min(100, round(ticket_width / ticket_pixel_width * 100)))
-        footer_label = normalized_final_label or _NEUTRAL_STORY_LABEL
-        footer = _escape_ass_text(footer_label)
-        footer_colour = colour_to_ass("#EA3F38") if normalized_final_label else brand_colour
+        render_final_footer = normalized_final_label == "FINAL PART"
+        footer = _escape_ass_text(normalized_final_label)
+        footer_colour = colour_to_ass("#EA3F38")
         intro_text_x = _aligned_x(
             style.intro_text_alignment,
             left=panel_x,
@@ -2145,9 +2144,26 @@ def generate_ass(
                 f"{{\\an7{divider_effect}"
                 r"\p1\1c&H00E7D8D0&\bord0\shad0}"
                 f"{divider_path}{{\\p0}}",
+            ]
+        if headline:
+            ticket_events.append(
                 f"Dialogue: 5,{seconds_to_ass_time(headline_delay)},"
                 f"{intro_end},IntroHeadline,,0,0,0,,"
-                f"{{\\an{intro_top_alignment}{headline_effect}}}{headline}",
+                f"{{\\an{intro_top_alignment}{headline_effect}}}{headline}"
+            )
+        if not platform_logo_present:
+            # A compact fallback remains useful for legacy platform records.
+            # When a real platform image is available FFmpeg composites it in
+            # this reserved slot after ASS, so no coloured badge can bleed
+            # through a transparent logo.
+            ticket_events.append(
+                f"Dialogue: 3,{seconds_to_ass_time(badge_delay)},"
+                f"{intro_end},IntroBadge,,0,0,0,,"
+                f"{{\\an5{badge_effect}"
+                f"\\3c{brand_colour}\\4c{brand_colour}}}STORY",
+            )
+        ticket_events.extend(
+            (
                 f"Dialogue: 3,{seconds_to_ass_time(platform_delay)},"
                 f"{intro_end},IntroPlatform,,0,0,0,,"
                 f"{{\\an{intro_middle_alignment}{platform_effect}"
@@ -2155,22 +2171,14 @@ def generate_ass(
                 f"Dialogue: 3,{seconds_to_ass_time(summary_delay)},"
                 f"{intro_end},IntroSummary,,0,0,0,,"
                 f"{{\\an{intro_top_alignment}{summary_effect}\\q2}}{summary}",
+            )
+        )
+        if render_final_footer:
+            ticket_events.append(
                 f"Dialogue: 4,{seconds_to_ass_time(footer_delay)},"
                 f"{intro_end},IntroFooter,,0,0,0,,"
                 f"{{\\an{intro_middle_alignment}{footer_effect}"
-                f"\\1c{footer_colour}\\fsp1}}{footer}",
-            ]
-        if not platform_logo_present:
-            # A compact fallback remains useful for legacy platform records.
-            # When a real platform image is available FFmpeg composites it in
-            # this reserved slot after ASS, so no coloured badge can bleed
-            # through a transparent logo.
-            ticket_events.insert(
-                5,
-                f"Dialogue: 3,{seconds_to_ass_time(badge_delay)},"
-                f"{intro_end},IntroBadge,,0,0,0,,"
-                f"{{\\an5{badge_effect}"
-                f"\\3c{brand_colour}\\4c{brand_colour}}}STORY",
+                f"\\1c{footer_colour}\\fsp1}}{footer}"
             )
         events.extend(ticket_events)
     if end_card_enabled:

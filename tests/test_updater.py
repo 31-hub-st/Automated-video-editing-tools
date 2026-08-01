@@ -65,7 +65,7 @@ class UpdatePackageTests(unittest.TestCase):
                 manifest["sha256"],
             )
 
-    def test_repository_keeps_only_the_current_published_package(self) -> None:
+    def test_repository_keeps_current_and_one_recent_previous_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository = UpdateRepository(root / "published")
@@ -81,13 +81,45 @@ class UpdatePackageTests(unittest.TestCase):
             )
             second_path = repository.resolve_package(second)
 
-            self.assertFalse(first_path.exists())
+            self.assertTrue(first_path.is_file())
             self.assertTrue(second_path.is_file())
             self.assertEqual(
-                [path.name for path in repository.root.glob("StoryForge-*.zip")],
-                [second_path.name],
+                sorted(path.name for path in repository.root.glob("StoryForge-*.zip")),
+                sorted([first_path.name, second_path.name]),
             )
             self.assertEqual(repository.get_manifest(), second)
+
+            third = repository.publish(
+                make_update_package(root, "0.4.0"), "0.4.0"
+            )
+            third_path = repository.resolve_package(third)
+            self.assertFalse(first_path.exists())
+            self.assertTrue(second_path.is_file())
+            self.assertTrue(third_path.is_file())
+            self.assertEqual(
+                len(list(repository.root.glob("StoryForge-*.zip"))),
+                2,
+            )
+
+    def test_repository_drops_previous_package_after_three_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            first = repository.publish(
+                make_update_package(root, "0.2.0"), "0.2.0"
+            )
+            first_path = repository.resolve_package(first)
+            expired_at = (
+                datetime.now(timezone.utc) - timedelta(days=4)
+            ).timestamp()
+            os.utime(first_path, (expired_at, expired_at))
+
+            second = repository.publish(
+                make_update_package(root, "0.3.0"), "0.3.0"
+            )
+
+            self.assertFalse(first_path.exists())
+            self.assertTrue(repository.resolve_package(second).is_file())
 
     def test_repository_same_version_publish_is_idempotent_but_rejects_new_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

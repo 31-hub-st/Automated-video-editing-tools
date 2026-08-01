@@ -658,7 +658,7 @@ class RpcTests(HubTestCase):
         )
 
     def test_private_and_unknown_methods_are_not_dispatchable(self) -> None:
-        for method in ("_connect", "__class__", "delete_platform", "missing"):
+        for method in ("_connect", "__class__", "delete_everything", "missing"):
             with self.subTest(method=method):
                 with self.assertRaises(HubRemoteError) as caught:
                     self.client.call(method, request_id=f"request-{method}")

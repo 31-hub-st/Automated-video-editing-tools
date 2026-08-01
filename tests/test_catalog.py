@@ -272,6 +272,36 @@ class DeviceManagementTests(CatalogTestCase):
         self.assertTrue(heartbeat["device"]["online"])
         self.assertEqual(heartbeat["device"]["app_version"], "0.3.5")
 
+    def test_disabled_obsolete_device_can_be_deleted_without_record_clutter(self) -> None:
+        device = self.register_device("obsolete-install", "Old Editing PC")
+        issued = self.catalog.issue_hub_access_token(
+            self.worker["id"],
+            label="Old Editing PC",
+            device_id=device["id"],
+            actor_user_id=self.owner["id"],
+        )
+        with self.assertRaisesRegex(CatalogConflictError, "disabled"):
+            self.catalog.delete_hub_device(
+                device["id"], actor_user_id=self.owner["id"]
+            )
+
+        self.catalog.set_hub_device_active(
+            device["id"], False, actor_user_id=self.owner["id"]
+        )
+        deleted = self.catalog.delete_hub_device(
+            device["id"], actor_user_id=self.owner["id"]
+        )
+
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(self.catalog.list_hub_devices()["total"], 0)
+        self.assertIsNone(self.catalog.resolve_hub_access_token(issued["token"]))
+        with self.assertRaises(CatalogNotFoundError):
+            self.catalog.get_hub_device(device["id"])
+        actions = {
+            item["action"] for item in self.catalog.list_audit_events(limit=500)["items"]
+        }
+        self.assertIn("hub_device.deleted", actions)
+
     def test_single_multiple_all_targets_and_ack_are_device_scoped(self) -> None:
         first = self.register_device("target-1", "PC 1")
         second = self.register_device("target-2", "PC 2")
@@ -1391,7 +1421,7 @@ class BindingAndPromoCodeTests(CatalogTestCase):
         self.assertEqual(second["platform_title"], "Updated platform title")
         self.assertEqual(second["promo_code_slots_remaining"], 5)
 
-    def test_promo_code_history_is_capped_at_five_and_cannot_be_deleted(self) -> None:
+    def test_promo_code_history_is_capped_and_admin_delete_is_a_hidden_tombstone(self) -> None:
         novel = self.import_story()["novel"]
         binding = self.bind_story(novel["id"])
         codes = [self.add_code(binding["id"], f"CODE{index}") for index in range(1, 6)]
@@ -1407,6 +1437,19 @@ class BindingAndPromoCodeTests(CatalogTestCase):
             self.add_code(binding["id"], "SIXTH")
         with self.assertRaisesRegex(CatalogValidationError, "immutable"):
             self.catalog.update_promo_code(codes[0]["id"], {"code": "CHANGED"})
+
+        removed = self.catalog.delete_promo_code(codes[0]["id"])
+        self.assertTrue(removed["deleted_at"])
+        visible = self.catalog.list_promo_codes(binding["id"])
+        self.assertEqual(visible["total"], 4)
+        self.assertEqual(visible["historical_count"], 5)
+        self.assertEqual(visible["slots_remaining"], 0)
+        self.assertEqual(
+            self.catalog.list_promo_codes(
+                binding["id"], include_deleted=True
+            )["total"],
+            5,
+        )
 
         connection = sqlite3.connect(self.database_path)
         try:
@@ -1434,6 +1477,35 @@ class BindingAndPromoCodeTests(CatalogTestCase):
         self.assertEqual(outcomes.count("limited"), 3)
         self.assertEqual(
             self.catalog.list_promo_codes(binding["id"])["historical_count"], 5
+        )
+
+    def test_admin_delete_archives_platform_and_novel_without_erasing_history(self) -> None:
+        first_novel = self.import_story(title="First Story")["novel"]
+        first_binding = self.bind_story(first_novel["id"], "GoodNovel")
+        first_code = self.add_code(first_binding["id"], "KEEP01")
+        removed_platform = self.catalog.delete_platform(first_binding["platform_id"])
+
+        self.assertTrue(removed_platform["archived"])
+        self.assertEqual(self.catalog.list_platforms()["total"], 0)
+        self.assertEqual(
+            self.catalog.list_promo_codes(first_binding["id"])["items"][0]["status"],
+            "revoked",
+        )
+        self.assertEqual(
+            self.catalog.list_promo_codes(
+                first_binding["id"], include_deleted=True
+            )["items"][0]["id"],
+            first_code["id"],
+        )
+
+        second_novel = self.import_story(title="Second Story", body="Different body.")[
+            "novel"
+        ]
+        removed_novel = self.catalog.delete_novel(second_novel["id"])
+        self.assertTrue(removed_novel["archived"])
+        self.assertNotIn(
+            second_novel["id"],
+            {item["id"] for item in self.catalog.list_novels()["items"]},
         )
 
 
@@ -1510,6 +1582,18 @@ class AccountsDraftsAndPermissionsTests(CatalogTestCase):
         self.assertEqual(second["id"], first["id"])
         self.assertEqual(second["display_name"], "Updated")
         self.assertEqual(self.catalog.list_publishing_accounts()["total"], 1)
+
+    def test_admin_delete_hides_publishing_account_but_keeps_archive(self) -> None:
+        account = self.catalog.save_publishing_account(
+            {"network": "TikTok", "handle": "@archive-me"}
+        )
+        removed = self.catalog.delete_publishing_account(account["id"])
+
+        self.assertEqual(removed["status"], "archived")
+        self.assertEqual(self.catalog.list_publishing_accounts()["total"], 0)
+        archived = self.catalog.list_publishing_accounts(include_archived=True)
+        self.assertEqual(archived["total"], 1)
+        self.assertEqual(archived["items"][0]["id"], account["id"])
 
     def test_draft_allows_unassigned_account_and_freezes_code_snapshot(self) -> None:
         novel, binding, code, draft = self.make_draft(creative_line_count=3)

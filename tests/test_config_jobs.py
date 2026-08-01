@@ -639,12 +639,11 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             "music_folder": "",
             "output_folder": r"C:\output",
         }
-        self.assertEqual(
-            StoryForgeApi._batch_from_payload(
-                {**base, "output_mode": "video_and_mp3"}
-            ).output_mode,
-            "video_and_mp3",
+        current_video = StoryForgeApi._batch_from_payload(
+            {**base, "output_mode": "video_and_mp3"}
         )
+        self.assertEqual(current_video.output_mode, "video_and_mp3")
+        self.assertFalse(current_video.export_narration_audio)
         self.assertEqual(
             StoryForgeApi._batch_from_payload(
                 {**base, "output_mode": "audio_only"}
@@ -663,12 +662,11 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             reused.source_narration_audio,
             r"C:\audio\existing.mp3",
         )
-        self.assertEqual(
-            StoryForgeApi._batch_from_payload(
-                {**base, "export_narration_audio": True}
-            ).output_mode,
-            "video_and_mp3",
+        legacy_pair = StoryForgeApi._batch_from_payload(
+            {**base, "export_narration_audio": True}
         )
+        self.assertEqual(legacy_pair.output_mode, "video_and_mp3")
+        self.assertTrue(legacy_pair.export_narration_audio)
         self.assertEqual(
             StoryForgeApi._batch_from_payload(
                 {**base, "export_narration_audio": False}
@@ -2154,6 +2152,9 @@ class JobQueueTests(unittest.TestCase):
             self.assertEqual(
                 jobs[0].settings_snapshot["output_mode"],
                 "video_and_mp3",
+            )
+            self.assertFalse(
+                jobs[0].settings_snapshot["export_narration_audio"]
             )
             self.assertEqual(len(errors), 1)
             self.assertIn("bad-name.txt", errors[0])

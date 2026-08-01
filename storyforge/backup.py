@@ -23,6 +23,8 @@ DEFAULT_MAX_SNAPSHOTS = 3
 PARTIAL_RETENTION = timedelta(hours=24)
 DEFAULT_DAILY_CHECK_SECONDS = 15 * 60
 BACKUP_EXTENSION = ".sfbak"
+LEGACY_BACKUP_EXTENSION = ".zip"
+RESTORE_EXTENSIONS = frozenset({BACKUP_EXTENSION, LEGACY_BACKUP_EXTENSION})
 
 _CATALOG_NAME = "storyforge-catalog.sqlite3"
 _SETTINGS_NAME = "settings.json"
@@ -33,6 +35,12 @@ _ATTACHMENT_ROOT = "hub-attachments"
 _ALLOWED_ATTACHMENT_GROUPS = frozenset(
     {"covers", "platform-assets", "voice-previews", "preset-assets"}
 )
+_OPTIONAL_DATA_NAMES = (
+    _SETTINGS_NAME,
+    _PROVIDER_USAGE_NAME,
+    _PRODUCTION_PRESETS_NAME,
+)
+_CATALOG_SIDECAR_SUFFIXES = ("-wal", "-shm")
 _TRANSIENT_SUFFIXES = (".part", ".partial", ".tmp")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -360,6 +368,26 @@ def _allowed_payload_member(path: PurePosixPath) -> bool:
         and parts[0] == "attachments"
         and parts[1] in _ALLOWED_ATTACHMENT_GROUPS
     )
+
+
+def _path_exists(path: Path) -> bool:
+    """Like ``lexists`` but keeps all path handling in ``Path`` callers."""
+
+    return os.path.lexists(path)
+
+
+def _remove_managed_path(path: Path) -> None:
+    """Remove one exact restore target without following links."""
+
+    if not _path_exists(path):
+        return
+    if _is_reparse_point(path):
+        path.unlink()
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+    path.unlink()
 
 
 class HubBackupManager:
@@ -1017,6 +1045,456 @@ class HubBackupManager:
         except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
             raise BackupValidationError("backup archive cannot be opened") from error
 
+    def _extract_restore_payload(
+        self,
+        path: Path,
+        staging_root: Path,
+        *,
+        expected: Mapping[str, Any],
+    ) -> set[str]:
+        """Revalidate and extract one archive without trusting ZIP metadata.
+
+        ``restore_snapshot`` validates before taking its safety snapshot.  This
+        second, streaming validation closes the time-of-check/time-of-use gap:
+        even if the archive is replaced between those steps, no unverified
+        byte reaches a live Hub path.
+        """
+
+        staging_root.mkdir(parents=True, exist_ok=False)
+        try:
+            with zipfile.ZipFile(path, "r") as archive:
+                infos = archive.infolist()
+                if len(infos) > _MAX_ARCHIVE_FILES + 1:
+                    raise BackupValidationError(
+                        "backup archive contains too many files"
+                    )
+
+                archive_names: set[str] = set()
+                archive_names_casefold: set[str] = set()
+                payload_infos: dict[str, zipfile.ZipInfo] = {}
+                declared_archive_bytes = 0
+                for info in infos:
+                    member = _safe_archive_member(info.filename)
+                    name = member.as_posix()
+                    folded = name.casefold()
+                    if name in archive_names or folded in archive_names_casefold:
+                        raise BackupSecurityError(
+                            f"backup archive contains a duplicate path: {name}"
+                        )
+                    archive_names.add(name)
+                    archive_names_casefold.add(folded)
+                    if info.flag_bits & 0x1:
+                        raise BackupSecurityError(
+                            "encrypted backup entries are not supported"
+                        )
+                    unix_mode = int(info.external_attr) >> 16
+                    if unix_mode and stat.S_ISLNK(unix_mode):
+                        raise BackupSecurityError(
+                            f"backup archive contains a symbolic link: {name}"
+                        )
+                    if info.is_dir():
+                        raise BackupSecurityError(
+                            f"backup archive contains an unexpected directory entry: {name}"
+                        )
+                    if name != _MANIFEST_NAME:
+                        if not _allowed_payload_member(member):
+                            raise BackupSecurityError(
+                                f"backup archive entry is outside the allowlist: {name}"
+                            )
+                        payload_infos[name] = info
+                    declared_archive_bytes += int(info.file_size)
+                    if declared_archive_bytes > _MAX_ARCHIVE_BYTES:
+                        raise BackupValidationError("backup archive is too large")
+
+                manifest = self._read_manifest(archive)
+                backup_id = str(manifest.get("id") or "")
+                if backup_id != str(expected.get("id") or ""):
+                    raise BackupValidationError(
+                        "backup changed after its initial validation"
+                    )
+                if str(manifest.get("manifest_sha256") or "") != str(
+                    expected.get("manifest_sha256") or ""
+                ):
+                    raise BackupValidationError(
+                        "backup changed after its initial validation"
+                    )
+
+                raw_entries = manifest.get("files")
+                if not isinstance(raw_entries, list):
+                    raise BackupValidationError(
+                        "backup manifest files must be an array"
+                    )
+                content_sha256 = _content_digest(raw_entries)
+                if content_sha256 != str(expected.get("content_sha256") or ""):
+                    raise BackupValidationError(
+                        "backup changed after its initial validation"
+                    )
+
+                expected_entries: dict[str, dict[str, Any]] = {}
+                for raw in raw_entries:
+                    if not isinstance(raw, Mapping):
+                        raise BackupValidationError(
+                            "backup manifest file entry is invalid"
+                        )
+                    member = _safe_archive_member(str(raw.get("path") or ""))
+                    name = member.as_posix()
+                    if name in expected_entries:
+                        raise BackupSecurityError(
+                            f"backup manifest file is duplicated: {name}"
+                        )
+                    try:
+                        size = int(raw.get("size_bytes"))
+                    except (TypeError, ValueError) as error:
+                        raise BackupValidationError(
+                            f"backup manifest size is invalid: {name}"
+                        ) from error
+                    digest = str(raw.get("sha256") or "")
+                    if size < 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                        raise BackupValidationError(
+                            f"backup manifest checksum is invalid: {name}"
+                        )
+                    expected_entries[name] = {
+                        "member": member,
+                        "size_bytes": size,
+                        "sha256": digest,
+                    }
+
+                if set(payload_infos) != set(expected_entries):
+                    raise BackupValidationError(
+                        "backup archive files do not match the manifest"
+                    )
+                if f"data/{_CATALOG_NAME}" not in expected_entries:
+                    raise BackupValidationError("backup catalog is missing")
+                try:
+                    declared_count = int(manifest.get("file_count"))
+                    declared_total = int(manifest.get("total_size_bytes"))
+                except (TypeError, ValueError) as error:
+                    raise BackupValidationError(
+                        "backup manifest totals are invalid"
+                    ) from error
+                expected_total = sum(
+                    int(item["size_bytes"]) for item in expected_entries.values()
+                )
+                if (
+                    declared_count != len(expected_entries)
+                    or declared_total != expected_total
+                    or declared_count != int(expected.get("file_count") or -1)
+                    or declared_total != int(expected.get("total_size_bytes") or -1)
+                ):
+                    raise BackupValidationError(
+                        "backup manifest totals do not match"
+                    )
+
+                total_written = 0
+                for name, item in expected_entries.items():
+                    info = payload_infos[name]
+                    expected_size = int(item["size_bytes"])
+                    if int(info.file_size) != expected_size:
+                        raise BackupValidationError(
+                            f"backup file size does not match: {name}"
+                        )
+                    member = item["member"]
+                    destination = staging_root.joinpath(*member.parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    written = 0
+                    with archive.open(info, "r") as source, destination.open(
+                        "xb"
+                    ) as output:
+                        while True:
+                            block = source.read(1024 * 1024)
+                            if not block:
+                                break
+                            written += len(block)
+                            total_written += len(block)
+                            if (
+                                written > expected_size
+                                or total_written > _MAX_ARCHIVE_BYTES
+                            ):
+                                raise BackupValidationError(
+                                    f"backup file exceeds its declared size: {name}"
+                                )
+                            digest.update(block)
+                            output.write(block)
+                    if (
+                        written != expected_size
+                        or digest.hexdigest() != str(item["sha256"])
+                    ):
+                        raise BackupValidationError(
+                            f"backup file SHA-256 does not match: {name}"
+                        )
+
+                if total_written != declared_total:
+                    raise BackupValidationError(
+                        "backup extracted size does not match the manifest"
+                    )
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+            raise BackupValidationError("backup archive cannot be extracted") from error
+
+        catalog_copy = staging_root / "data" / _CATALOG_NAME
+        catalog_schema = _validate_sqlite(catalog_copy)
+        try:
+            declared_schema = int(manifest.get("catalog_schema_version") or 0)
+            previously_checked_schema = int(
+                expected.get("catalog_schema_version") or 0
+            )
+        except (TypeError, ValueError) as error:
+            raise BackupValidationError(
+                "backup catalog schema is invalid"
+            ) from error
+        if catalog_schema not in {declared_schema, previously_checked_schema}:
+            raise BackupValidationError(
+                "backup catalog schema does not match the manifest"
+            )
+        if declared_schema != previously_checked_schema:
+            raise BackupValidationError(
+                "backup changed after its initial validation"
+            )
+
+        for name in _OPTIONAL_DATA_NAMES:
+            optional_path = staging_root / "data" / name
+            if not optional_path.is_file():
+                continue
+            try:
+                value = json.loads(optional_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise BackupValidationError(
+                    f"backup {name} is not valid UTF-8 JSON"
+                ) from error
+            if not isinstance(value, dict):
+                raise BackupValidationError(
+                    f"backup {name} must contain a JSON object"
+                )
+
+        for suffix in _CATALOG_SIDECAR_SUFFIXES:
+            sidecar = catalog_copy.with_name(catalog_copy.name + suffix)
+            try:
+                sidecar.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise BackupError(
+                    f"could not remove staged SQLite sidecar: {sidecar}"
+                ) from error
+        return set(expected_entries)
+
+    @staticmethod
+    def _preflight_restore_target(path: Path, *, directory: bool) -> None:
+        if not _path_exists(path):
+            return
+        if _is_reparse_point(path):
+            raise BackupSecurityError(
+                f"restore target is a link or reparse point: {path}"
+            )
+        if directory:
+            valid = path.is_dir()
+            expected = "directory"
+        else:
+            valid = path.is_file()
+            expected = "regular file"
+        if not valid:
+            raise BackupSecurityError(
+                f"restore target is not a {expected}: {path}"
+            )
+
+    def restore_snapshot(self, value: str | Path) -> dict[str, Any]:
+        """Replace all Hub-owned state with one authoritative snapshot.
+
+        This is deliberately an offline primitive.  The caller must first stop
+        the Hub server, its daily-backup thread and every process with an open
+        catalog connection.  Wiring it directly to a live HTTP endpoint would
+        permit SQLite writers to race the file replacement, so this method is
+        intentionally not exposed through the online API.
+        """
+
+        with self._lock:
+            _ensure_regular_source(self.data_dir, directory=True)
+            source_path = self._resolve_snapshot(value)
+            checked = self._validate_path(source_path)
+            checked["path"] = str(source_path)
+
+            safety = self.create_snapshot(
+                "pre_restore",
+                metadata={"restore_snapshot_id": str(checked["id"])},
+                cleanup=False,
+                deduplicate=False,
+            )
+
+            with tempfile.TemporaryDirectory(
+                prefix=".restore-", dir=self.data_dir
+            ) as temporary:
+                temporary_root = Path(temporary)
+                payload_root = temporary_root / "payload"
+                extracted = self._extract_restore_payload(
+                    source_path,
+                    payload_root,
+                    expected=checked,
+                )
+
+                attachment_root = self.data_dir / _ATTACHMENT_ROOT
+                if _path_exists(attachment_root):
+                    self._preflight_restore_target(
+                        attachment_root,
+                        directory=True,
+                    )
+
+                targets: list[dict[str, Any]] = []
+
+                def add_target(
+                    label: str,
+                    live: Path,
+                    staged: Path | None,
+                    *,
+                    directory: bool,
+                ) -> None:
+                    self._preflight_restore_target(live, directory=directory)
+                    targets.append(
+                        {
+                            "label": label,
+                            "live": live,
+                            "staged": staged,
+                            "directory": directory,
+                        }
+                    )
+
+                add_target(
+                    f"data/{_CATALOG_NAME}",
+                    self.catalog_path,
+                    payload_root / "data" / _CATALOG_NAME,
+                    directory=False,
+                )
+                for suffix in _CATALOG_SIDECAR_SUFFIXES:
+                    add_target(
+                        f"data/{_CATALOG_NAME}{suffix}",
+                        self.catalog_path.with_name(
+                            self.catalog_path.name + suffix
+                        ),
+                        None,
+                        directory=False,
+                    )
+                for name in _OPTIONAL_DATA_NAMES:
+                    archive_name = f"data/{name}"
+                    add_target(
+                        archive_name,
+                        self.data_dir / name,
+                        (
+                            payload_root / "data" / name
+                            if archive_name in extracted
+                            else None
+                        ),
+                        directory=False,
+                    )
+                for group in sorted(_ALLOWED_ATTACHMENT_GROUPS):
+                    prefix = f"attachments/{group}/"
+                    staged_group = payload_root / "attachments" / group
+                    add_target(
+                        f"attachments/{group}",
+                        attachment_root / group,
+                        (
+                            staged_group
+                            if any(name.startswith(prefix) for name in extracted)
+                            else None
+                        ),
+                        directory=True,
+                    )
+
+                rollback_root = temporary_root / "rollback"
+                moved: list[tuple[Path, Path]] = []
+                installed: list[Path] = []
+                attachment_root_created = False
+                replaced: list[str] = []
+                removed_missing: list[str] = []
+                try:
+                    for target in targets:
+                        live = target["live"]
+                        if not _path_exists(live):
+                            continue
+                        rollback = rollback_root / Path(str(target["label"]))
+                        rollback.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(live, rollback)
+                        moved.append((live, rollback))
+                        if target["staged"] is None:
+                            removed_missing.append(str(target["label"]))
+
+                    needs_attachment_root = any(
+                        target["staged"] is not None
+                        and str(target["label"]).startswith("attachments/")
+                        for target in targets
+                    )
+                    if needs_attachment_root and not _path_exists(attachment_root):
+                        attachment_root.mkdir(parents=True, exist_ok=False)
+                        attachment_root_created = True
+
+                    for target in targets:
+                        staged = target["staged"]
+                        if staged is None:
+                            continue
+                        live = target["live"]
+                        live.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(staged, live)
+                        installed.append(live)
+                        replaced.append(str(target["label"]))
+                except BaseException as error:
+                    rollback_errors: list[str] = []
+                    for live in reversed(installed):
+                        try:
+                            _remove_managed_path(live)
+                        except Exception as rollback_error:
+                            rollback_errors.append(
+                                f"remove {live}: {rollback_error}"
+                            )
+                    for live, rollback in reversed(moved):
+                        try:
+                            if _path_exists(live):
+                                _remove_managed_path(live)
+                            live.parent.mkdir(parents=True, exist_ok=True)
+                            os.replace(rollback, live)
+                        except Exception as rollback_error:
+                            rollback_errors.append(
+                                f"restore {live}: {rollback_error}"
+                            )
+                    if attachment_root_created:
+                        try:
+                            attachment_root.rmdir()
+                        except FileNotFoundError:
+                            pass
+                        except OSError as rollback_error:
+                            rollback_errors.append(
+                                f"remove {attachment_root}: {rollback_error}"
+                            )
+                    if rollback_errors:
+                        raise BackupError(
+                            "backup restore failed and rollback was incomplete: "
+                            + "; ".join(rollback_errors)
+                        ) from error
+                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    if isinstance(error, BackupError):
+                        raise
+                    raise BackupError(
+                        "backup restore failed; original state was restored"
+                    ) from error
+
+            with self._lock:
+                self._status.update(
+                    {
+                        "state": "restart_required",
+                        "last_error": "",
+                        "last_restore_id": str(checked["id"]),
+                        "last_restore_at": _iso_utc(self._now()),
+                    }
+                )
+            return {
+                "restored": True,
+                "snapshot_id": str(checked["id"]),
+                "snapshot_path": str(source_path),
+                "pre_restore_snapshot_id": str(safety["id"]),
+                "pre_restore_snapshot_path": str(safety["path"]),
+                "requires_restart": True,
+                "replaced": replaced,
+                "removed_missing": removed_missing,
+            }
+
     def _resolve_snapshot(self, value: str | Path) -> Path:
         raw = str(value or "").strip()
         if not raw:
@@ -1024,20 +1502,22 @@ class HubBackupManager:
         direct = Path(raw)
         if direct.is_absolute() or direct.parent != Path("."):
             candidate = direct.expanduser().resolve()
-            try:
-                candidate.relative_to(self.backup_dir)
-            except ValueError as error:
-                raise BackupSecurityError(
-                    "backup snapshot must be inside the managed backup directory"
-                ) from error
-            if candidate.parent != self.backup_dir:
-                raise BackupSecurityError(
-                    "backup snapshots cannot be loaded from nested directories"
+            if candidate.suffix.casefold() not in RESTORE_EXTENSIONS:
+                raise BackupValidationError(
+                    "backup snapshot must use the .sfbak extension "
+                    "(.zip is accepted only for legacy StoryForge backups)"
                 )
+            _ensure_regular_source(candidate)
             return candidate
 
         candidate = self.backup_dir / raw
         if candidate.is_file():
+            if candidate.suffix.casefold() not in RESTORE_EXTENSIONS:
+                raise BackupValidationError(
+                    "backup snapshot must use the .sfbak extension "
+                    "(.zip is accepted only for legacy StoryForge backups)"
+                )
+            _ensure_regular_source(candidate)
             return candidate
         for path in sorted(self.backup_dir.glob(f"*{BACKUP_EXTENSION}")):
             if path.name.startswith(".partial-") or _is_reparse_point(path):

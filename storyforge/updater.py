@@ -24,6 +24,8 @@ UPDATE_MANIFEST_SCHEMA = 1
 MAX_UPDATE_ENTRIES = 20_000
 MAX_UPDATE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 UPDATE_ROLLBACK_RETENTION = timedelta(days=3)
+PUBLISHED_UPDATE_RETENTION = timedelta(days=3)
+PUBLISHED_UPDATE_MAX_PACKAGES = 2
 UPDATE_INSTALLING_GRACE = timedelta(minutes=10)
 UPDATE_SPACE_HEADROOM_BYTES = 512 * 1024 * 1024
 _VERSION_PATTERN = re.compile(
@@ -357,6 +359,16 @@ class UpdateRepository:
                 if file_sha256(temporary) != digest:
                     raise OSError("更新包复制校验失败。")
                 os.replace(temporary, destination)
+                # ``copy2`` preserves the build input's timestamp, which can
+                # be much older than the actual Hub publication. Retention is
+                # based on publication time, so stamp the committed artifact.
+                try:
+                    os.utime(destination, None)
+                except OSError:
+                    # A scanner may briefly hold the newly committed ZIP on
+                    # Windows. Publication remains valid; the worst case is
+                    # that this rollback artifact is cleaned one cycle early.
+                    pass
             finally:
                 try:
                     temporary.unlink()
@@ -395,11 +407,35 @@ class UpdateRepository:
             return manifest
 
     def _remove_superseded_packages(self, current_package: Path) -> None:
+        """Keep the advertised package plus one recent rollback artifact."""
+
         current = current_package.resolve(strict=False)
+        now = datetime.now(timezone.utc)
+        candidates: list[tuple[datetime, Path]] = []
         for candidate in self.root.glob("StoryForge-*.zip"):
             try:
                 if candidate.resolve(strict=False) == current:
                     continue
+                modified = datetime.fromtimestamp(
+                    candidate.stat().st_mtime,
+                    tz=timezone.utc,
+                )
+                candidates.append((modified, candidate))
+            except OSError:
+                continue
+        candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        retained_previous = 0
+        for modified, candidate in candidates:
+            age = now - modified
+            keep = (
+                age <= PUBLISHED_UPDATE_RETENTION
+                and retained_previous < PUBLISHED_UPDATE_MAX_PACKAGES - 1
+                and candidate.is_file()
+            )
+            if keep:
+                retained_previous += 1
+                continue
+            try:
                 candidate.unlink()
             except OSError:
                 # A later publication will retry cleanup of locked files.

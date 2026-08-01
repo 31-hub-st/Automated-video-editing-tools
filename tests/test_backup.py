@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from storyforge.backup import (
+    BackupError,
     BackupSecurityError,
     BackupValidationError,
     HubBackupManager,
@@ -419,6 +421,225 @@ class HubBackupTests(unittest.TestCase):
         self.assertTrue(Path(str(duplicate["path"])).is_file())
         self.assertLessEqual(len(remaining), 3)
         self.assertIn(snapshots[0]["id"], {item["id"] for item in remaining})
+
+    def test_restore_replaces_authoritative_state_and_preserves_unmanaged_data(
+        self,
+    ) -> None:
+        connection = self.create_catalog(rows=2)
+        connection.close()
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({"schema_version": 13, "name": "snapshot"}),
+            encoding="utf-8",
+        )
+        cover = self.data_dir / "hub-attachments" / "covers" / "cover.jpg"
+        cover.parent.mkdir(parents=True)
+        cover.write_bytes(b"snapshot-cover")
+        snapshot = self.manager.create_snapshot("manual", cleanup=False)
+
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Live edit')")
+            changed.commit()
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({"schema_version": 13, "name": "live"}),
+            encoding="utf-8",
+        )
+        (self.data_dir / "provider-usage.json").write_text(
+            json.dumps({"characters": 999}), encoding="utf-8"
+        )
+        (self.data_dir / "production-presets.json").write_text(
+            json.dumps({"presets": ["live-only"]}), encoding="utf-8"
+        )
+        cover.write_bytes(b"live-cover")
+        platform_asset = (
+            self.data_dir
+            / "hub-attachments"
+            / "platform-assets"
+            / "live-logo.png"
+        )
+        platform_asset.parent.mkdir(parents=True)
+        platform_asset.write_bytes(b"live-logo")
+
+        unmanaged = {
+            self.data_dir
+            / "hub-attachments"
+            / "records"
+            / "employee.wav": b"employee-record",
+            self.data_dir / "videos" / "employee.mp4": b"employee-video",
+            self.data_dir / "output" / "finished.mp4": b"employee-output",
+            self.data_dir / "updates" / "worker.zip": b"update-package",
+            self.manager.backup_dir / "operator-note.txt": b"keep-backups",
+        }
+        for path, payload in unmanaged.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+
+        real_create_snapshot = self.manager.create_snapshot
+
+        def create_safety_with_stale_sidecars(
+            reason: str, **kwargs: object
+        ) -> dict[str, object]:
+            result = real_create_snapshot(reason, **kwargs)
+            if reason == "pre_restore":
+                for suffix in ("-wal", "-shm"):
+                    self.database_path.with_name(
+                        self.database_path.name + suffix
+                    ).write_bytes(b"stale-runtime-file")
+            return result
+
+        with patch.object(
+            self.manager,
+            "create_snapshot",
+            side_effect=create_safety_with_stale_sidecars,
+        ):
+            restored = self.manager.restore_snapshot(snapshot["id"])
+
+        self.assertTrue(restored["restored"])
+        self.assertTrue(restored["requires_restart"])
+        self.assertEqual(restored["snapshot_id"], snapshot["id"])
+        self.assertNotEqual(
+            restored["pre_restore_snapshot_id"], snapshot["id"]
+        )
+        with closing(sqlite3.connect(self.database_path)) as checked:
+            self.assertEqual(
+                checked.execute("SELECT COUNT(*) FROM stories").fetchone()[0],
+                2,
+            )
+        self.assertEqual(
+            json.loads((self.data_dir / "settings.json").read_text("utf-8"))[
+                "name"
+            ],
+            "snapshot",
+        )
+        self.assertFalse((self.data_dir / "provider-usage.json").exists())
+        self.assertFalse((self.data_dir / "production-presets.json").exists())
+        self.assertEqual(cover.read_bytes(), b"snapshot-cover")
+        self.assertFalse(platform_asset.exists())
+        for suffix in ("-wal", "-shm"):
+            self.assertFalse(
+                self.database_path.with_name(
+                    self.database_path.name + suffix
+                ).exists()
+            )
+        for path, payload in unmanaged.items():
+            self.assertEqual(path.read_bytes(), payload)
+        safety = self.manager.validate_snapshot(
+            restored["pre_restore_snapshot_id"]
+        )
+        self.assertEqual(safety["reason"], "pre_restore")
+        self.assertEqual(safety["metadata"]["restore_snapshot_id"], snapshot["id"])
+        self.assertEqual(self.manager.status()["state"], "restart_required")
+
+    def test_restore_rejects_invalid_snapshot_before_safety_snapshot(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+        settings = self.data_dir / "settings.json"
+        settings.write_text(json.dumps({"name": "snapshot"}), encoding="utf-8")
+        snapshot = self.manager.create_snapshot("manual", cleanup=False)
+        settings.write_text(json.dumps({"name": "live"}), encoding="utf-8")
+        path = Path(snapshot["path"])
+        replacement = path.with_suffix(".tampered")
+        with zipfile.ZipFile(path, "r") as source:
+            values = {
+                item.filename: source.read(item)
+                for item in source.infolist()
+                if not item.is_dir()
+            }
+        values["data/settings.json"] += b"tampered"
+        with zipfile.ZipFile(
+            replacement, "w", compression=zipfile.ZIP_DEFLATED
+        ) as destination:
+            for name, payload in values.items():
+                destination.writestr(name, payload)
+        os.replace(replacement, path)
+        before_archives = set(self.manager.backup_dir.glob("*.sfbak"))
+
+        with self.assertRaises(BackupValidationError):
+            self.manager.restore_snapshot(snapshot["id"])
+
+        self.assertEqual(
+            json.loads(settings.read_text("utf-8"))["name"], "live"
+        )
+        self.assertEqual(
+            set(self.manager.backup_dir.glob("*.sfbak")), before_archives
+        )
+
+    def test_restore_accepts_verified_snapshot_copied_outside_managed_directory(self) -> None:
+        connection = self.create_catalog(rows=1)
+        connection.close()
+        settings = self.data_dir / "settings.json"
+        settings.write_text(json.dumps({"name": "snapshot"}), encoding="utf-8")
+        snapshot = self.manager.create_snapshot("manual", cleanup=False)
+        migrated = self.root / "copied-from-another-computer" / "hub-state.sfbak"
+        migrated.parent.mkdir()
+        shutil.copy2(snapshot["path"], migrated)
+        settings.write_text(json.dumps({"name": "live"}), encoding="utf-8")
+
+        restored = self.manager.restore_snapshot(migrated)
+
+        self.assertTrue(restored["restored"])
+        self.assertEqual(Path(restored["snapshot_path"]), migrated.resolve())
+        self.assertEqual(json.loads(settings.read_text("utf-8"))["name"], "snapshot")
+
+    def test_external_legacy_zip_is_accepted_only_after_full_validation(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+        snapshot = self.manager.create_snapshot("manual", cleanup=False)
+        legacy = self.root / "legacy-copy.zip"
+        shutil.copy2(snapshot["path"], legacy)
+
+        checked = self.manager.validate_snapshot(legacy)
+
+        self.assertTrue(checked["valid"])
+        invalid_extension = self.root / "legacy-copy.backup"
+        shutil.copy2(snapshot["path"], invalid_extension)
+        with self.assertRaisesRegex(BackupValidationError, r"\.sfbak extension"):
+            self.manager.validate_snapshot(invalid_extension)
+
+    def test_restore_failure_rolls_back_original_state(self) -> None:
+        connection = self.create_catalog(rows=1)
+        connection.close()
+        settings = self.data_dir / "settings.json"
+        settings.write_text(json.dumps({"name": "snapshot"}), encoding="utf-8")
+        snapshot = self.manager.create_snapshot("manual", cleanup=False)
+
+        with closing(sqlite3.connect(self.database_path)) as changed:
+            changed.execute("INSERT INTO stories(title) VALUES ('Live row')")
+            changed.commit()
+        settings.write_text(json.dumps({"name": "live"}), encoding="utf-8")
+        provider_usage = self.data_dir / "provider-usage.json"
+        provider_usage.write_text(
+            json.dumps({"characters": 42}), encoding="utf-8"
+        )
+
+        real_replace = os.replace
+
+        def fail_during_install(source: object, destination: object) -> None:
+            source_path = Path(source)
+            if (
+                source_path.name == "settings.json"
+                and "payload" in source_path.parts
+                and any(part.startswith(".restore-") for part in source_path.parts)
+            ):
+                raise OSError("synthetic restore install failure")
+            real_replace(source, destination)
+
+        with patch("storyforge.backup.os.replace", side_effect=fail_during_install):
+            with self.assertRaisesRegex(BackupError, "original state was restored"):
+                self.manager.restore_snapshot(snapshot["id"])
+
+        with closing(sqlite3.connect(self.database_path)) as checked:
+            self.assertEqual(
+                checked.execute("SELECT COUNT(*) FROM stories").fetchone()[0],
+                2,
+            )
+        self.assertEqual(json.loads(settings.read_text("utf-8"))["name"], "live")
+        self.assertEqual(
+            json.loads(provider_usage.read_text("utf-8"))["characters"], 42
+        )
+        self.assertEqual(list(self.data_dir.glob(".restore-*")), [])
+        snapshots = self.manager.list_snapshots(validate=True)
+        self.assertEqual(len(snapshots), 2)
+        self.assertIn("pre_restore", {item["reason"] for item in snapshots})
 
     def test_daily_scheduler_starts_and_stops_cleanly(self) -> None:
         connection = self.create_catalog()

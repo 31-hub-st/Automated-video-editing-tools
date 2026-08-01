@@ -3,7 +3,7 @@
 > 文档用途：供后续开发团队将 StoryForge 的小说资料、分集规划、文案处理、配音、字幕、素材编排、浏览器即时预览、批量渲染、生产记录和多电脑协同能力嫁接到其他程序。
 >
 > 基准日期：2026-08-01
-> 当前源码版本：`storyforge.__version__` 0.4.4
+> 当前源码版本：`storyforge.__version__` 0.4.6（稳定版）
 > 数据库 Schema：12  
 > 设置 Schema：19
 > Hub 协议：1  
@@ -11,7 +11,7 @@
 > 成片 Manifest：2
 > 更新清单 Schema：1；更新包元数据：1；生产方案 `recipe_version`：1；生产预设 Schema：2
 >
-> 解释优先级：本报告前部的当前嫁接合同覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。0.4.4 完整包位于 `D:\StoryForgeBuildTemp\delivery\0.4.4-stable-final\StoryForge-0.4.4-Windows-x64.zip`。冻结态启动、内置 FFmpeg、Kokoro 实际合成、311.849 秒 30 FPS 与 600.801 秒 60 FPS 完整成片、独立 MP3 和整包哈希绑定均已通过本机验收；员工电脑的最终硬件冒烟状态仍以设备上报为准。
+> 解释优先级：本报告前部的当前嫁接合同覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。后文记录的 0.4.4 完整包、路径、哈希和本机验收结果是**历史稳定发布证据**，不是当前 `0.4.6` 稳定版的交付位置或验收结论；员工电脑的最终硬件冒烟状态仍以设备上报为准。
 
 ---
 
@@ -24,7 +24,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 3. **内容与媒体域**：正文清洗、AI/规则润色、题材分类与人工覆盖、TTS、字幕时间轴、素材去重、音乐匹配、FFmpeg 渲染和快速质检。
 4. **生产追踪域**：按“小说 → 批次 → 逻辑任务 → 尝试次数”归类状态；支持失败继续、保留历史的重试、带操作者/时间/原因的取消、可恢复归档、管理员回收站、产物登记、素材使用次数和审计记录。
 5. **协同域**：一台 Hub 主机持有权威 SQLite 数据库，多台制作电脑通过带权限的 HTTP RPC 和文件接口协同。
-6. **发布更新域**：Hub 主机发布经结构和摘要校验的完整 ZIP；制作电脑按周期检查、下载并校验，只有在用户安排且渲染空闲后才于安全退出时替换程序文件。
+6. **发布更新域**：核心程序使用经结构和摘要校验的完整 ZIP 自动检查、下载并在渲染空闲的安全重启阶段安装；可选语言资源使用独立组件清单、逐文件 SHA-256、原子切换和上一版回退，不与核心程序目录混装。
 7. **网页生产域**：Hub 主机网页承担共享资料与管理；每台已登记制作电脑提供仅限本机 `127.0.0.1` 的生产网页，调用该电脑自己的 TTS、字幕、素材、队列和 FFmpeg。正常地址不使用 Mock 数据。
 
 后续嫁接时，**推荐保留 Python 核心并在外层增加版本化适配 API**。不建议让新程序直接读写 SQLite，也不建议把 `ui/app.js` 当成业务规则来源。最值得直接复用的核心是：
@@ -37,18 +37,20 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - `HubServer` / `HubClient`：局域网目录共享、权限和任务租约；
 - `StoryForgeApi`：现有桌面桥接层，可作为新适配器的参考，但不应直接定义未来公共 API。
 
-### 1.1 0.4.1 当前嫁接合同（兼容 0.3.4/0.4.0）
+### 1.1 0.4.6 当前嫁接合同（兼容 0.3.4/0.4.0）
 
 - **网页与桌面是同一业务产品，媒体运行端不同。**桌面 WebView、Hub 团队网页和制作电脑 loopback 网页复用同一 UI 和账号权限。Hub 网页可发起试听、目录选择、完整建队、队列控制和失败重试，但前端必须先通过一次性设备票据连接访问者电脑上只监听 `127.0.0.1:18765–18770` 的 Local Worker；`WEB_DESKTOP_ONLY_MEDIA_METHODS` 继续阻止这些方法落到 Hub 主机进程。
 - **完整窗口无需常开。**员工发布包在 EXE 同级携带不含密钥的 `storyforge-connection.json`。全新制作电脑只输入账号和 8 位密码；软件自动读取 Windows 电脑名称、登记安装身份、用 DPAPI 保存内部设备凭据，并静默注册登录触发的 `StoryForge Local Worker`。员工不填写 Hub 地址、不复制令牌、不运行脚本。`admin-tools` 中的启用/停用脚本仅保留为管理员维修入口。集成到其他程序时应保留这个独立 Worker 生命周期，不要把媒体能力绑死在可见窗口。
-- **数据与算力归属冻结。**Hub 保存小说库、正文版本、封面、平台/口令、成员、大模型配置与用量、团队生产预设、草稿、生产记录、产物元数据/校验和审计；员工电脑保存视频、音乐、本机 TTS/FFmpeg/GPU 运行时、语音缓存、临时文件、ASS、内部 WAV、历史预览和最终 MP4/MP3。管理员不配置员工文件夹，跨电脑草稿中的绝对路径不得继承，也不能经 Hub 播放或下载员工本地成片。
+- **数据与算力归属冻结。**Hub 保存小说库、正文版本、封面、平台/口令、成员、大模型配置与用量、团队生产预设、草稿、生产记录、产物元数据/校验和审计；员工电脑保存视频、音乐、本机 TTS/FFmpeg/GPU 运行时、语音缓存、临时文件、ASS、内部 WAV、历史预览和最终 MP4/MP3。设置、日志、缓存、组件和渲染技术产物统一落在用户首次选择的 `<StoryForgeData>`，不再把 `%APPDATA%` 作为现行默认。管理员不配置员工文件夹，跨电脑草稿中的绝对路径不得继承，也不能经 Hub 播放或下载员工本地成片。
 - **本机健康状态成为 Worker 合同。**Local Worker 的连接结果返回经过脱敏的 `app_version / ffmpeg_ready / ffmpeg_label / encoders / recommended_encoder / tts_provider / tts_ready / edge_tts_runtime_ready / embedded_kokoro_ready / kokoro_configured / tts_endpoint_configured / tts_api_key_configured`。网页必须用这组当前电脑状态展示 FFmpeg/Kokoro，不得误用 Hub 主机检测或浏览器能力。
 - **Kokoro 版本边界明确。**轻量版包含界面、本机制作服务和 FFmpeg，但不含进程内 Kokoro/PyTorch；它可以使用 Edge TTS、Deepgram 或 OpenAI-compatible Kokoro HTTP 服务。`-WithLocalAI` 完整版才可在 Kokoro 地址留空时使用内置运行时和 `local-ai\kokoro` 离线资产。网页显示“轻量版，Kokoro 还未配置”是能力状态，不是网页故障。
 - **封面结尾可关闭。**`production_settings.cover_outro_enabled`、`AppSettings.cover_outro_enabled` 与冻结到 `RenderJob.cover_outro_enabled` 的值默认 `true`。值为 `false` 时 FFmpeg 计划不插入小说封面或封面动画，保持正文画面完成结尾；CTA 旁白、当前字幕样式、BGM 和顶部搜索口令仍继续。旧草稿没有字段时迁移为 `true`。
-- **输出合同固定为二选一。**Settings Schema 19 使用 `production_settings.output_mode` / `BatchSpec.output_mode`：默认 `video_and_mp3`，完整 MP4 通过快速质检后复用内部 `narration.wav`，再交付与成片同基名的 48 kHz、192 kbps 纯旁白 MP3；显式 `audio_only` 跳过视频渲染，只交付 MP3。MP3 不含 BGM 或素材原声，且不得再次调用 TTS。产品不再提供 video-only。MP4 与 MP3 都先写私有临时路径，只有合同内全部产物成功后才原子发布正式文件；失败不会留下可被员工误发的正式名残片。
-- **旧字段只作安全迁移。**旧 `export_narration_audio=true`、`false` 或缺失都迁移为 `output_mode=video_and_mp3`，不能根据旧布尔值关闭 MP3；只有显式 `output_mode=audio_only` 才进入纯音频模式。最终路径写入 `RenderJob.output_file` / `narration_audio_file`、Manifest、生产记录与对应 `video` / `narration` Artifact；`audio_only` 只登记 `narration`，不得把 MP3 伪装成视频 Artifact。
-- **生产媒体始终不跨机共享。**`settings.hub.share_narration` 与旧 `share_previews` 只作为 false-only 兼容字段读取，旧 `true` 在加载时迁移并持久化为 `false`，设置 API 也会忽略伪造的开启请求。完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 和字幕对齐文件只把元数据、校验信息和本机引用写入 Hub，文件本身永不上传；Hub 的 3 日备份不包含这些员工电脑产物，管理员远程页面也不能读取这些路径对应的文件。
-- **素材分类缺失时使用可追溯的通用回退。**视频仍优先读取员工所选素材总目录中的题材子目录；该分类不存在或没有有效视频时，从同一员工所选总目录随机选取可用视频，不访问 Hub 或其他电脑目录。任务警告、Manifest 与生产记录必须记录“通用素材回退”，但 `story_mood`/人工题材不变，界面不得把回退素材显示成题材命中。总目录也无有效视频时才失败并跳过。
+- **输出合同固定为三种互斥模式。**Settings Schema 19 继续使用 `production_settings.output_mode` / `BatchSpec.output_mode`。兼容枚举值 `video_and_mp3` 的当前产品名称是“常规视频生成”，只交付最终 MP4，不额外导出旁白；`audio_only` 跳过视频渲染，只交付 48 kHz、192 kbps 纯旁白 MP3；`reuse_audio` 读取员工选择的可靠旁白 MP3，跳过文稿改写、TTS 和字幕重新对齐，只更换视频素材并交付新的最终 MP4。所有正式产物先写私有临时路径，质量检查通过后再原子发布，失败不会留下可被员工误发的正式名残片。
+- **旧字段只作安全迁移。**旧 `export_narration_audio=true`、`false` 或缺失都迁移为 `output_mode=video_and_mp3`，即当前常规视频模式；新任务不会因此额外生成 MP3。`audio_only` 只登记 `narration` Artifact；`video_and_mp3` 与 `reuse_audio` 只登记 `video` Artifact，`reuse_audio` 的源 MP3 只作为冻结输入引用，不复制为交付物。
+- **生产媒体始终不跨机共享。**`settings.hub.share_narration` 与旧 `share_previews` 只作为 false-only 兼容字段读取，旧 `true` 在加载时迁移并持久化为 `false`，设置 API 也会忽略伪造的开启请求。完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 和字幕对齐文件只把元数据、校验信息和本机引用写入 Hub，文件本身永不上传；Hub 的 72 小时、最多 3 份且摘要去重的固定资料备份不包含这些员工电脑产物，管理员远程页面也不能读取这些路径对应的文件。
+- **视频素材完全由员工选择。**系统只递归扫描员工本批选择的视频素材目录，并在其中按去重、时长和可解码性选择素材；不再根据 `story_mood` 或小说题材寻找分类子目录，也不访问 Hub 或其他电脑目录。所选目录没有有效视频时当前任务才失败并跳过。
+- **核心更新与语言组件分离。**核心程序以完整 ZIP 自动检查、下载并在空闲安全重启时安装；语言资源以独立组件清单更新到 `<StoryForgeData>\components`，逐文件校验后原子切换，并可回退上一版。组件不得替换核心 EXE，核心 ZIP 也不得覆盖组件目录；当前 `0.4.6` 完整包仍内置日语链路。
+- **Hub 备份可做管理员离线整库覆盖恢复。**快照位于 `<StoryForgeData>\hub-backups`，保留 72 小时且最多 3 份，内容摘要相同则去重。管理员必须关闭 StoryForge 后运行 `admin-tools\restore_hub_backup.cmd`；选择器优先接受 `.sfbak`，并兼容带完整 StoryForge 清单的旧 `.zip`，所以从其他电脑复制到任意合法目录的备份也可直接选择。恢复器先校验文件类型、清单、逐文件 SHA-256 和压缩包路径安全性，再自动创建 `pre_restore` 快照，最后以所选备份整体覆盖小说、平台绑定、全部口令、设置/预设及其他 Hub 固定资料，不做合并，也不触碰员工视频素材、最终成品或渲染缓存。
 - **胶片带以批次为第一层。**当前/归档任务按稳定 `batch_id` 聚合成默认折叠的“批次卷宗”；摘要显示批次状态、总进度与各状态数量。展开卷宗后才显示单视频卡、错误和操作，单视频可跳转到对应生产记录。该前端投影不改变 Job、ProductionRecord 或 Attempt 的持久实体，也不以批次折叠替代服务端分页和所有权校验。
 - **连续建批次不等待渲染。**`queue_production_draft()` 成功后，前端把已提交草稿视为不可变快照，立即建立 `id=""`、`status="draft"` 的下一批编辑对象。下一批继承 Voice、WPM、完整样式/渲染方案和本机目录，清空 `promo_code_id / publishing_account_id / episode_ids` 及简介卡生成缓存；已提交批次继续在本机严格 FIFO 队列中运行。每个 durable batch 单独保存总数、顺序、完整 Job 快照和汇总进度；Worker/程序重启后，尚未执行的 queued 快照按原批次顺序恢复，失败或中断终态不阻塞同批后续任务或后提交批次。
 - **运行入口。**Hub 团队网页默认端口仍为 `8765`，当前验收地址示例为 `http://10.0.0.225:8765/`，IP 变化时以 Hub 返回地址为准；Worker 仅使用 loopback 端口段。集成端应把“Hub 可访问”和“当前电脑 Worker 可连接”作为两个独立健康检查。
@@ -64,7 +66,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - ASS 顶部 `SearchCard` 固定使用 Layer 7，逐词弹出不再泄漏多余右花括号；制作台 `soft_pop` 关键帧全过程保留 `translateX(-50%)`，避免字幕右偏或越出安全区。
 - 启动恢复会释放当前稳定 `device_id` 名下已经失去内存任务的陈旧生产租约和草稿 queue claim，同时保留其他电脑租约与全部历史记录。
 
-### 1.3 2026-07-29 当前源码整合增量（已生成本机验收候选包）
+### 1.3 2026-07-29 历史源码整合增量（仅供迁移参考）
 
 - Hub 网页与桌面程序使用同一制作台。浏览器会通过一次性票据连接当前制作电脑仅监听 `127.0.0.1` 的 Local Worker；小说、封面、平台、口令、成员、文本 AI、生产方案和记录来自 Hub，视频素材、音乐、TTS、FFmpeg/GPU、临时文件及成片只使用当前制作电脑。
 - 桌面桥不再直接暴露 `StoryForgeApi`；管理员和员工都需使用 8 位密码登录，会话最长保留 30 天。新员工默认密码为 `xs123456`，首次登录后建议修改但不强制，也不作为验收门槛。员工可制作、试听、修改本批与团队生产方案、重试和查看本人记录，但不能管理小说、平台、口令、发布账号、成员或 Hub；员工账号不能启动 Hub。
@@ -72,9 +74,9 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - 不再生成审批样片。右侧开头、正文字幕、封面结尾均为即时浏览器预览；正文示例直接抽取当前勾选分集的真实语种句子。简介卡可显式调用文本 AI 优化，保存后预览和最终任务共用同一冻结文本，渲染阶段不再临时重写。
 - 新增可选 `edge_tts` 在线免费客户端：无需 API Key，运行时读取上游真实女声，覆盖 `en / ja / es / fr / de / id / ko / it / pt-BR / hi`，最多返回 3 个，不足时如实返回；不会伪造候选。Edge 文本会发送给第三方上游，因此无离线和 SLA 保证。
 - FFmpeg、外部 TTS CLI、媒体探测与质检均接入任务级取消令牌；Windows 通过 `taskkill /T /F` 强制结束该任务进程树，取消一条不会停止其他任务，迟到回调不能复活记录。
-- 分类视频不足时，先从员工本批选择的素材总目录随机选择通用视频并记录回退；不得跨到 Hub 或另一台电脑，也不得误标题材。素材总目录仍无可用视频时当前任务才失败并跳过。背景音乐按“成功使用次数最少 → 时长适配 → 路径”选择；视频与音乐只在渲染和快速质检成功后计数。
+- 该历史版本曾按题材分类并回退到总目录；`0.4.6` 已取消题材素材匹配，只递归扫描员工本批选择的视频素材目录。背景音乐仍按“成功使用次数最少 → 时长适配 → 路径”选择；视频与音乐只在渲染和快速质检成功后计数。
 - 无人工生成数量上限。超大批次使用磁盘 Job spool、持久生产记录与有界队列窗口逐段装载，网页只接收当前窗口和总数，不再要求把全部 Job 同时驻留内存。
-- Hub 每日备份保留 3 天，备份包含 Catalog、共享设置、Provider 用量、生产方案和受控附件，不包含员工本机素材、完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 或字幕对齐文件。
+- 该历史版本以“每日备份保留 3 天”描述；当前合同改为滚动保留 72 小时、最多 3 份且按内容摘要去重，范围仍不包含员工本机素材、完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 或字幕对齐文件。
 
 ---
 
@@ -97,14 +99,14 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - 一个批次对应一部小说和一个推广平台，可多选分集/子段；所选内容按正文顺序合成一条连续视频的内容单元，再按目标总数生成去重版本，不能按分集分别成片或均分数量。选择从第 1 集开始时无回顾；从后续集开始时只在整组开头生成一次回顾；合计超过 10 分钟只提醒。
 - 可填写任意正整数的本批生成总数；产品层和数据库不设置 10 条、100 条或套餐式业务上限。任务通过磁盘 spool、批量落库和有界队列窗口生成；实际完成量仍受磁盘、时长、TTS、上游额度和运行时间约束。
 - 所选文本服务根据小说简介和正文开头/中段/结尾抽样判断 `suspense / romance / sad / revenge`；失败时回退本地规则，结果按正文哈希缓存，制作台允许人工覆盖本批题材。
-- 题材用于选择 3 个女声试听候选，并自动匹配同题材视频与音乐目录；同一批次保持一个 Voice ID，允许明确确认后更换。
+- 题材用于选择 3 个女声试听候选和背景音乐建议；视频素材不按题材匹配。同一批次保持一个 Voice ID，允许明确确认后更换。
 - 本地规则、Groq、Cloudflare Workers AI、Ollama 文本服务。
 - Deepgram Aura、本地/HTTP/CLI Kokoro 与可选 Edge TTS 配音。Kokoro 提供 `en / en-gb / ja / es / fr / hi / it / pt-br / zh`；Edge TTS 无需 API Key、按上游实时目录筛选 `en / ja / es / fr / de / id / ko / it / pt-br / hi` 真实女声，最多 3 个且不补假声线；Deepgram 继续提供已配置语种的云端候选。
 - 逐句 TTS 缓存、云服务月度字符硬上限、服务失败回退。
 - 语义短语字幕或整句字幕、ASS 样式、安全边距、稳定口令卡和全屏封面结尾；视频模板支持 `classic` 与 `platform_story_card`。平台简介卡采用社交平台票据式信息卡，可显示真实平台 Logo/品牌色；只有当前正文版本真正的最后一集显示 `FINAL PART`。
 - 字幕、简介卡、顶部口令卡和封面结尾动效均可在制作台即时预览；本批样式冻结在 `production_settings`，不会因以后修改全局默认而改变。
 - `word_pop_sync` 提供随旁白逐词变色和弹出效果。当前实现使用真实 TTS 句/段 WAV 时长作为边界，再在句/页内部按显示宽度确定性分配词窗；它不是声学强制对齐，也不使用 Provider 原生 word timestamp。
-- 解压视频优先按题材目录匹配并优先低使用次数素材；同题材素材不足时可拼接、循环、镜像、起点变化、轻微变速和裁切。题材分类缺失或没有有效视频时，从员工本批所选素材总目录随机使用通用素材，并在 Manifest/任务/记录中明确标记回退而不修改题材；总目录也无有效视频时任务明确失败，队列继续处理下一条。
+- 视频素材只从员工本批手动选择的目录递归扫描，并优先低使用次数素材；不按小说题材寻找分类目录。素材不足时可拼接、循环、镜像、起点变化、固定速度和裁切；所选目录没有有效视频时任务明确失败，队列继续处理下一条。
 - 素材原声始终移除；用模糊背景保留完整前景画面。
 - 背景音乐按题材匹配并优先选择成功使用次数最少且时长合适的轨道，必要时循环，并通过 side-chain ducking 避让旁白；只有成片通过快速质检后才增加使用次数。
 - 浏览器即时预览开头、正文字幕与封面结尾，不产生视频文件、不占用 FFmpeg 队列；确认后直接创建全部完整视频任务。
@@ -193,7 +195,7 @@ flowchart LR
 
 1. `storyforge.main:main` 解析 `--debug` 或 `--kokoro-self-test`。
 2. 创建 `StoryForgeApi`。
-3. `SettingsRepository` 从 `%APPDATA%\StoryForgeStudio` 读取并迁移设置。
+3. `SettingsRepository` 从用户首次选择的 `<StoryForgeData>` 读取并迁移设置；旧 `%APPDATA%\StoryForgeStudio` 只作升级迁移来源。
 4. 根据 `hub.mode` 建立本机 Catalog、Hub 主机或 Hub 客户端代理。
 5. `LibraryService` 绑定 Catalog 和当前设置获取器。
 6. 创建 `UpdateRepository` 和 `UpdateManager`；客户端恢复已验证的待安装标记，并按设置启动更新轮询。
@@ -249,26 +251,29 @@ StoryForge root
 
 ## 6. 数据存储与版本
 
-### 6.1 默认路径
+### 6.1 用户选择的数据根目录
 
-| 内容 | 默认路径 |
+| 内容 | 当前路径 |
 | --- | --- |
-| 全局设置 | `%APPDATA%\StoryForgeStudio\settings.json` |
-| 权威本机目录库 | `%APPDATA%\StoryForgeStudio\storyforge-catalog.sqlite3` |
-| Hub 断线只读缓存 | `%APPDATA%\StoryForgeStudio\storyforge-hub-offline-cache.sqlite3` |
-| Hub 附件 | `%APPDATA%\StoryForgeStudio\hub-attachments` |
-| Hub 客户端缓存 | `%APPDATA%\StoryForgeStudio\hub-cache` |
-| Hub 已发布软件更新 | `%APPDATA%\StoryForgeStudio\updates\published` |
-| 客户端已验证更新包 | `%APPDATA%\StoryForgeStudio\updates\downloads` |
-| 客户端待安装标记 | `%APPDATA%\StoryForgeStudio\updates\pending-update.json` |
-| 客户端退出安装脚本/结果 | `%APPDATA%\StoryForgeStudio\updates\apply-update.ps1` / `last-update-result.json` |
-| 小说封面 | `%APPDATA%\StoryForgeStudio\covers` |
-| 平台 Logo（Hub 主机） | `%APPDATA%\StoryForgeStudio\hub-attachments\platform-assets` |
-| 女声试听 | `%APPDATA%\StoryForgeStudio\voice-previews` |
-| 云服务字符计数 | `%APPDATA%\StoryForgeStudio\provider-usage.json` |
-| 旧资产计数兼容文件 | `%APPDATA%\StoryForgeStudio\asset-usage.json` |
-| 逐句 TTS 缓存 | `%LOCALAPPDATA%\StoryForgeStudio\cache\tts` |
-| Hugging Face 模型缓存 | `%LOCALAPPDATA%\StoryForge\ai-cache\huggingface`（应用主动设置的持久缓存） |
+| 全局设置 | `<StoryForgeData>\settings.json` |
+| 权威本机目录库 | `<StoryForgeData>\storyforge-catalog.sqlite3` |
+| Hub 断线只读缓存 | `<StoryForgeData>\storyforge-hub-offline-cache.sqlite3` |
+| Hub 附件 | `<StoryForgeData>\hub-attachments` |
+| Hub 客户端缓存 | `<StoryForgeData>\hub-cache` |
+| Hub 已发布核心更新 | `<StoryForgeData>\updates\published` |
+| 客户端已验证核心更新包 | `<StoryForgeData>\updates\downloads` |
+| 客户端待安装标记 | `<StoryForgeData>\updates\pending-update.json` |
+| 客户端退出安装脚本/结果 | `<StoryForgeData>\updates\apply-update.ps1` / `last-update-result.json` |
+| 可选语言组件 | `<StoryForgeData>\components` |
+| Hub 固定资料备份 | `<StoryForgeData>\hub-backups` |
+| 小说封面 | `<StoryForgeData>\covers` |
+| 平台 Logo（Hub 主机） | `<StoryForgeData>\hub-attachments\platform-assets` |
+| 女声试听 | `<StoryForgeData>\voice-previews` |
+| 云服务字符计数 | `<StoryForgeData>\provider-usage.json` |
+| 旧资产计数兼容文件 | `<StoryForgeData>\asset-usage.json` |
+| 逐句 TTS 缓存 | `<StoryForgeData>\cache\tts` |
+| Hugging Face 模型缓存 | `<StoryForgeData>\ai-cache\huggingface` |
+| 渲染技术产物 | `<StoryForgeData>\render-work` |
 | 发布版离线 Kokoro | EXE 同级 `local-ai\kokoro` |
 | 素材文件夹使用计数 | 素材根目录下 `.storyforge-media-usage.json` |
 
@@ -281,7 +286,7 @@ StoryForge root
 - `STORYFORGE_KOKORO_ASSETS`：显式指定离线 Kokoro 模型目录；
 - `STORYFORGE_BUNDLE_LOCAL_AI`：构建时决定是否收集本地 Kokoro。
 
-`STORYFORGE_BUNDLE_LOCAL_AI` 控制 EXE 是否收集 Kokoro/PyTorch 运行时。当前 `scripts/build_exe.ps1 -WithLocalAI` 还会校验源码根目录 `local-ai\kokoro` 中的配置、模型和 Voice 目录，并自动复制到发布目录同级；资产不完整时构建直接失败。`scripts/export_kokoro_offline_assets.ps1` 用于预先准备/刷新源码根的离线资产，不再需要在每次成功构建后手工复制一次。
+`<StoryForgeData>` 在首次使用时由用户选择并持久化；旧 `%APPDATA%` / `%LOCALAPPDATA%` 路径仅作为升级迁移来源，不能继续写成当前默认。`STORYFORGE_BUNDLE_LOCAL_AI` 控制 EXE 是否收集 Kokoro/PyTorch 运行时。当前 `scripts/build_exe.ps1 -WithLocalAI` 还会校验源码根目录 `local-ai\kokoro` 中的配置、模型和 Voice 目录，并自动复制到发布目录同级；资产不完整时构建直接失败。`scripts/export_kokoro_offline_assets.ps1` 用于预先准备/刷新源码根的离线资产，不再需要在每次成功构建后手工复制一次。
 
 ### 6.2 数据库实体关系
 
@@ -434,7 +439,7 @@ sequenceDiagram
 6. 规划结束后校验正文内容和顺序完全一致，发现丢字或重复即抛错。
 7. `E001/E002` 是内部编号；界面显示“第1集”和原正文标题。
 
-### 7.2.1 题材分类与自动匹配
+### 7.2.1 题材分类与使用边界
 
 `LibraryService.classify_novel(novel_id, force=False)` 的合同如下：
 
@@ -443,7 +448,7 @@ sequenceDiagram
 3. Provider 构建、鉴权或调用失败时，若允许回退，则使用本地规则分类并保存警告；分类失败不会阻止用户选择小说。
 4. 分类结果与当前正文 SHA-256 绑定并保存到小说元数据。正文未变化且 `force=false` 时直接复用；新正文版本会触发重新分类。
 5. 制作草稿保存 `story_mood` 和 `story_mood_source`。用户在制作台手动改选时只覆盖本批草稿，不删除小说级自动建议。
-6. 冻结后的题材同时驱动候选女声、视频子目录和音乐子目录；缺少对应目录时仍按现有回退规则选择，并写入警告。
+6. 冻结后的题材可驱动候选女声、文稿策略和背景音乐建议，但不得驱动视频子目录；视频只从员工本批选择的目录递归扫描。
 
 分类结果中的 `source` 当前可能为 `ai`、`local_rules` 或 `local_fallback`；同时保存 Provider、模型、正文哈希、版本 ID、时间和可选警告。当前没有单独的分类置信度字段。新系统嫁接时不应只迁移显示标签而丢失正文哈希和来源。
 
@@ -689,24 +694,22 @@ Provider：
 
 ## 9. 输出目录和产物合同
 
-员工可见的发布目录保持平铺，一个批次一个文件夹。默认 `video_and_mp3` 的每个任务必须有同基名的一对 MP4/MP3；显式 `audio_only` 的任务只产生 MP3：
+员工可见的发布目录保持平铺，一个批次一个文件夹。兼容枚举值 `video_and_mp3` 代表常规视频生成，只产生 MP4；`audio_only` 只产生 MP3；`reuse_audio` 复用员工选择的可靠旁白 MP3 更换素材，只产生新的 MP4：
 
 ```text
 输出根目录/
 └─ 待发布/
    └─ <平台>_<口令>_<小说>_B<批次8位>/
       ├─ 001_<平台>_<口令>_E001_V01_B<批次8位>.mp4
-      ├─ 001_<平台>_<口令>_E001_V01_B<批次8位>.mp3
-      ├─ 002_<平台>_<口令>_E001_V02_B<批次8位>.mp4
-      └─ 002_<平台>_<口令>_E001_V02_B<批次8位>.mp3
+      └─ 002_<平台>_<口令>_E001_V02_B<批次8位>.mp4
 ```
 
-发布目录不得出现只有 MP4 的新任务。`audio_only` 仍使用同一命名规则，但该任务目录中只有最终 `.mp3`。MP3 固定为 48 kHz、192 kbps 的纯旁白，不含 BGM 和素材原声。Hub 不复制、代理或提供这些最终文件的下载；管理员远程只看 Artifact 元数据、校验和本机引用。
+常规视频生成和已有配音更换素材的发布目录只出现最终 `.mp4`；`audio_only` 仍使用同一命名规则，但只出现最终 `.mp3`。MP3 固定为 48 kHz、192 kbps 的纯旁白，不含 BGM 和素材原声。Hub 不复制、代理或提供这些最终文件的下载；管理员远程只看 Artifact 元数据、校验和本机引用。
 
 日志、缓存、恢复日志和可追溯技术产物不进入员工可见发布目录，统一写入当前 Windows 用户的应用数据目录：
 
 ```text
-%APPDATA%\StoryForgeStudio\render-work/
+<StoryForgeData>\render-work\
 └─ <production_run_id 或 batch_id>/
    └─ <job_id>/
       ├─ 01-original.txt
@@ -725,9 +728,9 @@ Provider：
           └─ voice/
 ```
 
-MP4/MP3 原子发布的事务 journal 同样位于 `%APPDATA%\StoryForgeStudio\render-work\publish-transactions/`。为保证跨盘 `os.replace` 的原子性，编码中的 `.partial` 文件可短暂存在于输出根目录下隐藏的 `.storyforge-staging/<job_id>/`；它不位于员工批次发布文件夹，不是交付物，成功后清理，异常时由 AppData journal 在下次启动恢复或回滚。
+正式产物原子发布的事务 journal 同样位于 `<StoryForgeData>\render-work\publish-transactions\`。为保证跨盘 `os.replace` 的原子性，编码中的 `.partial` 文件可短暂存在于输出根目录下隐藏的 `.storyforge-staging/<job_id>/`；它不位于员工批次发布文件夹，不是交付物，成功后清理，异常时由数据目录 journal 在下次启动恢复或回滚。
 
-`RenderJob.publish_batch_folder` 保存员工批次发布目录。`video_and_mp3` 的 `output_file` 指向最终 MP4，`narration_audio_file` 指向同基名最终 MP3；`audio_only` 只登记最终 MP3 为 `narration` 产物，不得登记为 `video` Artifact。未包含新字段的旧记录按空字符串解码。0.4.0-rc5 新批次不会创建 `.previews/`、`preview-narration.wav` 或 `preview-subtitles.ass`。从旧版本升级后，已有多层目录、Manifest 和预览文件保持原位，API 会在新 `render-work` 路径不存在时回退读取旧任务目录；清理器和嫁接程序不得因为新树中没有列出它们就自动删除。
+`RenderJob.publish_batch_folder` 保存员工批次发布目录。`video_and_mp3` 与 `reuse_audio` 的 `output_file` 指向最终 MP4，`narration_audio_file` 不作为交付物；`audio_only` 只登记最终 MP3 为 `narration` 产物，不得登记为 `video` Artifact。`reuse_audio` 的源 MP3 以冻结输入引用记录，不能复制进发布目录或登记成新旁白产物。未包含新字段的旧记录按空字符串解码。当前新批次不会创建 `.previews/`、`preview-narration.wav` 或 `preview-subtitles.ass`。从旧版本升级后，已有多层目录、Manifest 和预览文件保持原位，API 会在新 `render-work` 路径不存在时回退读取旧任务目录；清理器和嫁接程序不得因为新树中没有列出它们就自动删除。
 
 `manifest.json` Schema 2 是最适合其他程序消费的文件级合同，包含：
 
@@ -740,8 +743,8 @@ MP4/MP3 原子发布的事务 journal 同样位于 `%APPDATA%\StoryForgeStudio\r
 - `video_template` 以及简介卡标题、正文、来源和持续时间；
 - Provider、Voice ID、WPM、实际音频时长和句子数；
 - 视频、音乐、循环次数、编码器、分辨率、帧率和封面；`media.ending_card.cover_outro_enabled` 记录是否使用封面，启用时 `kind="cover_caption"`，关闭时为正文画面/字幕收尾；
-- 视频素材来自题材池还是员工所选总目录的通用回退；发生回退时必须同时保留原 `story_mood` 与明确 warning，消费者不得根据素材路径反推或覆盖题材；
-- `output_mode`、`media.narration_audio.enabled/output_file/contains_background_music` 与 `result.narration_audio_file`；所有新任务都必须登记员工电脑本机纯旁白 MP3（48 kHz、192 kbps），`audio_only` 不得登记视频产物；
+- 员工本批选择的视频素材目录、递归候选、最终素材与去重信息；消费者不得根据素材路径反推或覆盖小说题材；
+- `output_mode`、`media.narration_audio.enabled/output_file/contains_background_music` 与 `result.narration_audio_file`；`audio_only` 登记员工电脑本机纯旁白 MP3（48 kHz、192 kbps），`video_and_mp3` 与 `reuse_audio` 只登记最终视频，`reuse_audio` 另记录冻结的源旁白引用；
 - 警告、最终状态、输出文件和质检结果。
 
 如果新程序只需要接收成片和元数据，应在**当前制作电脑的 Worker/本机适配层**通过生产记录和 Artifact 引用取得本机 Manifest 与媒体，不要让 Hub 代理文件，也不要扫描发布目录或从文件名反推全部业务字段。Hub 侧 API 只返回元数据、校验和受控本机引用；管理员远程查询不能把本机引用当成可下载 URL。迁移旧数据时仍允许在原制作电脑读取旧成片旁边的 Manifest。
@@ -1099,9 +1102,9 @@ RPC 请求：
 
 数据与计算的最终边界是：小说、平台、口令、账号、草稿、记录和文本 AI 由 Hub 统一；候选配音、本机 TTS、素材、音乐、字幕、队列、FFmpeg 和输出由每台制作电脑独立执行。关闭浏览器不会取消已经提交到本机队列的完整任务。
 
-### 11.7 局域网自动更新协议
+### 11.7 核心程序自动更新与独立语言组件更新
 
-这是一套**周期轮询 + 安全退出安装**机制，不是 WebSocket 推送，也不是运行中热替换。默认检查间隔是一分钟，因此用户感知上接近实时，但文档和 UI 不应承诺“毫秒级实时更新”。
+核心程序使用**完整 ZIP 周期轮询 + 自动下载 + 空闲安全重启安装**，不是 WebSocket 推送，也不是运行中热替换。默认检查间隔是一分钟，因此用户感知上接近实时，但文档和 UI 不应承诺“毫秒级实时更新”。语言资源走独立组件协议，不与核心程序 ZIP 混为同一个状态机。
 
 ```mermaid
 sequenceDiagram
@@ -1118,7 +1121,7 @@ sequenceDiagram
     C->>H: GET /updates/package?version=...
     H-->>C: ZIP + Content-Length + X-Content-SHA256
     C->>C: .part 下载，校验长度/摘要/ZIP，再原子入缓存
-    C->>C: 用户安排“下次重启安装”
+    C->>C: 标记“空闲安全重启安装”
     C->>W: 队列空闲且桌面安全退出后移交
     W->>W: 再验摘要、隔离解压、备份、覆盖；失败恢复
     W->>C: 重新打开新入口
@@ -1126,7 +1129,7 @@ sequenceDiagram
 
 #### 发布清单
 
-`UpdateRepository` 在 `%APPDATA%\StoryForgeStudio\updates\published` 保存摘要命名的 ZIP 与权威 `manifest.json`：
+`UpdateRepository` 在 `<StoryForgeData>\updates\published` 保存摘要命名的 ZIP 与权威 `manifest.json`：
 
 ```json
 {
@@ -1146,11 +1149,18 @@ sequenceDiagram
 #### 客户端状态与落盘
 
 - `UpdateManager` 仅在 `hub.mode=client` 且 `auto_update_enabled=true` 时后台轮询；主机不会从自己发布的仓库自动更新自身。
-- `auto_download_updates=true` 只自动下载到 `%APPDATA%\StoryForgeStudio\updates\downloads\<version>`，不会自动安装。
-- `schedule_update_on_restart()` 写 `updates\pending-update.json`。渲染忙时状态为 `deferred`；退出时若仍忙，不启动外部安装器，待安装标记保留。
+- `auto_download_updates=true` 自动下载到 `<StoryForgeData>\updates\downloads\<version>`；通过全部校验后标记为下次空闲安全重启安装，不在运行中覆盖程序。
+- `schedule_update_on_restart()` 写 `<StoryForgeData>\updates\pending-update.json`。渲染忙时状态为 `deferred`；退出时若仍忙，不启动外部安装器，待安装标记保留。
 - 外部安装器等待父进程最多 120 秒；随后重新计算 ZIP SHA-256、在临时目录安全解压、备份将被覆盖的旧文件、逐文件复制，复制失败时恢复已覆盖文件并删除本次新建文件。
 - 安装成功写 `updates\last-update-result.json` 并按包内 `entrypoint` 重新启动。更新包未包含的旧文件**不会被删除**，所以本协议不支持“通过省略文件来卸载旧组件”。
 - 这不是整个安装目录的原子切换；回滚覆盖的是本次复制阶段。突然断电、杀死 PowerShell 或磁盘故障仍需人工用完整安装包修复。
+
+#### 独立语言组件
+
+- 组件清单声明 `component_id`、组件版本、兼容的应用版本范围、整包摘要和逐文件 SHA-256；客户端只接受与当前核心版本兼容的组件。
+- 组件安装根固定为 `<StoryForgeData>\components`。安全解压拒绝绝对路径、路径穿越、Windows 路径碰撞、符号链接、加密条目、异常压缩比和未声明文件；全部校验通过后写入不可变版本目录，再通过单个原子状态文件切换当前版本。
+- 每个组件保留当前版与上一版，失败可回退；组件不得替换核心 EXE 或程序目录，核心完整 ZIP 也不得覆盖 `<StoryForgeData>\components`。
+- 当前 `0.4.6` 完整包仍内置日语前处理、字典和约定 Voice；独立组件用于后续增加或修复语言资源，不要求员工手工复制散文件。
 
 #### 校验与信任边界
 
@@ -1218,8 +1228,8 @@ hub.manage
 | `chapter_pause_seconds` | `0.8` | 章节标题处静音 |
 | `output_width/height` | `1080 / 1920` | 竖屏 |
 | `output_fps` | `60` | 完整成片帧率；允许 30 FPS 兼容输出；浏览器即时预览无独立 FPS |
-| `output_mode` | `video_and_mp3` | `video_and_mp3` 同时交付完整 MP4 与同基名 48 kHz、192 kbps 纯旁白 MP3；`audio_only` 只交付 MP3；无 video-only |
-| `export_narration_audio` | 兼容字段 | `true`、`false` 或缺失都迁移为 `video_and_mp3`，不能用于关闭 MP3；新调用方必须使用 `output_mode` |
+| `output_mode` | `video_and_mp3` | `video_and_mp3` 为兼容枚举名，当前代表常规视频生成且只交付 MP4；`audio_only` 只交付 MP3；`reuse_audio` 复用已有可靠旁白更换素材且只交付新 MP4 |
+| `export_narration_audio` | 兼容字段 | `true`、`false` 或缺失都迁移为当前常规模式 `video_and_mp3`，不会额外生成 MP3；新调用方必须使用 `output_mode` |
 | `video_encoder` | `auto` | 自动硬编/CPU |
 | `bgm_volume` | `0.28` | 0–1 |
 | `caption_mode` | `semantic` | `semantic` 或 `sentence` |
@@ -1379,7 +1389,7 @@ hub.manage
 
 API Key 和自动登记的设备凭据使用当前 Windows 用户的 DPAPI 加密。传给 UI 时只显示 `********` / `has_*` 状态，保存掩码时保留原值；主流程不回显设备凭据。
 
-设置迁移说明：Schema 7 为旧安装补入 `video_template=classic`；Schema 8 把旧 30 FPS 默认升级为推荐的 60 FPS；Schema 9 增加简介卡/口令卡/旧结尾卡样式；Schema 10 增加局域网软件更新设置；Schema 11 增加网页安全目录；Schema 12 将历史 preview 的旧默认 30 秒迁为 15 秒；Schema 13 为每个安装生成并持久化稳定安装 ID，并增加设备配置应用状态；Schema 14 增加简介卡入场和画面色调等当前视觉字段；Schema 15 增加旧 `export_narration_audio=false`；Schema 16 增加 `cover_outro_enabled=true`；Schema 17 增加历史 `hub.share_narration=false` 字段；**Schema 18** 增加 `output_mode` 并把旧 `export_narration_audio=true`、`false` 或缺失统一迁移为 `video_and_mp3`，只有已经显式保存的 `output_mode=audio_only` 保持纯音频。当前加载器还会把任意版本中残留的 `share_narration=true / share_previews=true` 迁移并持久化为 `false`。当前源码不删除 `preview_seconds`、`outro_card_preset/outro_card` 或旧草稿快照，但新建 `full` 任务不会把这些字段接入审批门或白色结尾卡。迁移后用户已经明确保存的其他设置继续保留。
+设置迁移说明：Schema 7 为旧安装补入 `video_template=classic`；Schema 8 把旧 30 FPS 默认升级为推荐的 60 FPS；Schema 9 增加简介卡/口令卡/旧结尾卡样式；Schema 10 增加局域网软件更新设置；Schema 11 增加网页安全目录；Schema 12 将历史 preview 的旧默认 30 秒迁为 15 秒；Schema 13 为每个安装生成并持久化稳定安装 ID，并增加设备配置应用状态；Schema 14 增加简介卡入场和画面色调等当前视觉字段；Schema 15 增加旧 `export_narration_audio=false`；Schema 16 增加 `cover_outro_enabled=true`；Schema 17 增加历史 `hub.share_narration=false` 字段；**Schema 18** 增加 `output_mode` 并把旧 `export_narration_audio=true`、`false` 或缺失统一迁移为 `video_and_mp3`，只有已经显式保存的 `output_mode=audio_only` 保持纯音频。`0.4.6` 在兼容枚举层新增 `reuse_audio`，并把 `video_and_mp3` 的当前交付语义收敛为“常规视频只交付 MP4”；历史 Schema 迁移事实保持不变。当前加载器还会把任意版本中残留的 `share_narration=true / share_previews=true` 迁移并持久化为 `false`。当前源码不删除 `preview_seconds`、`outro_card_preset/outro_card` 或旧草稿快照，但新建 `full` 任务不会把这些字段接入审批门或白色结尾卡。迁移后用户已经明确保存的其他设置继续保留。
 
 ---
 
@@ -1399,7 +1409,7 @@ API Key 和自动登记的设备凭据使用当前 Windows 用户的 DPAPI 加�
 | 服务 `providers` | 文本/TTS、本地/云端 | `save_settings` |
 | 多电脑 `hub` | 本机/主机/客户端三步引导 | `save_settings`, `get_hub_status`, `reconnect_hub` |
 
-样式工作室有三个明确作用域：管理员的团队默认只影响未来新建草稿；员工的个人默认按“账号 + 当前电脑”隔离，不覆盖团队；制作台字段只覆盖当前批次。“一键制作方案”由 Hub 保存并分为三类：内置方案永久只读；管理员创建的方案为团队共享，员工可读可套用但不可改删；员工创建的方案保存 `owner_user_id`，只允许本人查看、修改和删除，管理员可管理全部成员方案。旧 v1/v2 无所有者的自定义方案迁为团队共享、员工只读。方案保存 `id/name/description/curated/revision/content_hash/recipe/updated_at/updated_by/owner_user_id/scope`，但永不保存小说、平台、口令、分集、账号、实际 Voice ID、本机目录、密钥或设备信息。Hub RPC、Web、桌面桥、Catalog 与草稿保存都会重新注入并校验当前 actor，猜测他人方案 ID 也不能越权套入草稿。套用时把完整解析样式写入草稿并冻结方案版本与哈希；后续方案修改不会改变已保存或已入队批次。
+样式工作室采用“团队默认 + 个人方案 + 本批覆盖”三个作用域。管理员维护的团队默认只影响未来新建草稿；员工的个人方案保存 `owner_user_id`，只允许本人查看、修改和删除，管理员可查看和删除全部成员方案；制作台字段只覆盖当前批次。产品不再提供成套内置方案或团队共享方案，旧版 curated ID、团队共享方案和无所有者方案均隐藏且不会自动套用。方案保存 `id/name/description/revision/content_hash/recipe/updated_at/updated_by/owner_user_id/scope`，但永不保存小说、平台、口令、分集、账号、实际 Voice ID、本机目录、密钥或设备信息。Hub RPC、Web、桌面桥、Catalog 与草稿保存都会重新注入并校验当前 actor，猜测他人方案 ID 也不能越权套入草稿。套用时把完整解析样式写入草稿并冻结方案版本与哈希；后续方案修改不会改变已保存或已入队批次。
 
 制作台右侧不是单张静态占位图，而是同一份 `production_settings` 的三场景实时投影：
 
@@ -1593,13 +1603,14 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 - 当前 EXE 未数字签名；正式分发建议增加 Authenticode。
 - 当前退出安装 Worker 通过 `powershell.exe -ExecutionPolicy Bypass` 启动本地生成且路径受控的脚本；嫁接到高安全环境时应改为签名安装器/受控服务并限制安装根目录 ACL。
 - Hub 只适合可信局域网或 VPN；公网部署应改为 TLS、反向代理、速率限制和集中日志。
-- Hub 的 3 日备份只覆盖 Catalog、共享设置、Provider 用量、团队预设和受控长期附件，不包含生产 MP4/MP3/WAV/ASS/历史预览。若员工另有业务备份需求，应在员工电脑独立备份自己的素材和发布目录，不能把 Hub 备份描述为成片备份。
+- Hub 固定资料快照位于 `<StoryForgeData>\hub-backups`，滚动保留 72 小时且最多 3 份；内容摘要相同则去重，不重复占用空间。它覆盖小说、正文版本、平台绑定、全部口令、共享设置、Provider 用量、团队预设和受控长期附件，不包含员工电脑的素材、最终 MP4/MP3、WAV、ASS、历史预览或渲染缓存。
+- 管理员整库恢复是离线覆盖操作：先关闭 StoryForge，再运行 `admin-tools\restore_hub_backup.cmd` 并选择 `.sfbak`（或带完整 StoryForge 清单的旧 `.zip`）。备份文件可以来自当前备份目录，也可以是从其他电脑复制到任意合法目录的文件；恢复器仍会先验证清单、逐文件 SHA-256 与压缩包路径安全性。验证通过后自动生成一份 `pre_restore` 安全快照，然后整体覆盖小说、平台绑定、全部口令、设置/预设及其他 Hub 固定资料；不做字段级合并，也不触碰任何员工电脑素材、成品或缓存。恢复完成后再启动 Hub 并进行健康检查；误选时可用刚生成的 `pre_restore` 快照回退。
 
 ---
 
-## 19. 测试覆盖与当前质量基线
+## 19. 测试覆盖与历史质量快照
 
-项目使用 `python -m unittest discover -s tests -p 'test_*.py'` 作为完整回归入口。2026-07-30 当前 0.4.0-rc5 源码基线完整执行共 **674 项测试，0 失败、2 项环境条件跳过**；UI、资料库、更新器、流水线、配置、生产流程与本机网页定向回归均通过，Node `ui/app.js --check` 同时通过。测试数量只对应当前源码快照，测试增加后应以新构建的实际输出更新发布记录，不能复制为未来版本结论。
+项目使用 `python -m unittest discover -s tests -p 'test_*.py'` 作为完整回归入口。下述数量是 2026-07-30 的**历史 0.4.0-rc5 测试快照**：共 **674 项测试，0 失败、2 项环境条件跳过**；UI、资料库、更新器、流水线、配置、生产流程与本机网页定向回归均通过，Node `ui/app.js --check` 同时通过。它不能替代 `0.4.6` 的当前构建验收，测试增加后应以新构建的实际输出更新发布记录。
 
 本轮还在真实 Hub 网页与本机制作服务中验证了两批连续提交：第一批运行时第二批进入独立卷宗并保持等待，制作台立即重置下一批必选字段，调度器按 FIFO 接续；验证数据及本机测试输出随后清理。硬取消测试曾因只等待 PID 文件“存在”而在文件内容尚未写入时偶发读取空值，现改为等待完整 PID 字段；业务进程树取消实现未发现缺陷。输出中的 `synthetic provider failure`、`temporary Hub outage` 和 `forced render failure` 堆栈是测试主动注入并验证“单项失败继续/临时故障可恢复”的预期日志，不是测试失败。
 
@@ -1626,7 +1637,7 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 - 生产记录 Novel → Batch → Task → Attempt 投影、全部筛选维度、员工本人范围和管理员全队范围；重试增加 attempt 并保留旧错误/设备；取消写入操作者/时间/原因并拒绝迟到状态更新；回收站只接收终态、可恢复，永久删除仅清 Hub 元数据且不删除制作电脑文件。
 - queued Job 快照与 FIFO 批次在 Worker/程序重启后的自动恢复、运行中任务的明确 interrupted 状态、应用关闭期间拒绝新入队，以及关闭超时不提前释放租约；
 - FFmpeg/TTS/探测/质检的任务级取消令牌与 Windows 进程树终止、取消后迟到回调守卫；
-- MP4+MP3 同卷 staging、事务 journal、成对原子发布和启动回滚，包括最终文件被占用时保留恢复证据；
+- 三种输出模式的 staging、事务 journal、原子发布和启动回滚：`video_and_mp3`/常规模式只发布 MP4，`audio_only` 只发布 MP3，`reuse_audio` 冻结源旁白引用且只发布新 MP4；包括最终文件被占用时保留恢复证据；
 - Local Worker 与浏览器协议 2 的双向握手，以及旧 Worker/旧网页在消费票据或创建任务前拒绝；
 - Hub 生产媒体边界：MP4、MP3、WAV、ASS 和历史预览不上传，旧共享开关强制迁移为 false；
 
@@ -1643,9 +1654,9 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 
 ---
 
-## 20. 构建与分发合同
+## 20. 历史构建与分发记录
 
-`storyforge/__init__.py` 是应用版本唯一来源，`pyproject.toml` 动态读取它；制作更新包前必须先把它提升为严格更高的 SemVer。2026-07-30 本机构建验收候选物如下，后续重新构建时必须以新生成的校验值替换，不能沿用本表：
+`storyforge/__init__.py` 是应用版本唯一来源，`pyproject.toml` 动态读取它；制作更新包前必须先把它提升为严格更高的 SemVer。以下是 2026-07-30 的**历史 0.4.1 构建验收记录**，不代表当前 `0.4.6` 发布包；后续重新构建时必须以新生成的校验值替换，不能沿用本表：
 
 | 项目 | 当前候选值 |
 |---|---|

@@ -288,9 +288,9 @@ Stream mapping:
         self.assertIn("$acceptanceProcess.WaitForExit", script)
         self.assertIn("$acceptanceProcess.ExitCode", script)
         self.assertIn("$stableReportValidationScript", script)
-        self.assertIn('report.get("stable_release_eligible")', script)
+        self.assertIn("report.get('stable_release_eligible')", script)
         self.assertIn("hashlib.sha256(expected_executable.read_bytes())", script)
-        self.assertIn('scenario.get("actual_command_encoder")', script)
+        self.assertIn("scenario.get('actual_command_encoder')", script)
 
     def test_actual_encoder_comes_from_latest_real_render_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

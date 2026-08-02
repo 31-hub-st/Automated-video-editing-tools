@@ -495,8 +495,108 @@ class MediaSelectionTests(unittest.TestCase):
                     commit_usage=False,
                 )
 
+    def test_lexically_aliased_video_root_still_matches_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            (base / "alias").mkdir()
+            root = base / "videos"
+            category = root / "romance"
+            category.mkdir(parents=True)
+            video = category / "working.mp4"
+            video.touch()
+
+            segments = plan_video_segments(
+                base / "alias" / ".." / "videos",
+                8.0,
+                mood="romance",
+                duration_resolver=lambda _path: 30.0,
+                commit_usage=False,
+            )
+
+            self.assertEqual(
+                {item.path.resolve() for item in segments},
+                {video.resolve()},
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows short paths are Windows-only")
+    def test_windows_short_and_long_roots_share_category_identity(self) -> None:
+        import ctypes
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            library = Path(temporary_directory) / "StoryForge Media Library"
+            video_root = library / "Video Assets"
+            video = video_root / "romance" / "working.mp4"
+            music_root = library / "Music Assets"
+            track = music_root / "romance" / "working.mp3"
+            video.parent.mkdir(parents=True)
+            track.parent.mkdir(parents=True)
+            video.touch()
+            track.touch()
+
+            def short_path(path: Path) -> Path:
+                get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+                required = get_short_path(str(path), None, 0)
+                if not required:
+                    self.skipTest("GetShortPathNameW is unavailable for the test path")
+                buffer = ctypes.create_unicode_buffer(required)
+                written = get_short_path(str(path), buffer, required)
+                if not written or written >= required:
+                    self.skipTest("GetShortPathNameW could not return the test path")
+                return Path(buffer.value)
+
+            short_video_root = short_path(video_root)
+            short_music_root = short_path(music_root)
+            if (
+                os.path.normcase(str(short_video_root))
+                == os.path.normcase(str(video_root))
+                or os.path.normcase(str(short_music_root))
+                == os.path.normcase(str(music_root))
+            ):
+                self.skipTest("8.3 short names are disabled on this volume")
+
+            with self.subTest(media_type="video"):
+                segments = plan_video_segments(
+                    short_video_root,
+                    8.0,
+                    mood="romance",
+                    duration_resolver=lambda _path: 30.0,
+                    commit_usage=False,
+                )
+                self.assertEqual(
+                    {item.path.resolve() for item in segments},
+                    {video.resolve()},
+                )
+
+            with self.subTest(media_type="music"):
+                music = select_music_asset(
+                    short_music_root,
+                    "romance",
+                    20.0,
+                    duration_resolver=lambda _path: 60.0,
+                )
+                self.assertEqual(music.path.resolve(), track.resolve())
+
 
 class MusicSelectionTests(unittest.TestCase):
+    def test_lexically_aliased_root_still_matches_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            (base / "alias").mkdir()
+            root = base / "music"
+            category = root / "romance"
+            category.mkdir(parents=True)
+            track = category / "working.mp3"
+            track.touch()
+
+            plan = select_music_asset(
+                base / "alias" / ".." / "music",
+                "romance",
+                20.0,
+                duration_resolver=lambda _path: 60.0,
+            )
+
+            self.assertEqual(plan.path.resolve(), track.resolve())
+
     def test_least_used_track_wins_before_duration_then_path_break_ties(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

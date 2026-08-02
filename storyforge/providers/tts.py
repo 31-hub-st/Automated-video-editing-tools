@@ -968,8 +968,13 @@ def _maybe_prune_tts_cache(cache_path: Path) -> None:
         cache_key = os.path.normcase(str(cache_root.resolve()))
         now = time.monotonic()
         with _TTS_CACHE_PRUNE_LOCK:
-            last_pruned = _TTS_CACHE_LAST_PRUNED.get(cache_key, 0.0)
-            if now - last_pruned < _TTS_CACHE_PRUNE_INTERVAL_SECONDS:
+            last_pruned = _TTS_CACHE_LAST_PRUNED.get(cache_key)
+            # ``time.monotonic()`` may still be below the interval on a freshly
+            # booted machine.  A missing entry means "never pruned", not time 0.
+            if (
+                last_pruned is not None
+                and now - last_pruned < _TTS_CACHE_PRUNE_INTERVAL_SECONDS
+            ):
                 return
             _TTS_CACHE_LAST_PRUNED[cache_key] = now
             # A long-running Hub can see removable drives and per-user paths.

@@ -1280,7 +1280,10 @@ def _category_media_files(
     users can keep separate source packs below one library root.
     """
 
-    root = Path(folder)
+    # ``discover_files`` returns canonical absolute paths.  Resolve the root
+    # with the same semantics before testing ancestry so that a Windows 8.3
+    # alias (for example ``RUNNER~1``) and its long form identify one library.
+    root = Path(folder).expanduser().resolve(strict=False)
     if not root.is_dir():
         raise MediaError(f"Media folder does not exist: {root}")
     category = canonical_mood(mood)
@@ -1301,7 +1304,10 @@ def _category_media_files(
 
 
 def _music_candidates(music_folder: PathLike, mood: str) -> tuple[str, list[Path]]:
-    root = Path(music_folder)
+    # Keep ancestry checks in the same canonical path space as the persistent
+    # media index.  Without this, Windows short-path aliases can make every
+    # correctly categorised track look as though it lives outside the root.
+    root = Path(music_folder).expanduser().resolve(strict=False)
     if not root.is_dir():
         raise MediaError(f"Music folder does not exist: {root}")
     category = canonical_mood(mood)

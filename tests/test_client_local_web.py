@@ -411,6 +411,7 @@ class ClientLocalWebTests(unittest.TestCase):
             self.client_api._state.settings.providers.tts_provider, "edge_tts"
         )
 
+        self.client_api._queue.set_admission_check(lambda _job: True)
         with patch.object(
             self.client_api._library, "build_render_job_plan", side_effect=build_jobs
         ), patch.object(self.client_api, "_validate_provider_readiness"):
@@ -432,6 +433,12 @@ class ClientLocalWebTests(unittest.TestCase):
             self.assertEqual(self.host_api._queue.list_jobs(), [])
             for key, expected in local_paths.items():
                 self.assertEqual(captured[key], expected)
+
+            worker = self.client_api._queue._worker
+            self.assertIsNotNone(worker)
+            assert worker is not None
+            worker.join(timeout=5.0)
+            self.assertFalse(worker.is_alive(), "local queue worker did not stop")
 
             job = self.client_api._queue.get_job(queued["data"]["jobs"][0]["id"])
             self.assertIsNotNone(job)

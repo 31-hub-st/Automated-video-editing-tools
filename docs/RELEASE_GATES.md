@@ -72,7 +72,7 @@ Release 构建依次生成并核对：
 ```powershell
 python scripts/package_smoke.py `
   --package-root 'D:\StoryForgeBuildTemp\release-dist\StoryForge Studio' `
-  --expected-version '0.4.7' `
+  --expected-version '0.4.8' `
   --report 'D:\StoryForgeBuildTemp\reports\package-smoke.json' `
   --require-stable-acceptance
 ```

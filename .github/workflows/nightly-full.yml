@@ -32,6 +32,14 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Use canonical Windows test temp directory
+        shell: pwsh
+        run: |
+          $testTemp = Join-Path $env:RUNNER_TEMP 'storyforge-tests'
+          New-Item -ItemType Directory -Force $testTemp | Out-Null
+          "TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Install runtime dependencies
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r requirements.txt

@@ -684,6 +684,33 @@ class _FakeUpdateClient:
 
 
 class UpdateManagerTests(unittest.TestCase):
+    def test_same_version_manifest_is_not_downloaded_as_an_update(self) -> None:
+        """A republished build needs a higher SemVer to reach old clients."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+            manifest = repository.publish(make_update_package(root), "0.2.0")
+            client = _FakeUpdateClient(
+                manifest, repository.resolve_package(manifest)
+            )
+            manager = UpdateManager(
+                current_version="0.2.0",
+                data_dir=root / "client",
+                client_getter=lambda: client,
+                mode_getter=lambda: "client",
+                enabled_getter=lambda: True,
+                auto_download_getter=lambda: True,
+                interval_minutes_getter=lambda: 1,
+                rendering_busy_getter=lambda: False,
+            )
+
+            status = manager.check_now(auto_download=True)
+
+            self.assertEqual(status["state"], "up_to_date")
+            self.assertEqual(client.download_calls, 0)
+            self.assertFalse(manager.pending_path.exists())
+
     def test_apply_script_commits_only_after_startup_health_and_keeps_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

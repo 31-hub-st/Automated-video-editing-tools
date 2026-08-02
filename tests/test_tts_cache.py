@@ -139,6 +139,27 @@ class SentenceTTSCacheTests(unittest.TestCase):
             self.assertEqual(cache_path.read_bytes(), b"cached-audio")
             prune.assert_called_once_with(root.resolve())
 
+    def test_first_prune_runs_below_interval_then_throttles(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache_path = root / "storyforge-tts-wav-v1" / "00" / "cached.wav"
+            with (
+                patch.dict(
+                    "storyforge.providers.tts._TTS_CACHE_LAST_PRUNED",
+                    {},
+                    clear=True,
+                ),
+                patch(
+                    "storyforge.providers.tts.time.monotonic",
+                    side_effect=(1.0, 2.0),
+                ),
+                patch("storyforge.providers.tts.prune_tts_cache") as prune,
+            ):
+                CountingProvider._write_cache(cache_path, b"first")
+                CountingProvider._write_cache(cache_path, b"second")
+
+            prune.assert_called_once_with(root.resolve())
+
     def test_identical_sentence_is_reused_across_providers_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

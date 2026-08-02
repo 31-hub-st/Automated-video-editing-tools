@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import package_smoke, run_test_gate
 from scripts.build_update_package import write_release_validation
@@ -234,6 +234,22 @@ class PackageSmokeTests(unittest.TestCase):
 
 
 class TestSummaryTests(unittest.TestCase):
+    def test_test_gate_reconfigures_parent_console_for_utf8_diagnostics(self) -> None:
+        stdout = Mock()
+        stderr = Mock()
+
+        with patch.object(run_test_gate.sys, "stdout", stdout), patch.object(
+            run_test_gate.sys, "stderr", stderr
+        ):
+            run_test_gate._configure_console_encoding()
+
+        stdout.reconfigure.assert_called_once_with(
+            encoding="utf-8", errors="replace"
+        )
+        stderr.reconfigure.assert_called_once_with(
+            encoding="utf-8", errors="replace"
+        )
+
     def test_test_gate_forces_utf8_across_windows_console_boundary(self) -> None:
         environment = run_test_gate._subprocess_environment({"PATH": "test"})
 

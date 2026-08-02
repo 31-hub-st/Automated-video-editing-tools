@@ -17,6 +17,15 @@ RAN_PATTERN = re.compile(r"Ran\s+(?P<count>\d+)\s+tests?\s+in\s+(?P<seconds>[\d.
 COUNT_PATTERN = re.compile(r"(?P<name>failures|errors|skipped)=(?P<count>\d+)")
 
 
+def _configure_console_encoding() -> None:
+    """Keep Windows CI diagnostics printable when jobs contain non-ASCII text."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def _subprocess_environment(base: dict[str, str] | None = None) -> dict[str, str]:
     environment = dict(os.environ if base is None else base)
     environment["PYTHONUTF8"] = "1"
@@ -91,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_console_encoding()
     args = build_parser().parse_args(argv)
     unittest_args = list(args.unittest_args)
     if unittest_args and unittest_args[0] == "--":

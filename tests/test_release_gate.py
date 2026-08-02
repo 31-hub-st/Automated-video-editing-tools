@@ -28,6 +28,18 @@ class ReleaseBuildContractTests(unittest.TestCase):
             script.index("scripts\\package_smoke.py"),
         )
 
+    def test_stable_report_validator_survives_windows_powershell_quoting(self) -> None:
+        script = (ROOT / "scripts" / "build_exe.ps1").read_text(encoding="utf-8")
+        start = script.index("$stableReportValidationScript = @'")
+        end = script.index("\n'@", start)
+        validator = script[start:end]
+
+        self.assertNotIn(
+            '"',
+            validator,
+            "python -c code passed through Windows PowerShell must use single quotes",
+        )
+
     def test_workflows_keep_fast_nightly_and_release_gates_separate(self) -> None:
         workflows = ROOT / ".github" / "workflows"
         fast = (workflows / "fast-pr.yml").read_text(encoding="utf-8")

@@ -493,38 +493,40 @@ report_path = Path(sys.argv[1]).resolve(strict=True)
 expected_version = sys.argv[2]
 expected_executable = Path(sys.argv[3]).resolve(strict=True)
 expected_encoder = sys.argv[4]
-report = json.loads(report_path.read_text(encoding="utf-8"))
+report = json.loads(report_path.read_text(encoding='utf-8'))
 
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
 
-require(report.get("ok") is True and report.get("stable_release_eligible") is True,
-        f"Stable acceptance did not approve this package: {report_path}")
-require(str(report.get("storyforge_version")) == expected_version,
-        f"Stable acceptance version is {report.get('storyforge_version')}, expected {expected_version}.")
-package = report.get("package") or {}
-release_gate = report.get("release_gate") or {}
-require(report.get("package_artifact_bound") is True and package.get("kind") == "explicit_artifact",
-        "Stable acceptance is not bound to an explicit package artifact.")
-require(report.get("code_under_test") == "frozen_executable_pipeline_runner"
-        and release_gate.get("frozen_executable_pipeline_executed") is True,
-        "Stable acceptance did not execute the frozen StoryForge pipeline.")
-require(package.get("runtime_entrypoint_matches") is True,
-        "Stable acceptance executable does not match the running frozen entrypoint.")
-reported_path = Path(str(package.get("path") or "")).resolve(strict=True)
+require(report.get('ok') is True and report.get('stable_release_eligible') is True,
+        f'Stable acceptance did not approve this package: {report_path}')
+actual_version = report.get('storyforge_version')
+require(str(actual_version) == expected_version,
+        f'Stable acceptance version is {actual_version}, expected {expected_version}.')
+package = report.get('package') or {}
+release_gate = report.get('release_gate') or {}
+require(report.get('package_artifact_bound') is True and package.get('kind') == 'explicit_artifact',
+        'Stable acceptance is not bound to an explicit package artifact.')
+require(report.get('code_under_test') == 'frozen_executable_pipeline_runner'
+        and release_gate.get('frozen_executable_pipeline_executed') is True,
+        'Stable acceptance did not execute the frozen StoryForge pipeline.')
+require(package.get('runtime_entrypoint_matches') is True,
+        'Stable acceptance executable does not match the running frozen entrypoint.')
+reported_path = Path(str(package.get('path') or '')).resolve(strict=True)
 require(os.path.normcase(str(reported_path)) == os.path.normcase(str(expected_executable)),
-        f"Stable acceptance belongs to a different package: {reported_path}")
+        f'Stable acceptance belongs to a different package: {reported_path}')
 digest = hashlib.sha256(expected_executable.read_bytes()).hexdigest()
-require(package.get("sha256") == digest,
-        "Stable acceptance package SHA-256 does not match the executable being released.")
-require(int(package.get("bytes") or -1) == expected_executable.stat().st_size,
-        "Stable acceptance package size does not match the executable being released.")
-scenarios = report.get("scenarios") or []
-require(bool(scenarios), "Stable acceptance report contains no scenarios.")
+require(package.get('sha256') == digest,
+        'Stable acceptance package SHA-256 does not match the executable being released.')
+require(int(package.get('bytes') or -1) == expected_executable.stat().st_size,
+        'Stable acceptance package size does not match the executable being released.')
+scenarios = report.get('scenarios') or []
+require(bool(scenarios), 'Stable acceptance report contains no scenarios.')
 for scenario in scenarios:
-    require(scenario.get("ok") is True and scenario.get("actual_command_encoder") == expected_encoder,
-            f"Stable scenario did not prove encoder {expected_encoder} from its real FFmpeg command: {scenario.get('name')}")
+    scenario_name = scenario.get('name')
+    require(scenario.get('ok') is True and scenario.get('actual_command_encoder') == expected_encoder,
+            f'Stable scenario did not prove encoder {expected_encoder} from its real FFmpeg command: {scenario_name}')
 '@
         Invoke-Checked -Command $venvPython -CommandArguments @(
             '-c', $stableReportValidationScript, $acceptanceReportPath,

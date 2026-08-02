@@ -22,6 +22,7 @@ from storyforge.worker import (
     ensure_local_worker_autostart,
     local_worker_release_state,
     pause_local_worker_autostart_for_desktop,
+    _disk_status,
     _resource_status,
 )
 from storyforge.web import ClientLocalWebServer
@@ -599,6 +600,15 @@ class LocalWorkerGatewayTests(unittest.TestCase):
         self.assertTrue(health["rendering_busy"])
         self.assertFalse(health["resources"]["admission_allowed"])
         self.assertEqual(health["resources"]["reason"], "low_memory")
+
+    def test_disk_status_uses_backing_volume_before_data_folder_exists(self) -> None:
+        missing_data_dir = self.root / "first-run" / "StoryForgeStudio"
+
+        status = _disk_status(missing_data_dir)
+
+        self.assertTrue(status["observable"])
+        self.assertGreater(status["total_bytes"], 0)
+        self.assertFalse(missing_data_dir.exists())
 
     def test_low_output_disk_marks_worker_degraded_before_new_work(self) -> None:
         healthy_memory = {

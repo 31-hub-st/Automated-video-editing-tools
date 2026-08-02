@@ -48,7 +48,15 @@ _TERMINAL_WORKER_JOB_STATUSES = frozenset(
 
 def _disk_status(path: str | Path) -> dict[str, Any]:
     try:
-        disk = shutil.disk_usage(Path(path))
+        candidate = Path(path).expanduser().resolve(strict=False)
+        # A first-run data directory may not exist yet.  Disk admission is
+        # about the backing volume, so probe its nearest existing directory
+        # instead of treating a normal not-yet-created folder as a detached
+        # or unreadable disk.
+        observable_directory = _nearest_existing_directory(candidate)
+        if observable_directory is None:
+            raise FileNotFoundError(str(candidate))
+        disk = shutil.disk_usage(observable_directory)
         total = max(0, int(disk.total))
         free = max(0, int(disk.free))
         low = bool(

@@ -22,6 +22,7 @@ from storyforge.worker import (
     ensure_local_worker_autostart,
     local_worker_release_state,
     pause_local_worker_autostart_for_desktop,
+    _resource_status,
 )
 from storyforge.web import ClientLocalWebServer
 from storyforge.api import StoryForgeApi
@@ -71,6 +72,8 @@ class LocalWorkerProfileTests(unittest.TestCase):
         )
 
     def test_worker_release_state_requires_matching_version_and_protocol(self) -> None:
+        self.assertEqual(LOCAL_WORKER_PROTOCOL_VERSION, 3)
+        self.assertEqual(LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION, 3)
         current = {
             "version": "0.4.1",
             "protocol_version": LOCAL_WORKER_PROTOCOL_VERSION,
@@ -534,6 +537,152 @@ class LocalWorkerGatewayTests(unittest.TestCase):
         self.assertEqual(health["health_state"], "degraded")
         self.assertTrue(health["queue_busy"])
         self.assertFalse(health["queue"]["observable"])
+
+    def test_health_uses_unified_queue_governance_state_compatibly(self) -> None:
+        legacy_states = {
+            "paused": "busy",
+            "draining": "busy",
+            "cooling": "busy",
+            "fault": "degraded",
+        }
+        for state in ("paused", "draining", "cooling", "fault"):
+            with self.subTest(state=state):
+                self.api._queue = SimpleNamespace(
+                    is_rendering_busy=lambda: state == "draining",
+                    list_jobs=lambda: (
+                        [{"status": "rendering"}]
+                        if state == "draining"
+                        else [{"status": "queued"}]
+                    ),
+                    governance_status=lambda: {
+                        "state": state,
+                        "accepting_new_work": False,
+                        "paused": state == "paused",
+                        "draining": state == "draining",
+                        "drained": False,
+                        "cooling": state == "cooling",
+                        "degraded": False,
+                        "fault": state == "fault",
+                        "retry_in_seconds": 12.0 if state == "cooling" else 0.0,
+                        "reason": state,
+                        "heavy_task_limit": 1,
+                        "active_heavy_tasks": int(state == "draining"),
+                    },
+                )
+
+                health = self.gateway.health()
+
+                self.assertEqual(health["state"], state)
+                self.assertEqual(health["health_state"], legacy_states[state])
+                self.assertEqual(health["governance"]["state"], state)
+                self.assertEqual(health["governance"]["heavy_task_limit"], 1)
+
+    def test_low_memory_marks_worker_degraded_without_hiding_active_work(self) -> None:
+        self.api._queue = SimpleNamespace(
+            is_rendering_busy=lambda: True,
+            list_jobs=lambda: [
+                {"id": "job-1", "status": "rendering", "progress": 0.5}
+            ],
+        )
+        low_memory = {
+            "observable": True,
+            "total_bytes": 16 * 1024**3,
+            "available_bytes": 512 * 1024**2,
+            "low": True,
+        }
+
+        with patch("storyforge.worker._memory_status", return_value=low_memory):
+            health = self.gateway.health()
+
+        self.assertEqual(health["state"], "degraded")
+        self.assertEqual(health["health_state"], "degraded")
+        self.assertTrue(health["rendering_busy"])
+        self.assertFalse(health["resources"]["admission_allowed"])
+        self.assertEqual(health["resources"]["reason"], "low_memory")
+
+    def test_low_output_disk_marks_worker_degraded_before_new_work(self) -> None:
+        healthy_memory = {
+            "observable": True,
+            "total_bytes": 16 * 1024**3,
+            "available_bytes": 8 * 1024**3,
+            "low": False,
+        }
+        healthy_disk = {
+            "observable": True,
+            "total_bytes": 100 * 1024**3,
+            "free_bytes": 50 * 1024**3,
+            "low_space": False,
+        }
+        low_output_disk = {
+            "observable": True,
+            "total_bytes": 100 * 1024**3,
+            "free_bytes": 2 * 1024**3,
+            "low_space": True,
+        }
+
+        with (
+            patch("storyforge.worker._memory_status", return_value=healthy_memory),
+            patch(
+                "storyforge.worker._disk_status",
+                side_effect=[healthy_disk, low_output_disk],
+            ),
+        ):
+            health = self.gateway.health()
+
+        self.assertEqual(health["state"], "degraded")
+        self.assertFalse(health["accepting_new_work"])
+        self.assertEqual(health["resources"]["reason"], "low_output_disk")
+
+    def test_resource_gate_creates_missing_output_folder_on_available_disk(self) -> None:
+        output = self.root / "ordinary-output" / "nested"
+        healthy_memory = {
+            "observable": True,
+            "total_bytes": 16 * 1024**3,
+            "available_bytes": 8 * 1024**3,
+            "low": False,
+        }
+        healthy_disk = {
+            "observable": True,
+            "total_bytes": 100 * 1024**3,
+            "free_bytes": 50 * 1024**3,
+            "low_space": False,
+        }
+
+        with (
+            patch("storyforge.worker._memory_status", return_value=healthy_memory),
+            patch("storyforge.worker._disk_status", return_value=healthy_disk),
+        ):
+            resources = _resource_status(self.root, output)
+
+        self.assertTrue(output.is_dir())
+        self.assertTrue(resources["admission_allowed"])
+        self.assertFalse(resources["fault"])
+
+    def test_missing_output_volume_is_a_fault_instead_of_endless_degraded_wait(self) -> None:
+        healthy_memory = {
+            "observable": True,
+            "total_bytes": 16 * 1024**3,
+            "available_bytes": 8 * 1024**3,
+            "low": False,
+        }
+        healthy_disk = {
+            "observable": True,
+            "total_bytes": 100 * 1024**3,
+            "free_bytes": 50 * 1024**3,
+            "low_space": False,
+        }
+
+        with (
+            patch("storyforge.worker._memory_status", return_value=healthy_memory),
+            patch("storyforge.worker._disk_status", return_value=healthy_disk),
+            patch("storyforge.worker._nearest_existing_directory", return_value=None),
+        ):
+            resources = _resource_status(self.root, self.root / "detached" / "output")
+
+        self.assertFalse(resources["admission_allowed"])
+        self.assertTrue(resources["fault"])
+        self.assertEqual(resources["reason"], "output_volume_unavailable")
+        self.assertIn("输出", resources["message"])
 
     def test_session_is_origin_bound_and_rpc_allowlisted(self) -> None:
         connected = self.gateway.connect(

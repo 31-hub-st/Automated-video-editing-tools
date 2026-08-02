@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from storyforge.component_updater import (
     COMPONENT_MANIFEST_FILENAME,
@@ -270,6 +272,59 @@ class ComponentUpdaterTests(unittest.TestCase):
                 )
             )
             self.assertIsNone(state["previous"])
+
+    def test_reinstall_same_package_repairs_damaged_active_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            components = root / "components"
+            artifact = self._build(root, "1.0.0", b"version one")
+            updater = ComponentUpdater(components, app_version="0.4.5")
+            installed = updater.install(artifact.path)
+            state_path = components / "kokoro.language.ja" / "state.json"
+            state_before = state_path.read_bytes()
+            installed.resolve("models/voice.bin").write_bytes(b"version bad")
+
+            repaired = updater.install(
+                artifact.path, expected_package_sha256=artifact.sha256
+            )
+
+            self.assertEqual(repaired.root, installed.root)
+            self.assertEqual(
+                repaired.resolve("models/voice.bin").read_bytes(), b"version one"
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_failed_repair_restore_keeps_the_only_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            release_dir.mkdir()
+            (release_dir / "value.bin").write_bytes(b"damaged original")
+            staged = root / "staged"
+            staged.mkdir()
+            (staged / "value.bin").write_bytes(b"verified repair")
+            real_replace = os.replace
+
+            def fail_repair_and_restore(source: object, destination: object) -> None:
+                source_path = Path(source)
+                if source_path == staged or source_path.name.startswith(
+                    ".repair-backup-"
+                ):
+                    raise OSError("injected replace failure")
+                real_replace(source, destination)
+
+            with patch(
+                "storyforge.component_updater.os.replace",
+                side_effect=fail_repair_and_restore,
+            ):
+                with self.assertRaises(OSError):
+                    ComponentUpdater._replace_damaged_release(staged, release_dir)
+
+            backups = list(root.glob(".repair-backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                (backups[0] / "value.bin").read_bytes(), b"damaged original"
+            )
 
     def test_update_and_one_step_rollback_atomically_swap_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

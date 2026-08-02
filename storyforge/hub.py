@@ -48,6 +48,18 @@ from .component_updater import (
 )
 from .providers.base import ProviderConfig, ProviderError
 from .providers.text import TextRequest, TextResult, create_text_provider
+from .rpc_contract import (
+    ACCOUNT_PASSWORD_VERIFY_RPC_METHOD,
+    CATALOG_READ_METHODS,
+    CATALOG_RPC_METHODS,
+    CATALOG_WRITE_METHODS,
+    DEVICE_ADMIN_RPC_METHODS,
+    DEVICE_CLIENT_RPC_METHODS,
+    DEVICE_SERVICE_RPC_METHODS,
+    HUB_RPC_PERMISSION_ANY,
+    LOCAL_WORKER_TICKET_RPC_METHOD,
+    TEXT_POLISH_RPC_METHOD,
+)
 from .updater import (
     UpdateRepository,
     sign_update_manifest,
@@ -59,127 +71,33 @@ from .updater import (
 HUB_PROTOCOL_VERSION = 1
 HUB_MINIMUM_CLIENT_PROTOCOL_VERSION = 1
 HUB_MINIMUM_SERVER_PROTOCOL_VERSION = 1
-_MINIMUM_RENDER_CLIENT_CORE = (0, 4, 0)
-_MINIMUM_RENDER_CLIENT_RC = 7
-MINIMUM_RENDER_CLIENT_VERSION = (
-    ".".join(str(item) for item in _MINIMUM_RENDER_CLIENT_CORE)
-    + f"-rc{_MINIMUM_RENDER_CLIENT_RC}"
+_MINIMUM_RENDER_CLIENT_CORE = (0, 4, 7)
+_MINIMUM_RENDER_CLIENT_RC: int | None = None
+MINIMUM_RENDER_CLIENT_VERSION = ".".join(
+    str(item) for item in _MINIMUM_RENDER_CLIENT_CORE
 )
 _RENDER_CLIENT_VERSION_PATTERN = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\."
     r"(?P<patch>0|[1-9]\d*)(?:-rc(?P<rc>0|[1-9]\d*))?$",
     re.IGNORECASE,
 )
-TEXT_POLISH_RPC_METHOD = "text_polish"
-ACCOUNT_PASSWORD_VERIFY_RPC_METHOD = "account_password_verify"
-LOCAL_WORKER_TICKET_RPC_METHOD = "local_worker_ticket_redeem"
 LOCAL_WORKER_TICKET_TTL_SECONDS = 90
-DEVICE_ADMIN_RPC_METHODS = frozenset(
-    {
-        "devices_list",
-        "device_get",
-        "device_acknowledge",
-        "device_rename",
-        "device_set_active",
-        "device_delete",
-        "device_config_create",
-        "device_config_list",
-        "device_config_get",
-    }
-)
-DEVICE_CLIENT_RPC_METHODS = frozenset(
-    {
-        "device_session",
-        "device_heartbeat",
-        "device_desired_config",
-        "device_config_ack",
-        ACCOUNT_PASSWORD_VERIFY_RPC_METHOD,
-        LOCAL_WORKER_TICKET_RPC_METHOD,
-    }
-)
-DEVICE_SERVICE_RPC_METHODS = DEVICE_ADMIN_RPC_METHODS | DEVICE_CLIENT_RPC_METHODS
 DEVICE_CAPABILITY_FIELDS = frozenset(
-    {"device_config_sync", "local_render", "local_tts", "local_subtitles"}
+    {
+        "device_config_sync",
+        "local_render",
+        "local_tts",
+        "local_subtitles",
+        "worker_state",
+        "worker_reason",
+        "worker_message",
+    }
 )
 MAX_TEXT_POLISH_CHARACTERS = 200_000
 MAX_TEXT_POLISH_CONCURRENCY = 2
 MAX_DEVICE_ENROLL_BYTES = 32 * 1024
 MAX_DEVICE_ENROLL_ATTEMPTS_PER_IP_MINUTE = 20
 MAX_DEVICE_ENROLL_FAILURE_ENTRIES = 2048
-
-CATALOG_READ_METHODS = frozenset(
-    {
-        "bootstrap_summary",
-        "list_novels",
-        "get_novel",
-        "list_platforms",
-        "list_promo_codes",
-        "list_publishing_accounts",
-        "list_users",
-        "get_effective_permissions",
-        "get_draft",
-        "list_drafts",
-        "find_duplicate_draft_configuration",
-        "last_successful_voice",
-        "get_record",
-        "get_record_by_job_id",
-        "list_records",
-        "list_record_groups",
-        "find_active_draft_gate",
-        "list_reconciliation_records",
-        "get_production_batch_summaries",
-        "get_archived_job",
-        "get_archived_batch",
-        "list_archived_jobs",
-        "list_media_usage",
-        "list_audit_events",
-        "list_production_presets",
-    }
-)
-
-CATALOG_WRITE_METHODS = frozenset(
-    {
-        "import_novel",
-        "save_novel",
-        "delete_novel",
-        "save_novel_classification",
-        "save_novel_voice_state",
-        "save_episode",
-        "save_platform",
-        "delete_platform",
-        "save_novel_binding",
-        "add_promo_code",
-        "update_promo_code",
-        "delete_promo_code",
-        "save_publishing_account",
-        "delete_publishing_account",
-        "save_user",
-        "delete_user",
-        "set_user_permission",
-        "save_draft",
-        "save_production_record",
-        "save_production_records_bulk",
-        "begin_record_retry",
-        "request_record_cancellation",
-        "trash_production_records",
-        "restore_trashed_records",
-        "delete_trashed_records",
-        "archive_job_snapshot",
-        "restore_job_snapshot",
-        "archive_batch_snapshots",
-        "restore_batch_snapshots",
-        "claim_record_lease",
-        "heartbeat_record_lease",
-        "release_record_lease",
-        "bind_lease_gate_batch",
-        "add_artifact",
-        "record_media_usage",
-        "save_production_preset",
-        "delete_production_preset",
-    }
-)
-
-CATALOG_RPC_METHODS = CATALOG_READ_METHODS | CATALOG_WRITE_METHODS
 
 # Service RPCs deliberately stay outside CATALOG_RPC_METHODS.  In particular,
 # HubCatalogProxy must continue to expose only repository-shaped operations.
@@ -235,71 +153,7 @@ UPLOAD_SHA256_HEADER = "X-Content-SHA256"
 # Permissions are evaluated from CatalogRepository.get_effective_permissions
 # for every RPC call.  Tuples mean "any one of" so an administrator can grant
 # narrowly-scoped access without silently giving a producer a broader role.
-_RPC_PERMISSION_ANY: dict[str, tuple[str, ...]] = {
-    "list_novels": ("library.view",),
-    "get_novel": ("library.view",),
-    "import_novel": ("library.edit",),
-    "save_novel": ("library.edit",),
-    "delete_novel": ("library.edit",),
-    "save_novel_classification": ("text.assist", "library.edit"),
-    "save_novel_voice_state": ("voice.preview", "library.edit"),
-    "save_episode": ("library.edit",),
-    "list_platforms": ("library.view", "platforms.manage"),
-    "save_platform": ("platforms.manage",),
-    "delete_platform": ("platforms.manage",),
-    "save_novel_binding": ("platforms.manage",),
-    "list_promo_codes": ("promo_codes.use", "promo_codes.manage"),
-    "add_promo_code": ("promo_codes.manage",),
-    "update_promo_code": ("promo_codes.manage",),
-    "delete_promo_code": ("promo_codes.manage",),
-    "list_publishing_accounts": (
-        "drafts.create",
-        "publishing_accounts.manage",
-    ),
-    "save_publishing_account": ("publishing_accounts.manage",),
-    "delete_publishing_account": ("publishing_accounts.manage",),
-    "list_users": ("users.manage",),
-    "save_user": ("users.manage",),
-    "delete_user": ("users.manage",),
-    "set_user_permission": ("permissions.manage",),
-    "get_draft": ("drafts.create", "drafts.manage_all"),
-    "list_drafts": ("drafts.create", "drafts.manage_all"),
-    "find_duplicate_draft_configuration": ("drafts.create", "drafts.manage_all"),
-    "last_successful_voice": ("library.view", "drafts.create", "voice.preview"),
-    "save_draft": ("drafts.create", "drafts.manage_all"),
-    "get_record": ("records.view_own", "records.view_all"),
-    "get_record_by_job_id": ("records.view_own", "records.view_all"),
-    "list_records": ("records.view_own", "records.view_all"),
-    "list_record_groups": ("records.view_own", "records.view_all"),
-    "find_active_draft_gate": ("drafts.create", "hub.manage"),
-    "list_reconciliation_records": ("production.execute", "hub.manage"),
-    "get_production_batch_summaries": ("records.view_own", "records.view_all"),
-    "get_archived_job": ("records.view_own", "records.view_all"),
-    "get_archived_batch": ("records.view_own", "records.view_all"),
-    "list_archived_jobs": ("records.view_own", "records.view_all"),
-    "save_production_record": ("drafts.create", "hub.manage"),
-    "save_production_records_bulk": ("drafts.create", "hub.manage"),
-    "begin_record_retry": ("jobs.retry_own", "jobs.retry_all"),
-    "request_record_cancellation": ("jobs.retry_own", "jobs.retry_all"),
-    "trash_production_records": ("records.view_all", "hub.manage"),
-    "restore_trashed_records": ("records.view_all", "hub.manage"),
-    "delete_trashed_records": ("records.view_all", "hub.manage"),
-    "archive_job_snapshot": ("jobs.retry_own", "jobs.retry_all"),
-    "restore_job_snapshot": ("jobs.retry_own", "jobs.retry_all"),
-    "archive_batch_snapshots": ("jobs.retry_own", "jobs.retry_all"),
-    "restore_batch_snapshots": ("jobs.retry_own", "jobs.retry_all"),
-    "claim_record_lease": ("drafts.create", "hub.manage"),
-    "heartbeat_record_lease": ("drafts.create", "hub.manage"),
-    "release_record_lease": ("drafts.create", "hub.manage"),
-    "bind_lease_gate_batch": ("drafts.create", "hub.manage"),
-    "add_artifact": ("drafts.create", "hub.manage"),
-    "record_media_usage": ("drafts.create", "hub.manage"),
-    "list_media_usage": ("library.view", "hub.manage"),
-    "list_audit_events": ("users.manage", "hub.manage"),
-    "list_production_presets": ("drafts.create", "hub.manage"),
-    "save_production_preset": ("presets.manage_own", "hub.manage"),
-    "delete_production_preset": ("presets.manage_own", "hub.manage"),
-}
+_RPC_PERMISSION_ANY = HUB_RPC_PERMISSION_ANY
 
 _RECORD_LEASE_RPC_METHODS = frozenset(
     {
@@ -341,6 +195,8 @@ def _render_client_version_is_supported(value: Any) -> bool:
     if core != _MINIMUM_RENDER_CLIENT_CORE:
         return core > _MINIMUM_RENDER_CLIENT_CORE
     rc_value = matched.group("rc")
+    if _MINIMUM_RENDER_CLIENT_RC is None:
+        return rc_value is None
     return rc_value is None or int(rc_value) >= _MINIMUM_RENDER_CLIENT_RC
 
 
@@ -463,6 +319,38 @@ def _device_capabilities(value: Any) -> dict[str, Any]:
             if not isinstance(value[name], bool):
                 raise ValueError(f"{name} must be true or false")
             result[name] = value[name]
+    if "worker_state" in value:
+        worker_state = _bounded_text(
+            value["worker_state"], "worker_state", 32
+        ).strip().casefold()
+        if worker_state not in {
+            "ready",
+            "busy",
+            "paused",
+            "draining",
+            "cooling",
+            "degraded",
+            "fault",
+        }:
+            raise ValueError("worker_state is unsupported")
+        result["worker_state"] = worker_state
+    if "worker_reason" in value:
+        worker_reason = _bounded_text(
+            value["worker_reason"], "worker_reason", 64
+        ).strip().casefold()
+        if worker_reason and not all(
+            character.isascii()
+            and (character.isalnum() or character in {"_", "-"})
+            for character in worker_reason
+        ):
+            raise ValueError("worker_reason contains unsupported characters")
+        result["worker_reason"] = worker_reason
+    if "worker_message" in value:
+        result["worker_message"] = " ".join(
+            _bounded_text(
+                value["worker_message"], "worker_message", 240
+            ).split()
+        )
     return result
 
 
@@ -2890,7 +2778,11 @@ class HubServer:
             )
         arguments = dict(params)
         access = self._authorize_rpc(method, arguments, actor_user_id)
-        if method in _DEVICE_BOUND_LEASE_RPC_METHODS:
+        atomic_retry_claim = (
+            method == "begin_record_retry"
+            and bool(str(arguments.get("device_id") or "").strip())
+        )
+        if method in _DEVICE_BOUND_LEASE_RPC_METHODS or atomic_retry_claim:
             if auth.device_id:
                 supplied_device = str(arguments.get("device_id") or "").strip()
                 if supplied_device and supplied_device != auth.device_id:
@@ -2908,7 +2800,7 @@ class HubServer:
                     "device_identity_required",
                     "production leases require an enrolled workstation",
                 )
-        if method == "claim_record_lease" and auth.device_id:
+        if (method == "claim_record_lease" or atomic_retry_claim) and auth.device_id:
             # Only gate new work. Older clients may still heartbeat or release
             # an already-running lease, so updating never strands a job.
             device = self.catalog.get_hub_device(auth.device_id)

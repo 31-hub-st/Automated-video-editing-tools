@@ -26,6 +26,7 @@ from storyforge.hub import (
     HubServer,
     HubServerStateError,
     HubTextProvider,
+    _device_capabilities,
     _render_client_version_is_supported,
 )
 from storyforge.library_service import LibraryService
@@ -85,6 +86,31 @@ class HubTestCase(unittest.TestCase):
                 "actor_user_id": "forged-user",
             },
         )
+
+
+class DeviceCapabilityContractTests(unittest.TestCase):
+    def test_worker_fault_reason_and_plain_language_message_are_preserved(self) -> None:
+        result = _device_capabilities(
+            {
+                "device_config_sync": 1,
+                "worker_state": "fault",
+                "worker_reason": "output_volume_unavailable",
+                "worker_message": "输出磁盘不可用，请重新连接移动硬盘。",
+            }
+        )
+
+        self.assertEqual(result["worker_state"], "fault")
+        self.assertEqual(result["worker_reason"], "output_volume_unavailable")
+        self.assertIn("输出磁盘不可用", result["worker_message"])
+
+    def test_worker_reason_rejects_paths_or_story_text(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported characters"):
+            _device_capabilities(
+                {
+                    "worker_state": "fault",
+                    "worker_reason": r"C:\\private\\output",
+                }
+            )
 
 
 class HealthLifecycleAndAuthenticationTests(HubTestCase):
@@ -540,7 +566,7 @@ class DeviceEnrollmentTests(HubTestCase):
             self.PASSWORD,
             "Outdated Render PC",
             installation_id=str(uuid4()),
-            app_version="0.4.0-rc6",
+            app_version="0.4.6",
             timeout_seconds=5,
         )
         client = HubClient(self.server.base_url, enrolled["token"], timeout_seconds=5)
@@ -558,9 +584,8 @@ class DeviceEnrollmentTests(HubTestCase):
 
     def test_current_and_future_render_clients_are_not_version_blocked(self) -> None:
         supported = (
-            "0.4.0-rc7",
-            "0.4.0-rc10",
-            "0.4.0",
+            "0.4.7",
+            "0.4.8-rc1",
             "0.5.0-rc1",
             "1.0.0",
         )
@@ -569,9 +594,10 @@ class DeviceEnrollmentTests(HubTestCase):
                 self.assertTrue(_render_client_version_is_supported(version))
         for version in (
             "",
-            "0.4.0-rc1",
-            "0.4.0-rc5",
-            "0.4.0-rc6",
+            "0.4.7-rc1",
+            "0.4.7-rc99",
+            "0.4.6",
+            "0.4.0-rc7",
             "0.3.99",
             "development",
             "0.4",
@@ -1362,11 +1388,18 @@ class PermissionEnforcementTests(HubTestCase):
             record["id"], "hub-worker-a", lease_seconds=60
         )
         self.assertTrue(claimed["claimed"])
+        first_generation = claimed["record"]["lease_generation"]
+        with self.assertRaises(HubRemoteError) as same_device_process:
+            proxy.claim_record_lease(record["id"], "hub-worker-a", lease_seconds=60)
+        self.assertEqual(same_device_process.exception.status, 409)
         with self.assertRaises(HubRemoteError) as wrong_device:
             proxy.heartbeat_record_lease(record["id"], "hub-worker-b")
         self.assertEqual(wrong_device.exception.status, 409)
         heartbeat = proxy.heartbeat_record_lease(
-            record["id"], "hub-worker-a", lease_seconds=90
+            record["id"],
+            "hub-worker-a",
+            lease_generation=first_generation,
+            lease_seconds=90,
         )
         self.assertTrue(heartbeat["heartbeat"])
 
@@ -1386,7 +1419,11 @@ class PermissionEnforcementTests(HubTestCase):
         self.assertEqual(
             reclaimed["record"]["lease_owner_device"], "hub-worker-b"
         )
-        released = proxy.release_record_lease(record["id"], "hub-worker-b")
+        released = proxy.release_record_lease(
+            record["id"],
+            "hub-worker-b",
+            lease_generation=reclaimed["record"]["lease_generation"],
+        )
         self.assertTrue(released["released"])
         with self.assertRaises(TypeError):
             proxy.claim_record_lease(record["id"], "device", 60)
@@ -1488,6 +1525,64 @@ class PermissionEnforcementTests(HubTestCase):
         self.assertEqual(
             self.catalog.get_record(second_record["id"])["lease_owner_device"], ""
         )
+
+    def test_retry_and_claim_is_bound_to_the_authenticated_workstation(self) -> None:
+        password = "Retry1!Password"
+        producer = self.catalog.save_user(
+            {
+                "username": "retry-owner",
+                "role": "producer",
+                "password_hash": hash_password(password),
+            }
+        )
+        novel, binding, code = self.story_relationships("retry-claim")
+        draft = self.make_draft(producer["id"], novel, binding, code)
+        record = self.catalog.save_production_record(
+            {
+                "draft_id": draft["id"],
+                "job_id": "retry-claim-owned",
+                "status": "failed",
+            },
+            actor_user_id=producer["id"],
+        )
+        self.restart_with_users({"retry-owner-token": producer["id"]})
+        enrolled = HubClient.enroll_device(
+            self.server.base_url,
+            producer["username"],
+            password,
+            "Retry owner PC",
+            timeout_seconds=5,
+        )
+        proxy = HubCatalogProxy(
+            HubClient(self.server.base_url, enrolled["token"], timeout_seconds=5)
+        )
+
+        with self.assertRaises(HubRemoteError) as mismatch:
+            proxy.begin_record_retry(
+                record["id"],
+                device_id="forged-device",
+                lease_seconds=60,
+            )
+        self.assertEqual(mismatch.exception.status, 403)
+        self.assertEqual(mismatch.exception.code, "device_identity_mismatch")
+
+        retried = proxy.begin_record_retry(
+            record["id"],
+            device_id=enrolled["device_id"],
+            lease_seconds=60,
+        )
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(retried["current_attempt"], 2)
+        self.assertEqual(retried["lease_owner_device"], enrolled["device_id"])
+        self.assertGreater(retried["lease_generation"], 0)
+        updated = proxy.save_production_record(
+            {
+                "id": record["id"],
+                "status": "running",
+                "expected_lease_generation": retried["lease_generation"],
+            }
+        )
+        self.assertEqual(updated["status"], "running")
 
     def test_enrolled_device_cannot_overwrite_same_users_other_device_lease(self) -> None:
         password = "Lease2!Password"

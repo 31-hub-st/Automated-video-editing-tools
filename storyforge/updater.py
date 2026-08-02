@@ -18,7 +18,10 @@ from typing import Any
 
 
 UPDATE_PACKAGE_METADATA = "storyforge-update.json"
+BUILD_STARTUP_VALIDATION = "BUILD_STARTUP_VALIDATION.json"
+BUILD_KOKORO_VALIDATION = "BUILD_KOKORO_VALIDATION.json"
 RELEASE_VALIDATION_FILENAME = "BUILD_RELEASE_VALIDATION.json"
+RELEASE_VALIDATION_SCHEMA = 1
 PORTABLE_RUNTIME_DIRECTORY = "StoryForgeData"
 UPDATE_MANIFEST_SCHEMA = 1
 MAX_UPDATE_ENTRIES = 20_000
@@ -199,10 +202,152 @@ def verify_update_manifest_signature(
         raise ValueError("更新清单签名验证失败。")
 
 
+def _verify_packaged_release_validation(
+    package_path: Path,
+    *,
+    expected_version: str,
+    entrypoint: str,
+) -> None:
+    """Verify the frozen release attestation against exact ZIP payload bytes."""
+
+    try:
+        with zipfile.ZipFile(package_path) as archive:
+            file_entries: dict[str, tuple[str, zipfile.ZipInfo]] = {}
+            for entry in archive.infolist():
+                if entry.is_dir():
+                    continue
+                relative = _safe_relative_path(entry.filename, label="压缩包文件")
+                file_entries[relative.casefold()] = (relative, entry)
+
+            validation_item = file_entries.get(RELEASE_VALIDATION_FILENAME.casefold())
+            if validation_item is None:
+                raise ValueError(
+                    f"更新包缺少 {RELEASE_VALIDATION_FILENAME} 发布证明。"
+                )
+            _validation_name, validation_entry = validation_item
+            if validation_entry.file_size > 4 * 1024 * 1024:
+                raise ValueError(f"{RELEASE_VALIDATION_FILENAME} 文件过大。")
+            try:
+                validation = json.loads(
+                    archive.read(validation_entry).decode("utf-8-sig")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"{RELEASE_VALIDATION_FILENAME} 不是有效的 UTF-8 JSON。"
+                ) from error
+            if not isinstance(validation, Mapping):
+                raise ValueError(f"{RELEASE_VALIDATION_FILENAME} 必须是对象。")
+            if validation.get("schema_version") != RELEASE_VALIDATION_SCHEMA:
+                raise ValueError(f"{RELEASE_VALIDATION_FILENAME} 版本不受支持。")
+            if validation.get("ok") is not True or validation.get("frozen") is not True:
+                raise ValueError(f"{RELEASE_VALIDATION_FILENAME} 不是通过的冻结发布证明。")
+            if normalize_version(validation.get("app_version")) != expected_version:
+                raise ValueError("发布证明版本与更新包版本不一致。")
+            validated_entrypoint = _safe_relative_path(
+                validation.get("entrypoint"), label="发布证明启动文件"
+            )
+            if validated_entrypoint != entrypoint:
+                raise ValueError("发布证明启动文件与更新包入口不一致。")
+
+            records: list[tuple[str, int, str]] = []
+            for relative, entry in file_entries.values():
+                if relative.casefold() in {
+                    UPDATE_PACKAGE_METADATA.casefold(),
+                    RELEASE_VALIDATION_FILENAME.casefold(),
+                }:
+                    continue
+                digest = hashlib.sha256()
+                with archive.open(entry, "r") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                records.append((relative, int(entry.file_size), digest.hexdigest()))
+            records.sort(key=lambda item: item[0].casefold())
+
+            declared_paths = _managed_bundle_paths(
+                validation, label="release validation"
+            )
+            actual_paths = tuple(relative for relative, _size, _digest in records)
+            if declared_paths != actual_paths:
+                raise ValueError("发布证明文件清单与更新包内容不一致。")
+            actual_size = sum(size for _relative, size, _digest in records)
+            try:
+                declared_size = int(validation.get("bundle_size_bytes"))
+            except (TypeError, ValueError) as error:
+                raise ValueError("发布证明文件总大小无效。") from error
+            if declared_size != actual_size:
+                raise ValueError("发布证明文件总大小与更新包内容不一致。")
+
+            manifest_digest = hashlib.sha256()
+            digests: dict[str, str] = {}
+            for relative, size, digest in records:
+                digests[relative.casefold()] = digest
+                manifest_digest.update(relative.encode("utf-8"))
+                manifest_digest.update(b"\0")
+                manifest_digest.update(str(size).encode("ascii"))
+                manifest_digest.update(b"\0")
+                manifest_digest.update(digest.encode("ascii"))
+                manifest_digest.update(b"\n")
+            if not hmac.compare_digest(
+                str(validation.get("bundle_manifest_sha256") or "").casefold(),
+                manifest_digest.hexdigest(),
+            ):
+                raise ValueError("发布证明目录摘要与更新包内容不一致。")
+
+            entrypoint_digest = digests.get(entrypoint.casefold(), "")
+            if not entrypoint_digest or not hmac.compare_digest(
+                str(validation.get("entrypoint_sha256") or "").casefold(),
+                entrypoint_digest,
+            ):
+                raise ValueError("发布证明启动文件摘要与更新包内容不一致。")
+
+            def verify_self_test(name: str, digest_field: str, label: str) -> None:
+                item = file_entries.get(name.casefold())
+                digest = digests.get(name.casefold(), "")
+                if item is None or not digest:
+                    raise ValueError(f"更新包缺少 {name}。")
+                if not hmac.compare_digest(
+                    str(validation.get(digest_field) or "").casefold(), digest
+                ):
+                    raise ValueError(f"{label}验证摘要与更新包内容不一致。")
+                try:
+                    payload = json.loads(archive.read(item[1]).decode("utf-8-sig"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError(f"{name} 不是有效的 UTF-8 JSON。") from error
+                if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+                    raise ValueError(f"{name} 不是通过的{label}验证。")
+                if payload.get("frozen") is not True:
+                    raise ValueError(f"{name} 不是冻结程序生成的验证。")
+                if normalize_version(payload.get("app_version")) != expected_version:
+                    raise ValueError(f"{label}验证版本与更新包版本不一致。")
+
+            verify_self_test(
+                BUILD_STARTUP_VALIDATION,
+                "startup_validation_sha256",
+                "启动",
+            )
+            with_local_ai = validation.get("with_local_ai")
+            if not isinstance(with_local_ai, bool):
+                raise ValueError("发布证明的本地 AI 标记无效。")
+            kokoro_key = BUILD_KOKORO_VALIDATION.casefold()
+            if with_local_ai:
+                verify_self_test(
+                    BUILD_KOKORO_VALIDATION,
+                    "kokoro_validation_sha256",
+                    "Kokoro",
+                )
+            elif kokoro_key in file_entries or str(
+                validation.get("kokoro_validation_sha256") or ""
+            ):
+                raise ValueError("轻量更新包包含过期的 Kokoro 验证。")
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        raise ValueError("更新包 ZIP 文件已损坏。") from error
+
+
 def inspect_update_package(
     package_path: str | Path,
     *,
     expected_version: str | None = None,
+    require_release_validation: bool = False,
 ) -> dict[str, Any]:
     """Validate archive structure and return its embedded package metadata."""
 
@@ -253,6 +398,12 @@ def inspect_update_package(
     entrypoint = _safe_relative_path(raw_metadata.get("entrypoint"), label="启动文件")
     if entrypoint.casefold() not in normalized_names:
         raise ValueError("更新包指定的启动文件不存在。")
+    if require_release_validation:
+        _verify_packaged_release_validation(
+            path,
+            expected_version=version,
+            entrypoint=entrypoint,
+        )
     return {
         "version": version,
         "entrypoint": entrypoint,
@@ -330,7 +481,11 @@ class UpdateRepository:
         source = Path(package_path).expanduser().resolve(strict=True)
         if progress is not None:
             progress(0.08, "正在检查更新包结构…")
-        metadata = inspect_update_package(source, expected_version=version)
+        metadata = inspect_update_package(
+            source,
+            expected_version=version,
+            require_release_validation=True,
+        )
         if progress is not None:
             progress(0.22, "正在计算更新包校验值…")
         digest = file_sha256(source)

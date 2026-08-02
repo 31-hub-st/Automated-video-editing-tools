@@ -26,6 +26,7 @@ from storyforge.web import (
     MAX_UPLOAD_BYTES,
     WEB_RPC_PERMISSIONS,
 )
+from scripts.build_update_package import write_release_validation
 
 
 class _ApiStub:
@@ -298,6 +299,23 @@ class WebApplicationTests(unittest.TestCase):
 
     def _publish_update(self, version: str = "0.4.0-rc3") -> tuple[bytes, dict]:
         package = self.root / f"StoryForge-{version}.zip"
+        build = self.root / f"update-build-{version}"
+        build.mkdir(parents=True, exist_ok=True)
+        (build / "ui").mkdir(exist_ok=True)
+        (build / "StoryForge Studio.exe").write_bytes(
+            b"employee update executable"
+        )
+        (build / "ui" / "index.html").write_bytes(b"updated workstation UI")
+        (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+            json.dumps({"ok": True, "frozen": True, "app_version": version}),
+            encoding="utf-8",
+        )
+        write_release_validation(
+            build,
+            entrypoint="StoryForge Studio.exe",
+            requested_version=version,
+            with_local_ai=False,
+        )
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr(
                 "storyforge-update.json",
@@ -305,8 +323,9 @@ class WebApplicationTests(unittest.TestCase):
                     {"version": version, "entrypoint": "StoryForge Studio.exe"}
                 ),
             )
-            archive.writestr("StoryForge Studio.exe", b"employee update executable")
-            archive.writestr("ui/index.html", b"updated workstation UI")
+            for path in sorted(build.rglob("*")):
+                if path.is_file():
+                    archive.write(path, path.relative_to(build).as_posix())
         package_bytes = package.read_bytes()
         repository = UpdateRepository(self.root / "published-updates")
         manifest = repository.publish(package, version, "Employee render recovery")

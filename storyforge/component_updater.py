@@ -842,6 +842,7 @@ class ComponentUpdater:
         package_path: str | Path,
         *,
         expected_package_sha256: str | None = None,
+        activate: Callable[[], Any] | None = None,
     ) -> InstalledComponent:
         inspection = self.inspect_package(
             package_path,
@@ -862,9 +863,26 @@ class ComponentUpdater:
                 old_state is not None
                 and old_state["active"]["release"] == release_name
             ):
-                return self._installed_from_pointer(
+                try:
+                    self._verify_release(release_dir, manifest)
+                except ComponentPackageError:
+                    staged = Path(
+                        tempfile.mkdtemp(prefix=".staging-", dir=releases_dir)
+                    )
+                    try:
+                        self._extract_verified(inspection, staged)
+                        if release_dir.exists():
+                            self._replace_damaged_release(staged, release_dir)
+                        else:
+                            os.replace(staged, release_dir)
+                    finally:
+                        shutil.rmtree(staged, ignore_errors=True)
+                installed = self._installed_from_pointer(
                     component_dir, old_state["active"]
                 )
+                if activate is not None:
+                    self._activate_or_restore(state_path, old_state, activate)
+                return installed
 
             staged = Path(
                 tempfile.mkdtemp(prefix=".staging-", dir=releases_dir)
@@ -890,6 +908,9 @@ class ComponentUpdater:
                     "previous": old_state["active"] if old_state is not None else None,
                 }
                 self._write_json_atomic(state_path, new_state)
+                installed = self._installed_from_pointer(component_dir, new_pointer)
+                if activate is not None:
+                    self._activate_or_restore(state_path, old_state, activate)
             except BaseException:
                 if created_release and not self._release_is_referenced(
                     component_dir, release_name
@@ -900,7 +921,7 @@ class ComponentUpdater:
                 shutil.rmtree(staged, ignore_errors=True)
 
             self._cleanup_unreferenced_releases(component_dir)
-            return self._installed_from_pointer(component_dir, new_pointer)
+            return installed
 
     def current(self, component_id: str) -> InstalledComponent | None:
         with self._lock:
@@ -1170,6 +1191,28 @@ class ComponentUpdater:
                 pass
             raise
 
+    def _activate_or_restore(
+        self,
+        state_path: Path,
+        old_state: Mapping[str, Any] | None,
+        activate: Callable[[], Any],
+    ) -> None:
+        try:
+            activate()
+        except BaseException as activation_error:
+            try:
+                if old_state is None:
+                    state_path.unlink(missing_ok=True)
+                else:
+                    self._write_json_atomic(state_path, old_state)
+                activate()
+            except BaseException as recovery_error:
+                raise RuntimeError(
+                    "Component activation failed and the previous runtime "
+                    f"could not be reactivated: {recovery_error}"
+                ) from activation_error
+            raise
+
     def _load_state(
         self, component_dir: Path, *, required: bool
     ) -> dict[str, Any] | None:
@@ -1282,6 +1325,33 @@ class ComponentUpdater:
                 raise ComponentIntegrityError(
                     f"Existing component payload is damaged: {item.path}."
                 )
+
+    @staticmethod
+    def _replace_damaged_release(staged: Path, release_dir: Path) -> None:
+        backup = Path(
+            tempfile.mkdtemp(prefix=".repair-backup-", dir=release_dir.parent)
+        )
+        backup.rmdir()
+        moved_existing = False
+        replacement_complete = False
+        try:
+            os.replace(release_dir, backup)
+            moved_existing = True
+            os.replace(staged, release_dir)
+            replacement_complete = True
+        except BaseException:
+            if moved_existing and not os.path.lexists(release_dir):
+                os.replace(backup, release_dir)
+            raise
+        finally:
+            if replacement_complete and os.path.lexists(backup):
+                if backup.is_dir() and not backup.is_symlink():
+                    shutil.rmtree(backup, ignore_errors=True)
+                else:
+                    try:
+                        backup.unlink()
+                    except OSError:
+                        pass
 
     def _release_is_referenced(self, component_dir: Path, release_name: str) -> bool:
         try:

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from storyforge.api import StoryForgeApi
 from storyforge.config import SettingsRepository
 from storyforge.models import AppSettings
+from scripts.build_update_package import write_release_validation
 
 
 def free_port() -> int:
@@ -21,13 +22,28 @@ def free_port() -> int:
 
 
 def package(root: Path, version: str) -> Path:
+    build = root / f"update-build-{version}"
+    build.mkdir()
+    (build / "StoryForge.exe").write_bytes(b"new executable")
+    (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+        json.dumps({"ok": True, "frozen": True, "app_version": version}),
+        encoding="utf-8",
+    )
+    write_release_validation(
+        build,
+        entrypoint="StoryForge.exe",
+        requested_version=version,
+        with_local_ai=False,
+    )
     target = root / f"StoryForge-{version}.zip"
     with zipfile.ZipFile(target, "w") as archive:
         archive.writestr(
             "storyforge-update.json",
             json.dumps({"version": version, "entrypoint": "StoryForge.exe"}),
         )
-        archive.writestr("StoryForge.exe", b"new executable")
+        for path in sorted(build.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(build).as_posix())
     return target
 
 

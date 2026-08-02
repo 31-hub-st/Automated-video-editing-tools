@@ -1017,6 +1017,12 @@ class RenderJob:
     status: JobStatus = JobStatus.QUEUED
     progress: float = 0.0
     stage_label: str = "等待处理"
+    # Canonical, serial pipeline telemetry.  The Chinese ``stage_label`` stays
+    # user-facing; these stable keys let Hub diagnostics compare machines and
+    # versions without parsing translated copy.
+    pipeline_stage: str = "queued"
+    pipeline_stage_started_at: str = field(default_factory=utc_now)
+    pipeline_stage_history: list[dict[str, Any]] = field(default_factory=list)
     message: str = ""
     error_log: str = ""
     # A small, sanitized diagnostic snapshot may be synchronized to the Hub.

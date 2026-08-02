@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from . import __version__
+from .rpc_contract import LOCAL_WORKER_RPC_PERMISSIONS
 from .system import system_snapshot
 
 
@@ -29,11 +30,15 @@ LOCAL_WORKER_SESSION_SECONDS = 30 * 60
 # Both sides publish the oldest peer they still understand so rolling upgrades
 # fail early with an actionable message instead of failing half way through a
 # render request.
-LOCAL_WORKER_PROTOCOL_VERSION = 2
-LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION = 2
+LOCAL_WORKER_PROTOCOL_VERSION = 3
+LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION = 3
 LOCAL_WORKER_TASK_NAME = "StoryForge Local Worker"
 _WINDOWS_ALREADY_EXISTS = 183
 WORKER_STALL_WARNING_SECONDS = 10 * 60
+WORKER_MIN_FREE_DISK_BYTES = 5 * 1024**3
+WORKER_MIN_FREE_DISK_RATIO = 0.05
+WORKER_MIN_AVAILABLE_MEMORY_BYTES = 1024**3
+WORKER_MIN_AVAILABLE_MEMORY_RATIO = 0.05
 
 
 _TERMINAL_WORKER_JOB_STATUSES = frozenset(
@@ -41,34 +46,237 @@ _TERMINAL_WORKER_JOB_STATUSES = frozenset(
 )
 
 
-LOCAL_WORKER_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
-    "queue_production_draft": ("drafts.create", "drafts.manage_all", "hub.manage"),
-    "generate_voice_candidates": ("voice.preview", "hub.manage"),
-    "set_local_tts_provider": ("voice.preview", "hub.manage"),
-    "generate_intro_card_copy": ("text.assist", "hub.manage"),
-    "start_queue": ("drafts.create", "drafts.manage_all", "hub.manage"),
-    "cancel_queue": ("drafts.create", "drafts.manage_all", "hub.manage"),
-    "get_jobs": ("drafts.create", "records.view_own", "records.view_all", "hub.manage"),
-    "get_queue_connection": ("drafts.create", "records.view_own", "records.view_all", "hub.manage"),
-    "get_archived_jobs": ("records.view_own", "records.view_all", "hub.manage"),
-    "retry_failed": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "archive_job": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "restore_job": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "archive_batch": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "restore_batch": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "archive_finished_jobs": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    # The queue belongs to this workstation process, so a producer may tidy
-    # its finished cards without receiving global Hub queue administration.
-    "clear_finished_jobs": ("drafts.create", "drafts.manage_all", "hub.manage"),
-    "get_record_artifacts": ("records.view_own", "records.view_all", "hub.manage"),
-    "cancel_production_records": ("jobs.retry_own", "jobs.retry_all", "hub.manage"),
-    "open_output_folder": ("drafts.create", "records.view_own", "records.view_all", "hub.manage"),
-    "choose_folder": ("drafts.create", "hub.manage"),
-    "worker_profile": ("drafts.create", "hub.manage"),
-    "worker_runtime_snapshot": ("drafts.create", "hub.manage"),
-    "worker_self_check": ("drafts.create", "hub.manage"),
-    "worker_set_folders": ("drafts.create", "hub.manage"),
-}
+def _disk_status(path: str | Path) -> dict[str, Any]:
+    try:
+        disk = shutil.disk_usage(Path(path))
+        total = max(0, int(disk.total))
+        free = max(0, int(disk.free))
+        low = bool(
+            free < WORKER_MIN_FREE_DISK_BYTES
+            or (total > 0 and free / total < WORKER_MIN_FREE_DISK_RATIO)
+        )
+        return {
+            "observable": True,
+            "total_bytes": total,
+            "free_bytes": free,
+            "low_space": low,
+        }
+    except (OSError, TypeError, ValueError):
+        return {
+            "observable": False,
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "low_space": False,
+        }
+
+
+def _nearest_existing_directory(path: Path) -> Path | None:
+    """Return the closest accessible directory without crossing a missing volume."""
+
+    candidate = path
+    while True:
+        try:
+            if candidate.exists():
+                return candidate if candidate.is_dir() else None
+        except OSError:
+            return None
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+
+def _output_directory_status(path: str | Path) -> dict[str, Any]:
+    """Create a normal output folder, but fail closed for a detached volume."""
+
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {
+            "observable": False,
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "low_space": False,
+            "fault": True,
+            "reason": "output_directory_invalid",
+            "prepared": False,
+        }
+    nearest = _nearest_existing_directory(candidate)
+    if nearest is None:
+        return {
+            "observable": False,
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "low_space": False,
+            "fault": True,
+            "reason": "output_volume_unavailable",
+            "prepared": False,
+        }
+    try:
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+        if not candidate.is_dir():
+            raise NotADirectoryError(str(candidate))
+        probe = candidate / f".storyforge-output-check-{secrets.token_hex(6)}.tmp"
+        try:
+            probe.write_bytes(b"ok")
+        finally:
+            probe.unlink(missing_ok=True)
+    except OSError:
+        return {
+            "observable": False,
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "low_space": False,
+            "fault": True,
+            "reason": "output_directory_unavailable",
+            "prepared": False,
+        }
+    status = _disk_status(candidate)
+    status.update(
+        {
+            "fault": not bool(status.get("observable")),
+            "reason": (
+                "" if status.get("observable") else "output_volume_unavailable"
+            ),
+            "prepared": True,
+        }
+    )
+    return status
+
+
+def _memory_status() -> dict[str, Any]:
+    """Read available physical memory without adding a runtime dependency."""
+
+    total = 0
+    available = 0
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(
+                ctypes.byref(status)
+            ):
+                raise OSError("GlobalMemoryStatusEx failed")
+            total = int(status.ullTotalPhys)
+            available = int(status.ullAvailPhys)
+        elif Path("/proc/meminfo").is_file():
+            values: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text(
+                encoding="ascii", errors="replace"
+            ).splitlines():
+                key, separator, remainder = line.partition(":")
+                if not separator:
+                    continue
+                raw = remainder.strip().split(maxsplit=1)[0]
+                if raw.isdigit():
+                    values[key] = int(raw) * 1024
+            total = values.get("MemTotal", 0)
+            available = values.get(
+                "MemAvailable",
+                values.get("MemFree", 0)
+                + values.get("Buffers", 0)
+                + values.get("Cached", 0),
+            )
+        else:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total = page_size * int(os.sysconf("SC_PHYS_PAGES"))
+            available = page_size * int(os.sysconf("SC_AVPHYS_PAGES"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        total = 0
+        available = 0
+    observable = bool(total > 0 and available >= 0)
+    low = bool(
+        observable
+        and (
+            available < WORKER_MIN_AVAILABLE_MEMORY_BYTES
+            or available / total < WORKER_MIN_AVAILABLE_MEMORY_RATIO
+        )
+    )
+    return {
+        "observable": observable,
+        "total_bytes": max(0, total),
+        "available_bytes": max(0, available),
+        "low": low,
+    }
+
+
+def _resource_status(
+    data_dir: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    memory = _memory_status()
+    data_disk = _disk_status(data_dir)
+    output_disk = _output_directory_status(output_dir)
+    output_fault = bool(output_disk.get("fault"))
+    if output_fault:
+        reason = str(output_disk.get("reason") or "output_volume_unavailable")
+    elif not memory["observable"]:
+        reason = "memory_unobservable"
+    elif memory["low"]:
+        reason = "low_memory"
+    elif not data_disk["observable"]:
+        reason = "data_disk_unobservable"
+    elif data_disk["low_space"]:
+        reason = "low_data_disk"
+    elif not output_disk["observable"]:
+        reason = "output_disk_unobservable"
+    elif output_disk["low_space"]:
+        reason = "low_output_disk"
+    else:
+        reason = ""
+    messages = {
+        "output_volume_unavailable": "输出磁盘不可用，请重新连接移动硬盘或更换输出文件夹。",
+        "output_directory_unavailable": "输出文件夹无法创建或写入，请更换到当前账号可写的文件夹。",
+        "output_directory_invalid": "输出文件夹设置无效，请在制作设置中重新选择。",
+        "memory_unobservable": "无法读取制作电脑内存状态，请运行本机自检。",
+        "low_memory": "制作电脑可用内存不足，已暂停领取新任务。",
+        "data_disk_unobservable": "无法读取 StoryForge 工作磁盘，请运行本机自检。",
+        "low_data_disk": "StoryForge 工作磁盘空间不足，已暂停领取新任务。",
+        "output_disk_unobservable": "无法读取输出磁盘，请重新选择输出文件夹。",
+        "low_output_disk": "输出磁盘空间不足，已暂停领取新任务。",
+    }
+    return {
+        "admission_allowed": not bool(reason),
+        "reason": reason,
+        "fault": output_fault,
+        "message": messages.get(reason, ""),
+        "memory": memory,
+        "data_disk": data_disk,
+        "output_disk": output_disk,
+    }
+
+
+def default_heavy_job_admission(job: Any) -> dict[str, Any]:
+    """Safe startup gate used before the loopback Worker gateway is online."""
+
+    from .config import default_data_dir
+
+    output_folder = str(getattr(job, "output_folder", "") or "")
+    if not output_folder:
+        output_folder = str(default_data_dir())
+    resources = _resource_status(default_data_dir(), output_folder)
+    return {
+        "allowed": resources["admission_allowed"],
+        "reason": resources["reason"],
+        "fault": resources["fault"],
+        "message": resources["message"],
+    }
 
 
 def discover_local_production_worker(
@@ -660,6 +868,32 @@ class LocalWorkerGateway:
         self._lock = threading.RLock()
         self._last_queue_signature = ""
         self._last_queue_change_unix = self.started_at_unix
+        queue = getattr(self.api, "_queue", None)
+        set_admission_check = getattr(queue, "set_admission_check", None)
+        if callable(set_admission_check):
+            set_admission_check(self._resource_admission)
+
+    def _resource_admission(self, job: Any = None) -> dict[str, Any]:
+        output_folder = ""
+        if isinstance(job, Mapping):
+            output_folder = str(job.get("output_folder") or "")
+        elif job is not None:
+            output_folder = str(getattr(job, "output_folder", "") or "")
+        if not output_folder:
+            try:
+                output_folder = self.profile.load()["output_folder"]
+            except (KeyError, OSError, TypeError, ValueError):
+                output_folder = str(self.api._repository.data_dir)
+        resources = _resource_status(
+            self.api._repository.data_dir,
+            output_folder,
+        )
+        return {
+            "allowed": resources["admission_allowed"],
+            "reason": resources["reason"],
+            "fault": resources["fault"],
+            "message": resources["message"],
+        }
 
     @property
     def configured_device_id(self) -> str:
@@ -832,25 +1066,53 @@ class LocalWorkerGateway:
         )
         queue_activity = self._queue_activity()
         try:
-            disk = shutil.disk_usage(self.api._repository.data_dir)
-            disk_total = max(0, int(disk.total))
-            disk_free = max(0, int(disk.free))
-            disk_low = bool(
-                disk_free < 5 * 1024**3
-                or (disk_total > 0 and disk_free / disk_total < 0.05)
+            output_folder = self.profile.load()["output_folder"]
+        except (KeyError, OSError, TypeError, ValueError):
+            output_folder = self.api._repository.data_dir
+        resources = _resource_status(
+            self.api._repository.data_dir,
+            output_folder,
+        )
+        # Preserve the original top-level storage contract. New clients can
+        # additionally inspect the distinct data/output disks and memory below.
+        storage = dict(resources["data_disk"])
+        queue = getattr(self.api, "_queue", None)
+        governance_method = getattr(queue, "governance_status", None)
+        try:
+            governance = (
+                dict(governance_method())
+                if callable(governance_method)
+                else {
+                    "state": "busy" if queue_activity["queue_busy"] else "ready",
+                    "accepting_new_work": True,
+                    "paused": False,
+                    "draining": False,
+                    "drained": False,
+                    "cooling": False,
+                    "degraded": False,
+                    "fault": False,
+                    "retry_in_seconds": 0.0,
+                    "cooling_until_unix": 0.0,
+                    "reason": "",
+                    "heavy_task_limit": 1,
+                    "active_heavy_tasks": int(queue_activity["rendering_busy"]),
+                }
             )
-            storage = {
-                "observable": True,
-                "total_bytes": disk_total,
-                "free_bytes": disk_free,
-                "low_space": disk_low,
-            }
-        except (AttributeError, OSError, TypeError, ValueError):
-            storage = {
-                "observable": False,
-                "total_bytes": 0,
-                "free_bytes": 0,
-                "low_space": False,
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            governance = {
+                "state": "fault",
+                "accepting_new_work": False,
+                "paused": False,
+                "draining": False,
+                "drained": False,
+                "cooling": False,
+                "degraded": False,
+                "fault": True,
+                "retry_in_seconds": 0.0,
+                "cooling_until_unix": 0.0,
+                "reason": "governance_unobservable",
+                "heavy_task_limit": 1,
+                "active_heavy_tasks": int(queue_activity["rendering_busy"]),
             }
         operational = bool(
             (runtime_mode == "client" and ready)
@@ -860,12 +1122,31 @@ class LocalWorkerGateway:
             not operational
             or not queue_activity["observable"]
             or queue_activity["progress_stale"]
-            or not storage["observable"]
-            or storage["low_space"]
+            or not resources["admission_allowed"]
         )
-        health_state = (
+        governance_state = str(governance.get("state") or "ready").casefold()
+        if governance_state == "fault":
+            state = "fault"
+        elif governance_state in {"paused", "draining", "cooling"}:
+            state = governance_state
+        elif degraded or governance_state == "degraded":
+            state = "degraded"
+        elif queue_activity["queue_busy"]:
+            state = "busy"
+        else:
+            state = "ready"
+        accepting_new_work = bool(
+            operational
+            and resources["admission_allowed"]
+            and governance.get("accepting_new_work", True)
+            and state in {"ready", "busy"}
+        )
+        # ``health_state`` predates operator/cooldown states. Keep its original
+        # three-value contract for rolling upgrades while ``state`` is the new
+        # normalized field.
+        legacy_health_state = (
             "degraded"
-            if degraded
+            if degraded or state in {"degraded", "fault"}
             else "busy"
             if queue_activity["queue_busy"]
             else "ready"
@@ -884,7 +1165,9 @@ class LocalWorkerGateway:
             "device_id": self.configured_device_id if runtime_mode == "client" else "",
             "device_name": str(self.api._state.settings.hub.device_name or ""),
             **queue_activity,
-            "health_state": health_state,
+            "state": state,
+            "health_state": legacy_health_state,
+            "accepting_new_work": accepting_new_work,
             "observed_at_unix": time.time(),
             "queue": {
                 "observable": queue_activity["observable"],
@@ -896,8 +1179,11 @@ class LocalWorkerGateway:
                 "stage": queue_activity["current_stage"],
                 "last_change_unix": queue_activity["last_change_unix"],
                 "progress_stale": queue_activity["progress_stale"],
+                "accepting_new_work": accepting_new_work,
             },
             "storage": storage,
+            "resources": resources,
+            "governance": governance,
             "connectivity": {
                 "hub_connected": hub_connected,
                 "runtime_mode": runtime_mode,
@@ -1272,8 +1558,8 @@ class LocalWorkerGateway:
         origin = _origin(browser_origin)
         # Validate both advertised compatibility ranges before redeeming the
         # one-use Hub ticket.  This prevents a stale browser from consuming a
-        # valid ticket and then failing only after it has begun issuing V0.3
-        # RPC payloads to a V0.4 worker.
+        # valid ticket and then failing only after it has begun issuing RPC
+        # payloads that the local worker cannot execute safely.
         browser_protocol = self._protocol_version(
             browser_protocol_version, "browser_protocol_version"
         )

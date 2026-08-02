@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -41,6 +42,169 @@ class StabilityAcceptanceTests(unittest.TestCase):
         stream = Mock()
         with patch("builtins.print", side_effect=OSError(22, "Invalid argument")):
             acceptance._console_print("progress", file=stream)
+
+    def test_packaged_ffmpeg_is_the_media_probe_when_ffprobe_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app_root = Path(temporary)
+            ffmpeg = (
+                app_root
+                / "_internal"
+                / "imageio_ffmpeg"
+                / "binaries"
+                / "ffmpeg-win-x86_64-v7.1.exe"
+            )
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"packaged-ffmpeg")
+            args = argparse.Namespace(app_root=app_root, ffmpeg=None, ffprobe=None)
+
+            with patch.object(acceptance, "resolve_ffprobe", return_value=None):
+                resolved_ffmpeg, media_probe = acceptance.resolve_tools(args)
+
+        self.assertEqual(resolved_ffmpeg, ffmpeg.resolve())
+        self.assertEqual(media_probe, resolved_ffmpeg)
+
+    def test_ffmpeg_fallback_strictly_verifies_vertical_h264_with_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            video = root / "story.mp4"
+            ffmpeg.write_bytes(b"ffmpeg")
+            video.write_bytes(b"0" * 4096)
+            stderr = """
+Input #0, mov,mp4, from 'story.mp4':
+  Duration: 00:00:05.000, start: 0.000000, bitrate: 1200 kb/s
+  Stream #0:0: Video: h264 (High), yuv420p, 1080x1920, 60 fps, 60 tbr
+  Stream #0:1: Audio: aac (LC), 48000 Hz, stereo, fltp
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 (native) -> wrapped_avframe (native))
+  Stream #0:1 -> #0:1 (aac (native) -> pcm_s16le (native))
+"""
+
+            with patch.object(
+                acceptance,
+                "run_command",
+                return_value=subprocess.CompletedProcess([], 0, "", stderr),
+            ) as run:
+                result = acceptance.verify_video(
+                    ffmpeg,
+                    video,
+                    ffmpeg=ffmpeg,
+                    expected_fps=60,
+                    expected_duration_seconds=5.0,
+                )
+
+        command = run.call_args.args[0]
+        self.assertIn("0:v:0?", command)
+        self.assertIn("0:a:0?", command)
+        self.assertEqual(result["probe_backend"], "ffmpeg-fallback")
+        self.assertEqual(result["codec"], "h264")
+        self.assertEqual(result["audio_streams"], 1)
+
+    def test_ffmpeg_fallback_accepts_a_pure_mp3_without_a_video_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            narration = root / "narration.mp3"
+            ffmpeg.write_bytes(b"ffmpeg")
+            narration.write_bytes(b"0" * 4096)
+            stderr = """
+Input #0, mp3, from 'narration.mp3':
+  Duration: 00:00:12.500, start: 0.025057, bitrate: 128 kb/s
+  Stream #0:0: Audio: mp3, 48000 Hz, mono, fltp, 128 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (mp3 (mp3float) -> pcm_s16le (native))
+"""
+
+            with patch.object(
+                acceptance,
+                "run_command",
+                return_value=subprocess.CompletedProcess([], 0, "", stderr),
+            ) as run:
+                result = acceptance.verify_mp3(
+                    ffmpeg,
+                    narration,
+                    ffmpeg=ffmpeg,
+                )
+
+        command = run.call_args.args[0]
+        self.assertIn("0:v:0?", command)
+        self.assertIn("0:a:0?", command)
+        self.assertEqual(result["probe_backend"], "ffmpeg-fallback")
+        self.assertEqual(result["codec"], "mp3")
+        self.assertEqual(result["audio_streams"], 1)
+
+    def test_ffmpeg_fallback_rejects_mp3_container_with_a_video_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            narration = root / "not-pure.mp3"
+            ffmpeg.write_bytes(b"ffmpeg")
+            narration.write_bytes(b"0" * 4096)
+            stderr = """
+Input #0, matroska, from 'not-pure.mp3':
+  Duration: 00:00:12.500, start: 0.000000, bitrate: 256 kb/s
+  Stream #0:0: Video: h264 (High), yuv420p, 1080x1920, 60 fps
+  Stream #0:1: Audio: mp3, 48000 Hz, mono, fltp, 128 kb/s
+Stream mapping:
+"""
+
+            with patch.object(
+                acceptance,
+                "run_command",
+                return_value=subprocess.CompletedProcess([], 0, "", stderr),
+            ):
+                with self.assertRaisesRegex(
+                    acceptance.AcceptanceError,
+                    "standalone MP3",
+                ):
+                    acceptance.verify_mp3(
+                        ffmpeg,
+                        narration,
+                        ffmpeg=ffmpeg,
+                    )
+
+    def test_standalone_ffprobe_remains_the_preferred_compatible_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg.exe"
+            ffprobe = root / "ffprobe.exe"
+            video = root / "story.mp4"
+            for tool in (ffmpeg, ffprobe):
+                tool.write_bytes(b"tool")
+            video.write_bytes(b"0" * 4096)
+            payload = {
+                "format": {"duration": "5.0"},
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "width": 1080,
+                        "height": 1920,
+                        "avg_frame_rate": "60/1",
+                    },
+                    {"codec_type": "audio", "codec_name": "aac"},
+                ],
+            }
+
+            with patch.object(
+                acceptance,
+                "run_command",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps(payload), ""
+                ),
+            ) as run:
+                result = acceptance.verify_video(
+                    ffprobe,
+                    video,
+                    ffmpeg=ffmpeg,
+                    expected_fps=60,
+                    expected_duration_seconds=5.0,
+                )
+
+        command = run.call_args.args[0]
+        self.assertIn("-show_streams", command)
+        self.assertNotIn("0:v:0?", command)
+        self.assertEqual(result["probe_backend"], "ffprobe")
 
     def test_regular_publish_contract_accepts_mp4_without_mp3_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -120,10 +284,13 @@ class StabilityAcceptanceTests(unittest.TestCase):
 
         self.assertIn("[switch]$RequireStableAcceptance", script)
         self.assertIn("'--storyforge-stability-acceptance'", script)
-        self.assertIn("Invoke-Checked -Command $exePath", script)
-        self.assertIn("$stableReport.stable_release_eligible", script)
-        self.assertIn("Get-FileHash -LiteralPath $exePath", script)
-        self.assertIn("$scenario.actual_command_encoder", script)
+        self.assertIn("$acceptanceProcess = Start-Process -FilePath $exePath", script)
+        self.assertIn("$acceptanceProcess.WaitForExit", script)
+        self.assertIn("$acceptanceProcess.ExitCode", script)
+        self.assertIn("$stableReportValidationScript", script)
+        self.assertIn('report.get("stable_release_eligible")', script)
+        self.assertIn("hashlib.sha256(expected_executable.read_bytes())", script)
+        self.assertIn('scenario.get("actual_command_encoder")', script)
 
     def test_actual_encoder_comes_from_latest_real_render_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

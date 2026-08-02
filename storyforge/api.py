@@ -65,6 +65,11 @@ from .models import AppSettings, BatchSpec, JobStatus, PlatformProfile, RenderJo
 from .providers.text import create_text_provider
 from .providers.tts import edge_tts_runtime_available
 from .style_options import resolved_visual_style_presets
+from .support_bundle import (
+    cleanup_local_storage as cleanup_local_storage_files,
+    create_support_bundle,
+    inspect_local_storage,
+)
 from .system import embedded_kokoro_available, system_snapshot
 from .updater import UpdateManager, UpdateRepository
 
@@ -233,6 +238,10 @@ class StoryForgeApi:
         self._job_media_selection: dict[str, dict[str, Any]] = {}
         self._lease_lock = threading.RLock()
         self._leased_records: set[str] = set()
+        # Fencing token for the active claim on each record.  Device ids are
+        # stable across worker restarts, so they cannot by themselves reject a
+        # late callback from an older process on the same computer.
+        self._lease_generations: dict[str, int] = {}
         # Record ids whose ownership was authoritatively lost while their
         # local worker was still unwinding.  One final terminal callback can
         # legitimately receive a lease conflict for these records; that
@@ -321,12 +330,22 @@ class StoryForgeApi:
         """Return the small, non-secret capability projection sent to Hub."""
 
         configured = dict(self._state.settings.hub.capabilities)
+        governance: dict[str, Any] = {}
+        governance_status = getattr(self._queue, "governance_status", None)
+        if callable(governance_status):
+            try:
+                governance = dict(governance_status())
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                governance = {}
         configured.update(
             {
                 "device_config_sync": 1,
                 "local_render": True,
                 "local_tts": True,
                 "local_subtitles": True,
+                "worker_state": str(governance.get("state") or "ready"),
+                "worker_reason": str(governance.get("reason") or "")[:64],
+                "worker_message": str(governance.get("message") or "")[:240],
             }
         )
         return configured
@@ -1949,6 +1968,50 @@ class StoryForgeApi:
 
         return self._guard(operation)
 
+    def get_local_storage_status(self) -> dict[str, Any]:
+        """Inspect only this workstation's reproducible cache and diagnostics."""
+
+        return self._guard(
+            lambda: inspect_local_storage(self._repository.data_dir)
+        )
+
+    def cleanup_local_storage_cache(self, value: Any = None) -> dict[str, Any]:
+        """Preview or apply a bounded local cleanup.
+
+        The support-bundle module protects source documents, final media and
+        the currently scheduled update.  A real deletion additionally needs
+        an explicit JSON boolean ``confirm=true`` from the local UI.
+        """
+
+        options = dict(value) if isinstance(value, Mapping) else {}
+        return self._guard(
+            lambda: cleanup_local_storage_files(
+                self._repository.data_dir,
+                confirm=options.get("confirm") is True,
+                min_age_days=options.get("min_age_days", 30),
+                max_delete_bytes=options.get(
+                    "max_delete_bytes", 512 * 1024 * 1024
+                ),
+            )
+        )
+
+    def create_local_support_bundle(self) -> dict[str, Any]:
+        """Create a sanitized diagnostic ZIP on the current workstation."""
+
+        def operation() -> dict[str, str]:
+            destination_dir = self._repository.data_dir / "support"
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+            destination = destination_dir / f"StoryForge-support-{stamp}.zip"
+            created = create_support_bundle(
+                destination,
+                data_dir=self._repository.data_dir,
+                system_overview=system_snapshot(),
+            )
+            return {"path": str(created), "name": created.name}
+
+        return self._guard(operation)
+
     def get_visual_style_presets(self) -> dict[str, Any]:
         """Return complete editable values for every bundled visual preset."""
 
@@ -2404,8 +2467,8 @@ class StoryForgeApi:
                     installed = self._component_updater.install(
                         package_path,
                         expected_package_sha256=checked["sha256"],
+                        activate=self._component_updater.activate_runtime,
                     )
-                    self._component_updater.activate_runtime()
                     self._component_runtime_error = ""
             finally:
                 if downloaded and package_path is not None:
@@ -2749,6 +2812,34 @@ class StoryForgeApi:
             "state": "healthy",
         }
 
+    def _lease_generation_map(self) -> dict[str, int]:
+        """Return the local fencing-token cache, including legacy test shells.
+
+        A few recovery paths and third-party extensions construct ``StoryForgeApi``
+        without running the full initializer.  Lazily creating the cache keeps
+        those paths compatible while real Hub claims still fail closed unless a
+        positive generation was returned by the catalog.
+        """
+
+        generations = getattr(self, "_lease_generations", None)
+        if not isinstance(generations, dict):
+            generations = {}
+            self._lease_generations = generations
+        return generations
+
+    def _lease_generation_for(self, record_id: str) -> int:
+        return int(self._lease_generation_map().get(record_id) or 0)
+
+    def _remember_lease_generation(
+        self, record_id: str, claimed_record: Mapping[str, Any]
+    ) -> None:
+        generation = int(claimed_record.get("lease_generation") or 0)
+        if generation > 0:
+            self._lease_generation_map()[record_id] = generation
+
+    def _forget_lease_generation(self, record_id: str) -> None:
+        self._lease_generation_map().pop(record_id, None)
+
     def _lease_heartbeat_loop(self) -> None:
         while not self._lease_stop.is_set():
             with self._lease_lock:
@@ -2761,6 +2852,7 @@ class StoryForgeApi:
             for record_id in record_ids:
                 with self._lease_lock:
                     health = dict(self._lease_health.get(record_id) or {})
+                    lease_generation = self._lease_generation_for(record_id)
                 deadline = float(health.get("deadline") or 0.0)
                 if deadline > 0.0 and now >= deadline:
                     self._stop_jobs_for_lost_lease(
@@ -2778,6 +2870,7 @@ class StoryForgeApi:
                     heartbeat = self._catalog.heartbeat_record_lease(
                         record_id,
                         device_id,
+                        lease_generation=lease_generation or None,
                         lease_seconds=RECORD_LEASE_SECONDS,
                     )
                 except (
@@ -2854,14 +2947,23 @@ class StoryForgeApi:
         unconfirmed and the local task keeps running while heartbeats back off.
         """
 
+        lease_generation = self._lease_generation_for(record_id)
+        if lease_generation <= 0:
+            # ``device_id`` is shared by every StoryForge process on this
+            # workstation.  Without the process's fencing generation we cannot
+            # prove that an active same-device lease belongs to this process.
+            return True
         try:
             claimed = self._catalog.claim_record_lease(
                 record_id,
                 device_id,
+                lease_generation=lease_generation,
                 lease_seconds=RECORD_LEASE_SECONDS,
             )
+            claimed_record = dict(claimed.get("record") or {})
             with self._lease_lock:
                 if record_id in self._leased_records:
+                    self._remember_lease_generation(record_id, claimed_record)
                     self._lease_health[record_id] = self._healthy_lease_state(
                         claimed
                     )
@@ -2884,6 +2986,7 @@ class StoryForgeApi:
         lost_batch_id = ""
         with self._lease_lock:
             self._leased_records.discard(record_id)
+            self._forget_lease_generation(record_id)
             self._lease_health.pop(record_id, None)
             # Install the marker before cancelling.  The active processor can
             # finish on another thread at any point after ownership is known
@@ -2924,26 +3027,87 @@ class StoryForgeApi:
 
     def _claim_record_lease(self, record_id: str) -> None:
         device_id = self._current_device_id()
+        with self._lease_lock:
+            lease_generation = self._lease_generation_for(record_id)
+        arguments: dict[str, Any] = {}
+        if lease_generation > 0:
+            arguments["lease_generation"] = lease_generation
         claimed = self._catalog.claim_record_lease(
             record_id,
             device_id,
             lease_seconds=RECORD_LEASE_SECONDS,
+            **arguments,
         )
+        try:
+            claimed_record = dict(claimed.get("record") or {})
+            claimed_generation = int(
+                claimed_record.get("lease_generation") or 0
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError) as error:
+            raise RuntimeError(
+                "claim did not return a valid production-record lease generation"
+            ) from error
+        if claimed_generation <= 0:
+            # A runnable local job must always carry the server-issued fencing
+            # token.  Treat malformed/legacy claim responses as a hard failure
+            # before touching local lease state; otherwise later writes could
+            # be sent without ``expected_lease_generation``.
+            raise RuntimeError(
+                "claim did not return a valid production-record lease generation"
+            )
         with self._lease_lock:
             self._superseded_lease_records.discard(record_id)
             self._leased_records.add(record_id)
+            self._remember_lease_generation(record_id, claimed_record)
             self._lease_health[record_id] = self._healthy_lease_state(claimed)
         self._ensure_lease_heartbeat()
 
+    def _begin_record_retry_with_lease(self, record_id: str) -> dict[str, Any]:
+        """Reopen a terminal attempt and install its fencing lease atomically.
+
+        The durable catalog transition must happen before the in-memory queue
+        is made runnable.  Combining the retry and claim in one catalog write
+        prevents a second process from taking the reopened attempt in between
+        those operations.
+        """
+
+        retried = self._catalog.begin_record_retry(
+            record_id,
+            device_id=self._current_device_id(),
+            lease_seconds=RECORD_LEASE_SECONDS,
+            actor_user_id=self._current_web_actor() or None,
+        )
+        claimed_record = dict(retried or {})
+        generation = int(claimed_record.get("lease_generation") or 0)
+        if generation <= 0:
+            raise RuntimeError(
+                "retry did not return a valid production-record lease generation"
+            )
+        with self._lease_lock:
+            self._superseded_lease_records.discard(record_id)
+            self._leased_records.add(record_id)
+            self._remember_lease_generation(record_id, claimed_record)
+            self._lease_health[record_id] = self._healthy_lease_state(
+                {"record": claimed_record}
+            )
+        self._ensure_lease_heartbeat()
+        return claimed_record
+
     def _release_record_lease(self, record_id: str) -> None:
         device_id = self._current_device_id()
+        with self._lease_lock:
+            lease_generation = self._lease_generation_for(record_id)
         try:
-            self._catalog.release_record_lease(record_id, device_id)
+            arguments: dict[str, Any] = {}
+            if lease_generation > 0:
+                arguments["lease_generation"] = lease_generation
+            self._catalog.release_record_lease(record_id, device_id, **arguments)
         except (OSError, sqlite3.Error, ValueError, RuntimeError, KeyError, TypeError):
             pass
         with self._lease_lock:
             self._superseded_lease_records.discard(record_id)
             self._leased_records.discard(record_id)
+            self._forget_lease_generation(record_id)
             self._lease_health.pop(record_id, None)
 
     def _claim_draft_gate(self, draft_id: str) -> str:
@@ -3753,6 +3917,17 @@ class StoryForgeApi:
 
         return load
 
+    def _discard_loaded_jobs(self, jobs: Sequence[RenderJob]) -> None:
+        """Release claims from a stream page cancelled while it was loading."""
+
+        released: set[str] = set()
+        for job in jobs:
+            record_id = str(job.production_record_id or "").strip()
+            if not record_id or record_id in released:
+                continue
+            released.add(record_id)
+            self._release_record_lease(record_id)
+
     def queue_production_draft(self, value: dict[str, Any]) -> dict[str, Any]:
         """Create a full-render queue from one novel/platform draft."""
 
@@ -3918,6 +4093,7 @@ class StoryForgeApi:
                     response_jobs,
                     loader,
                     local_platform,
+                    on_discard=self._discard_loaded_jobs,
                     history_limit=max(50, PRODUCTION_QUEUE_WINDOW),
                 )
             else:
@@ -4820,12 +4996,32 @@ class StoryForgeApi:
     def regenerate_preview(self, job_id: str) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
             job = self._queue.get_job(str(job_id))
+            terminal_retry = bool(
+                job is not None
+                and job.status
+                in {
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                    JobStatus.INTERRUPTED,
+                }
+            )
             if job is not None:
                 self._refresh_job_render_context(job)
+                if job.production_record_id:
+                    self._require_job_record_access(job.production_record_id)
             self._validate_provider_readiness(
                 job.settings_snapshot if job is not None else None
             )
-            item = self._queue.regenerate_preview(str(job_id))
+            claimed_record_id = ""
+            if terminal_retry and job is not None and job.production_record_id:
+                claimed_record_id = job.production_record_id
+                self._begin_record_retry_with_lease(claimed_record_id)
+            try:
+                item = self._queue.regenerate_preview(str(job_id))
+            except BaseException:
+                if claimed_record_id:
+                    self._release_record_lease(claimed_record_id)
+                raise
             self._queue.start()
             self._sync_job_records()
             return item
@@ -4928,12 +5124,16 @@ class StoryForgeApi:
             self._validate_provider_readiness(
                 existing.settings_snapshot if existing is not None else None
             )
+            claimed_record_id = ""
             if existing is not None and existing.production_record_id:
-                self._catalog.begin_record_retry(
-                    existing.production_record_id,
-                    actor_user_id=self._current_web_actor() or None,
-                )
-            item = self._queue.retry_failed(str(job_id))
+                claimed_record_id = existing.production_record_id
+                self._begin_record_retry_with_lease(claimed_record_id)
+            try:
+                item = self._queue.retry_failed(str(job_id))
+            except BaseException:
+                if claimed_record_id:
+                    self._release_record_lease(claimed_record_id)
+                raise
             self._queue.start()
             self._sync_job_records()
             return item
@@ -5175,6 +5375,7 @@ class StoryForgeApi:
         job: RenderJob,
         *,
         shutdown_confirmed: bool = False,
+        allow_terminal: bool = True,
     ) -> None:
         """Project one in-memory job into its durable production record."""
 
@@ -5188,6 +5389,17 @@ class StoryForgeApi:
         # failure and accidentally release its lease before the failure sync.
         projected_status = self._record_status(job)
         projected_progress = float(job.progress)
+        if not allow_terminal and projected_status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            # Best-effort UI/action projections must never publish a final
+            # state.  The Worker terminal callback owns that write and the
+            # matching lease release; otherwise an earlier projection can
+            # discard its fencing generation and make the callback fail 409.
+            return
         output_path = job.output_file or job.preview_file
         if projected_status == "completed":
             self._record_media_from_manifest(job)
@@ -5200,8 +5412,9 @@ class StoryForgeApi:
         episode_ids = list(
             job.episode_ids or ((job.episode_id,) if job.episode_id else ())
         )
-        record = self._catalog.save_production_record(
-            {
+        with self._lease_lock:
+            lease_generation = self._lease_generation_for(job.production_record_id)
+        record_value = {
                 "id": job.production_record_id,
                 "job_id": job.id,
                 "device_id": self._current_device_id(),
@@ -5215,6 +5428,11 @@ class StoryForgeApi:
                     "episode_label": episode_label,
                     "episode_ids": episode_ids,
                     "stage_label": job.stage_label,
+                    "pipeline_stage": job.pipeline_stage,
+                    "pipeline_stage_started_at": job.pipeline_stage_started_at,
+                    "pipeline_stage_history": deepcopy(
+                        job.pipeline_stage_history[-16:]
+                    ),
                     "output_folder": publish_folder,
                     "publish_batch_folder": job.publish_batch_folder,
                     "job_kind": job.job_kind,
@@ -5240,7 +5458,9 @@ class StoryForgeApi:
                     ),
                 },
             }
-        )
+        if lease_generation > 0:
+            record_value["expected_lease_generation"] = lease_generation
+        record = self._catalog.save_production_record(record_value)
         job.batch_id = str(record.get("batch_id") or job.batch_id)
         if projected_status == "awaiting_approval":
             self._record_artifact(job, "sample", job.preview_file)
@@ -5263,6 +5483,76 @@ class StoryForgeApi:
         if projected_status in {"completed", "failed", "cancelled", "interrupted"}:
             self._release_record_lease(job.production_record_id)
 
+    def _terminal_conflict_was_already_persisted(self, job: RenderJob) -> bool:
+        """Acknowledge an unambiguous replay of this process's terminal write.
+
+        A Hub can commit the terminal update and lose the HTTP response.  The
+        retry then sees a lease conflict because that committed update cleared
+        the lease.  Accept only the exact durable record, job, workstation and
+        fencing generation still held by this process; every other conflict
+        remains authoritative and must propagate.
+        """
+
+        record_id = str(job.production_record_id or "").strip()
+        job_id = str(job.id or "").strip()
+        projected_status = self._record_status(job)
+        local_terminal_statuses = {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }
+        if (
+            not record_id
+            or not job_id
+            or projected_status not in local_terminal_statuses
+        ):
+            return False
+        with self._lease_lock:
+            lease_generation = self._lease_generation_for(record_id)
+            locally_leased = record_id in self._leased_records
+        if not locally_leased or lease_generation <= 0:
+            return False
+
+        authoritative = self._catalog.get_record(record_id)
+        if not isinstance(authoritative, Mapping):
+            return False
+        authoritative_status = str(authoritative.get("status") or "").strip()
+        compatible_status = authoritative_status == projected_status or (
+            authoritative_status == "cancelled"
+            and projected_status in local_terminal_statuses
+        )
+        try:
+            authoritative_generation = int(
+                authoritative.get("lease_generation") or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not (
+            str(authoritative.get("id") or "").strip() == record_id
+            and str(authoritative.get("job_id") or "").strip() == job_id
+            and str(authoritative.get("device_id") or "").strip()
+            == self._current_device_id()
+            and authoritative_generation == lease_generation
+            and compatible_status
+            and not str(authoritative.get("lease_owner_device") or "").strip()
+        ):
+            return False
+
+        # Recheck the local fence after the network read.  A heartbeat may have
+        # observed a real takeover while ``get_record`` was in flight.
+        with self._lease_lock:
+            if (
+                record_id not in self._leased_records
+                or self._lease_generation_for(record_id) != lease_generation
+            ):
+                return False
+            self._superseded_lease_records.discard(record_id)
+            self._leased_records.discard(record_id)
+            self._forget_lease_generation(record_id)
+            self._lease_health.pop(record_id, None)
+        return True
+
     def _sync_terminal_job_record(self, job: RenderJob) -> None:
         """Persist one terminal Worker result without relying on UI polling."""
 
@@ -5278,8 +5568,12 @@ class StoryForgeApi:
                 if superseded:
                     self._superseded_lease_records.discard(job.production_record_id)
                     self._leased_records.discard(job.production_record_id)
+                    self._forget_lease_generation(job.production_record_id)
                     self._lease_health.pop(job.production_record_id, None)
-            if not superseded:
+            if (
+                not superseded
+                and not self._terminal_conflict_was_already_persisted(job)
+            ):
                 raise
         except CatalogNotFoundError:
             # An administrator may intentionally delete a historical batch
@@ -5288,6 +5582,7 @@ class StoryForgeApi:
             # would freeze every younger batch without anything to update.
             with self._lease_lock:
                 self._leased_records.discard(job.production_record_id)
+                self._forget_lease_generation(job.production_record_id)
                 self._lease_health.pop(job.production_record_id, None)
         except HubRemoteError as error:
             status = int(error.status)
@@ -5299,14 +5594,16 @@ class StoryForgeApi:
                     if superseded:
                         self._superseded_lease_records.discard(job.production_record_id)
                         self._leased_records.discard(job.production_record_id)
+                        self._forget_lease_generation(job.production_record_id)
                         self._lease_health.pop(job.production_record_id, None)
-                if superseded:
+                if superseded or self._terminal_conflict_was_already_persisted(job):
                     self._release_finished_draft_gates()
                     return
             if status != 404:
                 raise
             with self._lease_lock:
                 self._leased_records.discard(job.production_record_id)
+                self._forget_lease_generation(job.production_record_id)
                 self._lease_health.pop(job.production_record_id, None)
         self._release_finished_draft_gates()
 
@@ -5325,7 +5622,7 @@ class StoryForgeApi:
             if item is not None and item.production_draft_id
         ]:
             try:
-                self._sync_one_job_record(job)
+                self._sync_one_job_record(job, allow_terminal=False)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
                 continue
         self._release_finished_draft_gates()
@@ -5338,6 +5635,19 @@ class StoryForgeApi:
             records = self._catalog.list_reconciliation_records(device_id)["items"]
         except (OSError, ValueError, RuntimeError, KeyError, TypeError):
             return
+        now = datetime.now(timezone.utc)
+        active_lease_record_ids = {
+            str(record.get("id") or "")
+            for record in records
+            if str(record.get("lease_owner_device") or "")
+            and self._future_iso(record.get("lease_expires_at"), now)
+        }
+        active_lease_batch_ids = {
+            str(record.get("batch_id") or "")
+            for record in records
+            if str(record.get("id") or "") in active_lease_record_ids
+            and str(record.get("batch_id") or "")
+        }
         current_job_ids = {
             str(item.get("id") or "") for item in self._queue.list_jobs()
         }
@@ -5345,6 +5655,12 @@ class StoryForgeApi:
         recoverable_batch_ids: set[str] = set()
         for raw in records:
             record = dict(raw)
+            if str(record.get("id") or "") in active_lease_record_ids:
+                # A second StoryForge process can have the same workstation
+                # identity.  A live lease is authoritative until that process
+                # releases it or the lease expires; startup recovery must not
+                # mutate or release it merely because device ids match.
+                continue
             metadata = dict(record.get("metadata") or {})
             if bool(metadata.get("lease_gate")):
                 continue
@@ -5369,13 +5685,22 @@ class StoryForgeApi:
             if job.batch_id:
                 recoverable_batch_ids.add(job.batch_id)
 
-        blocked_batches: set[str] = set()
+        blocked_batches: set[str] = set(active_lease_batch_ids)
         # Restore the durable draft gate first so the recovered batch cannot be
         # queued a second time while its task records are being reattached.
         for raw in records:
             record = dict(raw)
             metadata = dict(record.get("metadata") or {})
             if not bool(metadata.get("lease_gate")):
+                continue
+            if str(record.get("id") or "") in active_lease_record_ids:
+                durable_batch_id = str(
+                    metadata.get("durable_batch_id")
+                    or record.get("batch_id")
+                    or ""
+                ).strip()
+                if durable_batch_id:
+                    blocked_batches.add(durable_batch_id)
                 continue
             draft_id = str(
                 record.get("draft_id") or metadata.get("draft_id") or ""
@@ -5397,7 +5722,13 @@ class StoryForgeApi:
                         durable_batch_id,
                     )
                 continue
-            if str(record.get("lease_owner_device") or "") == device_id:
+            if str(record.get("lease_owner_device") or ""):
+                try:
+                    self._claim_record_lease(str(record["id"]))
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                    # Another process may have claimed the expired lease after
+                    # our reconciliation snapshot.  Do not mutate its gate.
+                    continue
                 self._release_record_lease(str(record["id"]))
             if draft_id:
                 self._clear_draft_claim(draft_id)
@@ -5425,6 +5756,8 @@ class StoryForgeApi:
         recovered_by_platform: dict[tuple[str, str], list[RenderJob]] = {}
         recovered_any = False
         for record in records:
+            if str(record.get("id") or "") in active_lease_record_ids:
+                continue
             metadata = dict(record.get("metadata") or {})
             if bool(metadata.get("lease_gate")):
                 continue
@@ -5461,35 +5794,47 @@ class StoryForgeApi:
                     "软件关闭或设备重启，正在执行的任务已中断，可从生产记录重试。"
                 )
             else:
-                if str(record.get("lease_owner_device") or "") == device_id:
+                if str(record.get("lease_owner_device") or ""):
                     try:
-                        self._catalog.release_record_lease(record["id"], device_id)
+                        self._claim_record_lease(str(record["id"]))
                     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
-                        pass
+                        continue
+                    self._release_record_lease(str(record["id"]))
                 continue
+            record_id = str(record.get("id") or "")
+            lease_generation = 0
+            if str(record.get("lease_owner_device") or ""):
+                try:
+                    self._claim_record_lease(record_id)
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                    # The record changed after the startup snapshot.  Treat the
+                    # newer lease as authoritative and leave it untouched.
+                    continue
+                lease_generation = self._lease_generation_for(record_id)
+            update_value: dict[str, Any] = {
+                "id": record["id"],
+                "status": "interrupted",
+                "progress": record.get("progress") or 0,
+                "output_path": record.get("output_path") or "",
+                "error_message": interruption_message,
+                "metadata": metadata,
+            }
+            if lease_generation > 0:
+                update_value["expected_lease_owner_device"] = device_id
+                update_value["expected_lease_generation"] = lease_generation
             try:
-                self._catalog.save_production_record(
-                    {
-                        "id": record["id"],
-                        "status": "interrupted",
-                        "progress": record.get("progress") or 0,
-                        "output_path": record.get("output_path") or "",
-                        "error_message": interruption_message,
-                        "metadata": metadata,
-                    }
-                )
+                self._catalog.save_production_record(update_value)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                if lease_generation > 0:
+                    self._release_record_lease(record_id)
                 continue
             # Queue jobs live in memory, but their cross-device lease and the
             # short optimistic draft claim live in SQLite.  When this same
             # machine restarts, both must be released together with the record
             # status; otherwise the user is incorrectly told that the vanished
             # process is still producing the batch for up to three minutes.
-            if str(record.get("lease_owner_device") or "") == device_id:
-                try:
-                    self._catalog.release_record_lease(record["id"], device_id)
-                except (OSError, ValueError, RuntimeError, KeyError, TypeError):
-                    pass
+            if lease_generation > 0:
+                self._release_record_lease(record_id)
         for (_batch_id, platform_id), jobs in recovered_by_platform.items():
             platform = self._state.platform_by_id(platform_id)
             if platform is None:

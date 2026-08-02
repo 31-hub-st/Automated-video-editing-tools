@@ -738,6 +738,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('"get_queue_connection"', javascript)
         self.assertIn("正在自动重连", javascript)
         self.assertIn("LOCAL_WORKER_PROTOCOL_VERSION", javascript)
+        self.assertIn("LOCAL_WORKER_PROTOCOL_VERSION = 3", javascript)
+        self.assertIn("LOCAL_WORKER_MIN_COMPATIBLE_PROTOCOL_VERSION = 3", javascript)
         self.assertIn("function localWorkerCompatibility", javascript)
         self.assertIn("connection.data.runtime", javascript)
         self.assertIn("function localTtsRuntimeSnapshot", javascript)
@@ -1864,6 +1866,128 @@ class StyleSettingsContractTests(unittest.TestCase):
             "body.production-resource-busy .video-preview .preview-media::before",
             css,
         )
+
+    def test_stable_foundation_uses_seven_real_production_stages(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        stages = (
+            ("text", "文本"),
+            ("voice", "配音"),
+            ("subtitle", "字幕"),
+            ("preflight", "素材预检"),
+            ("render", "渲染"),
+            ("quality", "质检"),
+            ("publish", "发布"),
+        )
+        for stage, label in stages:
+            self.assertIn(f'data-stage="{stage}"', html)
+            self.assertIn(f'<b>{label}</b>', html)
+            self.assertIn(f'data-production-stage-status="{stage}"', html)
+        self.assertIn("const productionStageCatalog = [", javascript)
+        self.assertIn("function productionStageForJob(job)", javascript)
+        self.assertIn("productionStageCatalog.findIndex", javascript)
+        self.assertIn('node.classList.toggle("is-failed", failedHere)', javascript)
+        self.assertIn('data-production-quick-jump="content"', html)
+        self.assertIn('event.target.closest("[data-production-quick-jump]")', javascript)
+        self.assertIn("missing?.selector || \"\"", javascript)
+        self.assertIn("grid-template-columns: repeat(7, minmax(0, 1fr))", css)
+        self.assertIn(".production-section-jumpbar [data-stage].is-current", css)
+        self.assertIn(".production-preview-drawer {", css)
+        self.assertIn("max-height: calc(100vh - 96px)", css)
+
+    def test_failed_job_cards_explain_stage_reason_fix_and_available_actions(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("function jobFailureCardMarkup(job, retryAction", javascript)
+        self.assertIn("失败阶段 ·", javascript)
+        self.assertIn("修复建议", javascript)
+        self.assertIn("compactJobFailureReason(job)", javascript)
+        self.assertIn("jobFailureFix(job)", javascript)
+        self.assertIn("const logAction = safeLog", javascript)
+        self.assertIn('const diagnosticAction = $("#run-worker-self-check")', javascript)
+        self.assertIn('data-open-view="providers"', javascript)
+        self.assertIn('data-retry-job="${escapeHtml(job.id)}"', javascript)
+        self.assertIn("job.failure_diagnostics.log_tail", javascript)
+        self.assertIn(".job-failure-card", css)
+        self.assertIn(".job-support-detail > summary", css)
+        self.assertIn(".job-support-button.is-primary", css)
+
+    def test_employee_device_states_and_desktop_scaling_are_plain_language(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="employee-device-state"', html)
+        for state_name, label in (
+            ("ready", "可接任务"),
+            ("busy", "制作中"),
+            ("paused", "已暂停"),
+            ("draining", "完成后暂停"),
+            ("cooling", "冷却中"),
+            ("degraded", "状态异常"),
+            ("fault", "故障"),
+        ):
+            self.assertIn(f"{state_name}: {{", javascript)
+            self.assertIn(f'label: "{label}"', javascript)
+        self.assertIn("function employeeDeviceStateFor(device", javascript)
+        self.assertIn("function currentEmployeeDeviceState()", javascript)
+        self.assertIn("function renderEmployeeDeviceStateBadge", javascript)
+        self.assertIn("discovered.health.state || discovered.health.health_state", javascript)
+        self.assertIn("device.state", javascript)
+        self.assertIn("device.governance?.state", javascript)
+        self.assertIn("snapshot.state || state.localWorker?.healthState", javascript)
+        self.assertIn("device.health_state", javascript)
+        self.assertIn("metadata.health_state", javascript)
+        self.assertIn("is-state-${escapeHtml(operationalState)}", javascript)
+        self.assertIn(".employee-device-state.is-ready", css)
+        self.assertIn(".managed-device-row.is-state-busy", css)
+        self.assertIn(".managed-device-status .device-state-badge.is-fault", css)
+        self.assertIn("clamp(214px, 15.6vw, 250px)", css)
+        self.assertIn("clamp(324px, 23.5vw, 360px)", css)
+        self.assertIn("@media (max-width: 1500px)", css)
+
+        offline_guard = 'if (device.online === false) return "degraded";'
+        stale_busy_guard = "if (queue.busy || device.busy || metadata.queue_busy || explicit === \"busy\") return \"busy\";"
+        self.assertIn(offline_guard, javascript)
+        self.assertLess(javascript.index(offline_guard), javascript.index(stale_busy_guard))
+
+    def test_noninteractive_production_stages_use_status_elements_not_buttons(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertNotIn("<button type=\"button\" data-stage=\"render\"", html)
+        self.assertNotIn("<button type=\"button\" data-stage=\"quality\"", html)
+        self.assertNotIn("<button type=\"button\" data-stage=\"publish\"", html)
+        for stage in ("render", "quality", "publish"):
+            self.assertIn(
+                f'<div class="production-stage-state" data-stage="{stage}" data-stage-only role="status"',
+                html,
+            )
+        self.assertIn(".production-section-jumpbar [data-stage]", css)
+        self.assertIn(".production-stage-state", css)
+
+    def test_local_storage_tools_are_safe_and_available_from_browser_or_desktop(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="scan-local-storage"', html)
+        self.assertIn('id="cleanup-local-storage"', html)
+        self.assertIn('id="create-support-bundle"', html)
+        self.assertIn("小说源文件与最终成片不会删除", html)
+        for method in (
+            "get_local_storage_status",
+            "cleanup_local_storage_cache",
+            "create_local_support_bundle",
+        ):
+            self.assertIn(f'"{method}"', javascript)
+        self.assertIn("confirm: false", javascript)
+        self.assertIn("confirm: true", javascript)
+        self.assertIn("window.confirm(", javascript)
+        self.assertIn(".local-storage-tools", css)
 
 
 if __name__ == "__main__":

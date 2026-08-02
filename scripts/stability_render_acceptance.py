@@ -67,6 +67,17 @@ RELEASE_EXACT_SECONDS = 311.05
 RELEASE_DEFAULT_STRESS_SECONDS = 600.0
 RELEASE_MINIMUM_ASS_EVENTS = 300
 RESOURCE_SAMPLE_INTERVAL_SECONDS = 0.25
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_VIDEO_STREAM_RE = re.compile(
+    r"^\s*Stream\s+[^\r\n]*?Video:\s*([^,\s]+)[^\r\n]*?"
+    r"(\d{2,5})x(\d{2,5})[^\r\n]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_AUDIO_STREAM_RE = re.compile(
+    r"^\s*Stream\s+[^\r\n]*?Audio:\s*([^,\s]+)[^\r\n]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_FPS_RE = re.compile(r"(?:,|\s)(\d+(?:\.\d+)?)\s+fps(?:,|\s)", re.IGNORECASE)
 
 
 def _console_print(*values: object, file: object | None = None) -> None:
@@ -670,6 +681,10 @@ def _find_named_binary(app_root: Path | None, names: tuple[str, ...]) -> Path | 
     return None
 
 
+def _same_executable(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
+
+
 def resolve_tools(args: argparse.Namespace) -> tuple[Path, Path]:
     app_root = args.app_root.expanduser().resolve() if args.app_root else None
     ffmpeg = args.ffmpeg.expanduser().resolve() if args.ffmpeg else None
@@ -687,16 +702,18 @@ def resolve_tools(args: argparse.Namespace) -> tuple[Path, Path]:
         )
 
     ffprobe = args.ffprobe.expanduser().resolve() if args.ffprobe else None
+    if args.ffprobe and (ffprobe is None or not ffprobe.is_file()):
+        raise AcceptanceError(f"Configured ffprobe does not exist: {args.ffprobe}")
     if ffprobe is None:
         ffprobe = _find_named_binary(app_root, ("ffprobe.exe", "ffprobe"))
-    if ffprobe is None:
+    if ffprobe is None and app_root is None:
         ffprobe = resolve_ffprobe(ffmpeg)
-    if ffprobe is None or not ffprobe.is_file():
-        raise AcceptanceError(
-            "ffprobe is required for acceptance verification. Pass --ffprobe "
-            "or use --app-root with a package containing ffprobe."
-        )
-    return ffmpeg, ffprobe
+    # imageio-ffmpeg intentionally ships only FFmpeg.  The acceptance gate can
+    # still verify the exact media contract by decoding both optional stream
+    # types and parsing FFmpeg's input metadata.  A real ffprobe remains the
+    # preferred backend when one is available.
+    media_probe = ffprobe if ffprobe is not None and ffprobe.is_file() else ffmpeg
+    return ffmpeg, media_probe
 
 
 def run_command(command: list[str], *, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
@@ -863,10 +880,85 @@ class OfflineTTSProvider:
         return TTSResult(tuple(segments), provider="acceptance-offline-tts")
 
 
-def probe(ffprobe: Path, path: Path) -> dict[str, object]:
+def _probe_with_ffmpeg(ffmpeg: Path, path: Path) -> dict[str, object]:
+    """Decode available A/V streams and return ffprobe-shaped metadata.
+
+    Both maps are optional so a legitimate audio-only MP3 is accepted by the
+    command.  The caller still enforces the exact expected stream counts, so
+    optional mapping does not weaken the release gate.
+    """
+
     completed = run_command(
         [
-            str(ffprobe),
+            str(ffmpeg),
+            "-hide_banner",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-sn",
+            "-dn",
+            "-t",
+            "0.25",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=60.0,
+    )
+    output = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    # FFmpeg prints input and output stream descriptions.  Only the input
+    # section is authoritative; otherwise every stream would be counted twice.
+    input_metadata = output.split("Stream mapping:", 1)[0].split("Output #0", 1)[0]
+    duration_match = _DURATION_RE.search(input_metadata)
+    duration = 0.0
+    if duration_match:
+        hours, minutes, seconds = duration_match.groups()
+        duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+    streams: list[dict[str, object]] = []
+    for match in _VIDEO_STREAM_RE.finditer(input_metadata):
+        line = match.group(0)
+        fps_match = _FPS_RE.search(line)
+        streams.append(
+            {
+                "codec_type": "video",
+                "codec_name": match.group(1).casefold(),
+                "width": int(match.group(2)),
+                "height": int(match.group(3)),
+                "avg_frame_rate": str(fps_match.group(1) if fps_match else "0"),
+            }
+        )
+    for match in _AUDIO_STREAM_RE.finditer(input_metadata):
+        streams.append(
+            {
+                "codec_type": "audio",
+                "codec_name": match.group(1).casefold(),
+            }
+        )
+    if not streams:
+        raise AcceptanceError(f"FFmpeg found no decodable audio or video streams in {path}")
+    return {
+        "streams": streams,
+        "format": {"duration": duration},
+        "_storyforge_probe_backend": "ffmpeg-fallback",
+    }
+
+
+def probe(
+    media_probe: Path,
+    path: Path,
+    *,
+    ffmpeg: Path | None = None,
+) -> dict[str, object]:
+    if ffmpeg is not None and _same_executable(media_probe, ffmpeg):
+        return _probe_with_ffmpeg(ffmpeg, path)
+
+    completed = run_command(
+        [
+            str(media_probe),
             "-v",
             "error",
             "-print_format",
@@ -883,6 +975,7 @@ def probe(ffprobe: Path, path: Path) -> dict[str, object]:
         raise AcceptanceError(f"ffprobe returned invalid JSON for {path}") from error
     if not isinstance(payload, dict):
         raise AcceptanceError(f"ffprobe returned an invalid payload for {path}")
+    payload["_storyforge_probe_backend"] = "ffprobe"
     return payload
 
 
@@ -895,13 +988,14 @@ def _rate(value: object) -> float:
 
 
 def verify_video(
-    ffprobe: Path,
+    media_probe: Path,
     path: Path,
     *,
+    ffmpeg: Path | None = None,
     expected_fps: int,
     expected_duration_seconds: float,
 ) -> dict[str, object]:
-    payload = probe(ffprobe, path)
+    payload = probe(media_probe, path, ffmpeg=ffmpeg)
     streams = [item for item in payload.get("streams", []) if isinstance(item, dict)]
     videos = [item for item in streams if item.get("codec_type") == "video"]
     audios = [item for item in streams if item.get("codec_type") == "audio"]
@@ -918,6 +1012,7 @@ def verify_video(
         "duration": duration,
         "video_streams": len(videos),
         "audio_streams": len(audios),
+        "probe_backend": str(payload.get("_storyforge_probe_backend") or "unknown"),
     }
     if expected["codec"] != "h264":
         raise AcceptanceError(f"Expected H.264, got {expected['codec']!r}")
@@ -939,8 +1034,13 @@ def verify_video(
     return expected
 
 
-def verify_mp3(ffprobe: Path, path: Path) -> dict[str, object]:
-    payload = probe(ffprobe, path)
+def verify_mp3(
+    media_probe: Path,
+    path: Path,
+    *,
+    ffmpeg: Path | None = None,
+) -> dict[str, object]:
+    payload = probe(media_probe, path, ffmpeg=ffmpeg)
     streams = [item for item in payload.get("streams", []) if isinstance(item, dict)]
     audios = [item for item in streams if item.get("codec_type") == "audio"]
     videos = [item for item in streams if item.get("codec_type") == "video"]
@@ -950,7 +1050,12 @@ def verify_mp3(ffprobe: Path, path: Path) -> dict[str, object]:
         raise AcceptanceError(f"Narration is not a standalone MP3 stream: {path}")
     if duration <= 0.25 or path.stat().st_size <= 1_024:
         raise AcceptanceError(f"Narration MP3 is empty or too short: {path}")
-    return {"codec": codec, "duration": duration, "audio_streams": len(audios)}
+    return {
+        "codec": codec,
+        "duration": duration,
+        "audio_streams": len(audios),
+        "probe_backend": str(payload.get("_storyforge_probe_backend") or "unknown"),
+    }
 
 
 def verify_regular_publish_contract(
@@ -1226,6 +1331,7 @@ def render_scenario(
         video_probe = verify_video(
             ffprobe,
             video_path,
+            ffmpeg=ffmpeg,
             expected_fps=int(output_fps),
             expected_duration_seconds=intended_duration,
         )
@@ -1485,12 +1591,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         report["package_artifact_bound"] = package_artifact_bound
         ffmpeg, ffprobe = resolve_tools(args)
+        probe_uses_ffmpeg = _same_executable(ffmpeg, ffprobe)
         report["tools"] = {
             "ffmpeg": str(ffmpeg),
             "ffmpeg_version": _ffmpeg_version(ffmpeg),
             "ffmpeg_sha256": _sha256_file(ffmpeg),
-            "ffprobe": str(ffprobe),
-            "ffprobe_sha256": _sha256_file(ffprobe),
+            "media_probe": str(ffprobe),
+            "media_probe_backend": (
+                "ffmpeg-fallback" if probe_uses_ffmpeg else "ffprobe"
+            ),
+            "media_probe_sha256": _sha256_file(ffprobe),
+            # Retain the legacy fields for report consumers while making the
+            # absent standalone ffprobe explicit.
+            "ffprobe": "" if probe_uses_ffmpeg else str(ffprobe),
+            "ffprobe_sha256": "" if probe_uses_ffmpeg else _sha256_file(ffprobe),
         }
 
         if args.stress:

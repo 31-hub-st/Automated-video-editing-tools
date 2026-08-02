@@ -1929,6 +1929,71 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
         self.assertEqual(len(tasks), 2)
         self.assertEqual(grouped["summary"]["completed"], 2)
 
+    def test_begin_record_retry_can_atomically_claim_the_new_attempt(self) -> None:
+        _novel, _binding, _code, draft = self.make_draft()
+        record = self.catalog.save_production_record(
+            {
+                "draft_id": draft["id"],
+                "job_id": "atomic-retry-claim",
+                "status": "failed",
+                "error_message": "first attempt failed",
+            }
+        )
+
+        retried = self.catalog.begin_record_retry(
+            record["id"],
+            device_id="worker-retry",
+            lease_seconds=60,
+        )
+
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(retried["current_attempt"], 2)
+        self.assertEqual(retried["lease_owner_device"], "worker-retry")
+        self.assertGreater(retried["lease_generation"], 0)
+        self.assertTrue(retried["lease_expires_at"])
+        updated = self.catalog.save_production_record(
+            {
+                "id": record["id"],
+                "expected_lease_owner_device": "worker-retry",
+                "expected_lease_generation": retried["lease_generation"],
+                "status": "running",
+                "progress": 0.25,
+            }
+        )
+        self.assertEqual(updated["status"], "running")
+
+    def test_begin_record_retry_does_not_reopen_an_actively_leased_record(self) -> None:
+        _novel, _binding, _code, draft = self.make_draft()
+        record = self.catalog.save_production_record(
+            {
+                "draft_id": draft["id"],
+                "job_id": "atomic-retry-conflict",
+                "status": "failed",
+            }
+        )
+        with self.catalog._write_connection() as connection:
+            connection.execute(
+                """
+                UPDATE production_records
+                SET lease_owner_device = 'stale-process',
+                    lease_generation = lease_generation + 1,
+                    lease_expires_at = '2999-01-01T00:00:00+00:00'
+                WHERE id = ?
+                """,
+                (record["id"],),
+            )
+
+        with self.assertRaisesRegex(CatalogConflictError, "actively leased"):
+            self.catalog.begin_record_retry(
+                record["id"],
+                device_id="worker-retry",
+                lease_seconds=60,
+            )
+
+        unchanged = self.catalog.get_record(record["id"])
+        self.assertEqual(unchanged["status"], "failed")
+        self.assertEqual(unchanged["current_attempt"], 1)
+
     def test_durable_batch_summary_excludes_gate_and_uses_terminal_progress(self) -> None:
         _novel, _binding, _code, draft = self.make_draft(creative_line_count=10)
         gate = self.catalog.save_production_record(
@@ -2239,15 +2304,33 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
         self.assertTrue(claimed["claimed"])
         self.assertFalse(claimed["renewed"])
         self.assertEqual(claimed["record"]["lease_owner_device"], "worker-a")
+        generation = claimed["record"]["lease_generation"]
+        with self.assertRaisesRegex(CatalogConflictError, "another process"):
+            self.catalog.claim_record_lease(record["id"], "worker-a")
+        renewed = self.catalog.claim_record_lease(
+            record["id"],
+            "worker-a",
+            lease_generation=generation,
+            lease_seconds=60,
+        )
+        self.assertTrue(renewed["renewed"])
+        self.assertEqual(renewed["record"]["lease_generation"], generation)
         with self.assertRaises(CatalogConflictError):
             self.catalog.claim_record_lease(record["id"], "worker-b")
         with self.assertRaises(CatalogConflictError):
             self.catalog.heartbeat_record_lease(record["id"], "worker-b")
         with self.assertRaises(CatalogConflictError):
             self.catalog.release_record_lease(record["id"], "worker-b")
+        with self.assertRaisesRegex(CatalogConflictError, "generation is required"):
+            self.catalog.heartbeat_record_lease(record["id"], "worker-a")
+        with self.assertRaisesRegex(CatalogConflictError, "generation is required"):
+            self.catalog.release_record_lease(record["id"], "worker-a")
 
         heartbeat = self.catalog.heartbeat_record_lease(
-            record["id"], "worker-a", lease_seconds=120
+            record["id"],
+            "worker-a",
+            lease_generation=generation,
+            lease_seconds=120,
         )
         self.assertTrue(heartbeat["heartbeat"])
         reopened = CatalogRepository(
@@ -2262,7 +2345,9 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
             persisted["heartbeat_at"], heartbeat["record"]["heartbeat_at"]
         )
 
-        released = reopened.release_record_lease(record["id"], "worker-a")
+        released = reopened.release_record_lease(
+            record["id"], "worker-a", lease_generation=generation
+        )
         repeated = reopened.release_record_lease(record["id"], "worker-a")
         self.assertTrue(released["released"])
         self.assertFalse(repeated["released"])
@@ -2274,12 +2359,16 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
         record = self.catalog.save_production_record(
             {"draft_id": draft["id"], "job_id": "lease-guarded-update"}
         )
-        self.catalog.claim_record_lease(record["id"], "worker-a", lease_seconds=60)
+        claimed = self.catalog.claim_record_lease(
+            record["id"], "worker-a", lease_seconds=60
+        )
+        generation = claimed["record"]["lease_generation"]
 
         updated = self.catalog.save_production_record(
             {
                 "id": record["id"],
                 "expected_lease_owner_device": "worker-a",
+                "expected_lease_generation": generation,
                 "status": "running",
                 "progress": 0.25,
             }
@@ -2290,8 +2379,17 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
                 {
                     "id": record["id"],
                     "expected_lease_owner_device": "worker-b",
+                    "expected_lease_generation": generation,
                     "status": "completed",
                     "progress": 1,
+                }
+            )
+        with self.assertRaisesRegex(CatalogConflictError, "lease owner and generation"):
+            self.catalog.save_production_record(
+                {
+                    "id": record["id"],
+                    "status": "running",
+                    "progress": 0.5,
                 }
             )
         with self.catalog._write_connection() as connection:
@@ -2304,10 +2402,50 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
                 {
                     "id": record["id"],
                     "expected_lease_owner_device": "worker-a",
+                    "expected_lease_generation": generation,
                     "status": "completed",
                     "progress": 1,
                 }
             )
+
+    def test_same_device_retry_fences_stale_worker_generation(self) -> None:
+        _novel, _binding, _code, draft = self.make_draft()
+        record = self.catalog.save_production_record(
+            {"draft_id": draft["id"], "job_id": "same-device-fencing"}
+        )
+        first = self.catalog.claim_record_lease(
+            record["id"], "worker-a", lease_seconds=60
+        )["record"]
+        with self.catalog._write_connection() as connection:
+            connection.execute(
+                "UPDATE production_records SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", record["id"]),
+            )
+        second = self.catalog.claim_record_lease(
+            record["id"], "worker-a", lease_seconds=60
+        )["record"]
+        self.assertGreater(second["lease_generation"], first["lease_generation"])
+
+        with self.assertRaisesRegex(CatalogConflictError, "superseded"):
+            self.catalog.save_production_record(
+                {
+                    "id": record["id"],
+                    "expected_lease_owner_device": "worker-a",
+                    "expected_lease_generation": first["lease_generation"],
+                    "status": "running",
+                    "progress": 0.2,
+                }
+            )
+        updated = self.catalog.save_production_record(
+            {
+                "id": record["id"],
+                "expected_lease_owner_device": "worker-a",
+                "expected_lease_generation": second["lease_generation"],
+                "status": "running",
+                "progress": 0.3,
+            }
+        )
+        self.assertEqual(updated["progress"], 0.3)
 
     def test_concurrent_record_claim_has_exactly_one_winner(self) -> None:
         _novel, _binding, _code, draft = self.make_draft()
@@ -2334,6 +2472,25 @@ class ProductionRecordsMediaAndAuditTests(CatalogTestCase):
         self.assertEqual(
             self.catalog.get_record(record["id"])["lease_owner_device"], winners[0]
         )
+
+    def test_concurrent_same_device_process_claim_has_exactly_one_winner(self) -> None:
+        _novel, _binding, _code, draft = self.make_draft()
+        record = self.catalog.save_production_record(
+            {"draft_id": draft["id"], "job_id": "same-device-process-race"}
+        )
+
+        def claim(_index: int) -> str:
+            try:
+                self.catalog.claim_record_lease(record["id"], "shared-workstation")
+                return "claimed"
+            except CatalogConflictError:
+                return "conflict"
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            outcomes = list(executor.map(claim, range(12)))
+
+        self.assertEqual(outcomes.count("claimed"), 1)
+        self.assertEqual(outcomes.count("conflict"), 11)
 
     def test_expired_record_lease_can_be_reclaimed_by_another_device(self) -> None:
         _novel, _binding, _code, draft = self.make_draft()

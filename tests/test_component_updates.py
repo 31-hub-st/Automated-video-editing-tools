@@ -187,6 +187,96 @@ class ComponentRuntimeTests(unittest.TestCase):
             finally:
                 api._shutdown()
 
+    def test_api_install_restores_exact_state_when_activation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = SettingsRepository(root / "client")
+            api = StoryForgeApi(repository=repository)
+            try:
+                updater = api._component_updater
+                updater.install(
+                    _build_component(root, version="1.0.0", value="first")
+                )
+                state_path = (
+                    repository.data_dir
+                    / "components"
+                    / "kokoro.language.ja"
+                    / "state.json"
+                )
+                state_before = state_path.read_bytes()
+                recovered_runtime = updater.list_installed()
+                api._runtime_hub_mode = "host"
+                api._component_repository.publish(
+                    _build_component(root, version="2.0.0", value="second")
+                )
+
+                with patch.object(
+                    updater,
+                    "activate_runtime",
+                    side_effect=[
+                        RuntimeError("candidate activation failed"),
+                        recovered_runtime,
+                    ],
+                ) as activate_runtime:
+                    result = api.install_component_update(
+                        "kokoro.language.ja", "2.0.0"
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], "candidate activation failed")
+                self.assertEqual(activate_runtime.call_count, 2)
+                self.assertEqual(state_path.read_bytes(), state_before)
+                current = updater.current("kokoro.language.ja")
+                self.assertIsNotNone(current)
+                assert current is not None
+                self.assertEqual(current.version, "1.0.0")
+            finally:
+                api._shutdown()
+
+    def test_api_install_reports_recovery_failure_after_restoring_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = SettingsRepository(root / "client")
+            api = StoryForgeApi(repository=repository)
+            try:
+                updater = api._component_updater
+                updater.install(
+                    _build_component(root, version="1.0.0", value="first")
+                )
+                state_path = (
+                    repository.data_dir
+                    / "components"
+                    / "kokoro.language.ja"
+                    / "state.json"
+                )
+                state_before = state_path.read_bytes()
+                api._runtime_hub_mode = "host"
+                api._component_repository.publish(
+                    _build_component(root, version="2.0.0", value="second")
+                )
+
+                with patch.object(
+                    updater,
+                    "activate_runtime",
+                    side_effect=[
+                        RuntimeError("candidate activation failed"),
+                        RuntimeError("previous runtime recovery failed"),
+                    ],
+                ):
+                    result = api.install_component_update(
+                        "kokoro.language.ja", "2.0.0"
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertIn("previous runtime recovery failed", result["error"])
+                self.assertEqual(state_path.read_bytes(), state_before)
+                current = updater.current("kokoro.language.ja")
+                self.assertIsNotNone(current)
+                assert current is not None
+                self.assertEqual(current.version, "1.0.0")
+            finally:
+                api._shutdown()
+
 
 class ComponentHubTransportTests(unittest.TestCase):
     def test_existing_hub_session_downloads_and_installs_component(self) -> None:

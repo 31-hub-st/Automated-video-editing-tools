@@ -33,7 +33,7 @@ from .services.text_processing import count_words
 from .production_presets import ProductionPresetStore
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 
 ROLE_ADMIN = "admin"
@@ -1175,6 +1175,7 @@ CREATE TABLE IF NOT EXISTS production_records (
     started_at TEXT,
     completed_at TEXT,
     lease_owner_device TEXT NOT NULL DEFAULT '',
+    lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
     lease_expires_at TEXT,
     heartbeat_at TEXT,
     cancel_requested_at TEXT,
@@ -1382,6 +1383,7 @@ class CatalogRepository:
         }
         lease_columns = {
             "lease_owner_device": "TEXT NOT NULL DEFAULT ''",
+            "lease_generation": "INTEGER NOT NULL DEFAULT 0",
             "lease_expires_at": "TEXT",
             "heartbeat_at": "TEXT",
         }
@@ -1437,6 +1439,11 @@ class CatalogRepository:
                 CatalogRepository._migrate_authored_episode_choices(connection)
             if 13 not in applied:
                 CatalogRepository._migrate_soft_delete_schema(connection)
+            # Version 11 can rebuild ``production_records`` while repairing a
+            # partially restored database.  Always verify the fencing column
+            # after every earlier structural migration instead of trusting a
+            # copied version-14 marker.
+            CatalogRepository._migrate_lease_fencing_schema(connection)
             return
 
         # Version 3 temporarily introduced a supervisor role. Version 4 folds
@@ -1545,6 +1552,39 @@ class CatalogRepository:
         CatalogRepository._migrate_production_ledger_schema(connection)
         CatalogRepository._migrate_authored_episode_choices(connection)
         CatalogRepository._migrate_soft_delete_schema(connection)
+        CatalogRepository._migrate_lease_fencing_schema(connection)
+
+    @staticmethod
+    def _migrate_lease_fencing_schema(connection: sqlite3.Connection) -> None:
+        """Persist a monotonically increasing generation for every lease.
+
+        Device ids alone cannot distinguish a late callback from an older
+        worker process on the same computer.  The generation is the fencing
+        token that makes those callbacks fail closed after a retry/reclaim.
+        """
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(production_records)"
+            ).fetchall()
+        }
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if "lease_generation" not in columns:
+                connection.execute(
+                    "ALTER TABLE production_records "
+                    "ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (14, utc_now()),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     @staticmethod
     def _migrate_soft_delete_schema(connection: sqlite3.Connection) -> None:
@@ -7459,6 +7499,9 @@ class CatalogRepository:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "lease_owner_device": str(row["lease_owner_device"] or ""),
+            "lease_generation": int(row["lease_generation"] or 0)
+            if "lease_generation" in row.keys()
+            else 0,
             "lease_expires_at": row["lease_expires_at"],
             "heartbeat_at": row["heartbeat_at"],
             "cancel_requested_at": row["cancel_requested_at"],
@@ -7893,12 +7936,40 @@ class CatalogRepository:
                     expected_lease_owner = _optional_text(
                         value.get("expected_lease_owner_device"), maximum=300
                     )
+                    if self._lease_is_active(row, datetime.now(timezone.utc)) and not (
+                        expected_lease_owner
+                    ):
+                        raise CatalogConflictError(
+                            "active production record updates require the lease owner and generation"
+                        )
                     if expected_lease_owner:
+                        if "expected_lease_generation" not in value:
+                            raise CatalogConflictError(
+                                "production record lease generation is required"
+                            )
+                        try:
+                            expected_lease_generation = int(
+                                value.get("expected_lease_generation")
+                            )
+                        except (TypeError, ValueError, OverflowError) as error:
+                            raise CatalogValidationError(
+                                "expected_lease_generation must be an integer"
+                            ) from error
+                        if expected_lease_generation <= 0:
+                            raise CatalogValidationError(
+                                "expected_lease_generation must be positive"
+                            )
                         now_dt = datetime.now(timezone.utc)
                         current_owner = str(row["lease_owner_device"] or "")
                         if current_owner != expected_lease_owner:
                             raise CatalogConflictError(
                                 "production record lease belongs to another device"
+                            )
+                        if int(row["lease_generation"] or 0) != (
+                            expected_lease_generation
+                        ):
+                            raise CatalogConflictError(
+                                "production record lease generation was superseded"
                             )
                         if not self._lease_is_active(row, now_dt):
                             raise CatalogConflictError(
@@ -8735,32 +8806,87 @@ class CatalogRepository:
         self,
         record_id: str,
         *,
+        device_id: str | None = None,
+        lease_seconds: int = 120,
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         record_id = _required_text(record_id, "record_id", maximum=120)
+        normalized_device_id = (
+            _required_text(device_id, "device_id", maximum=300)
+            if device_id is not None
+            else ""
+        )
+        heartbeat_at = ""
+        lease_expires_at = ""
+        lease_now: datetime | None = None
+        if normalized_device_id:
+            heartbeat_at, lease_expires_at = self._lease_window(lease_seconds)
+            lease_now = datetime.fromisoformat(heartbeat_at)
         with self._write_connection() as connection:
             row = self._record_row(connection, record_id)
             if str(row["status"]) not in {"failed", "cancelled", "interrupted", "skipped"}:
                 raise CatalogConflictError("only failed, cancelled or interrupted records can be retried")
             if row["trashed_at"]:
                 raise CatalogConflictError("trashed production records cannot be retried")
+            if (
+                normalized_device_id
+                and lease_now is not None
+                and self._lease_is_active(row, lease_now)
+            ):
+                # A device id identifies a workstation, not one process.  Even
+                # the same workstation must not reopen a terminal attempt while
+                # an older process still owns an active fencing generation.
+                raise CatalogConflictError(
+                    "production record is actively leased by another process"
+                )
             self._sync_record_attempt(connection, row)
             now = utc_now()
-            connection.execute(
-                """
-                UPDATE production_records
-                SET current_attempt = current_attempt + 1,
-                    status = 'queued', progress = 0, output_path = '',
-                    error_message = '', started_at = NULL, completed_at = NULL,
-                    cancel_requested_at = NULL, cancelled_at = NULL,
-                    cancel_requested_by_user_id = NULL, cancellation_reason = '',
-                    archived = 0, archived_at = NULL,
-                    archived_by_user_id = NULL, archive_snapshot_json = '{}',
-                    row_version = row_version + 1, updated_at = ?
-                WHERE id = ? AND site_id = ?
-                """,
-                (now, record_id, self.site_id),
-            )
+            if normalized_device_id:
+                next_generation = int(row["lease_generation"] or 0) + 1
+                connection.execute(
+                    """
+                    UPDATE production_records
+                    SET current_attempt = current_attempt + 1,
+                        status = 'queued', progress = 0, output_path = '',
+                        error_message = '', started_at = NULL, completed_at = NULL,
+                        cancel_requested_at = NULL, cancelled_at = NULL,
+                        cancel_requested_by_user_id = NULL, cancellation_reason = '',
+                        archived = 0, archived_at = NULL,
+                        archived_by_user_id = NULL, archive_snapshot_json = '{}',
+                        lease_owner_device = ?, lease_generation = ?,
+                        lease_expires_at = ?, heartbeat_at = ?,
+                        row_version = row_version + 1, updated_at = ?
+                    WHERE id = ? AND site_id = ?
+                    """,
+                    (
+                        normalized_device_id,
+                        next_generation,
+                        lease_expires_at,
+                        heartbeat_at,
+                        now,
+                        record_id,
+                        self.site_id,
+                    ),
+                )
+            else:
+                # Compatibility for maintenance tools and older callers which
+                # intentionally reopen the durable attempt without assigning a
+                # render-process lease.
+                connection.execute(
+                    """
+                    UPDATE production_records
+                    SET current_attempt = current_attempt + 1,
+                        status = 'queued', progress = 0, output_path = '',
+                        error_message = '', started_at = NULL, completed_at = NULL,
+                        cancel_requested_at = NULL, cancelled_at = NULL,
+                        cancel_requested_by_user_id = NULL, cancellation_reason = '',
+                        archived = 0, archived_at = NULL,
+                        archived_by_user_id = NULL, archive_snapshot_json = '{}',
+                        row_version = row_version + 1, updated_at = ?
+                    WHERE id = ? AND site_id = ?
+                    """,
+                    (now, record_id, self.site_id),
+                )
             updated = self._record_row(connection, record_id)
             self._sync_record_attempt(connection, updated)
             result = self._record_dict(updated)
@@ -8771,7 +8897,12 @@ class CatalogRepository:
                 entity_id=record_id,
                 actor_user_id=actor_user_id,
                 before={"attempt": int(row["current_attempt"]), "status": str(row["status"])},
-                after={"attempt": result["current_attempt"], "status": "queued"},
+                after={
+                    "attempt": result["current_attempt"],
+                    "status": "queued",
+                    "lease_owner_device": result["lease_owner_device"],
+                    "lease_generation": result["lease_generation"],
+                },
             )
             return result
 
@@ -9513,10 +9644,18 @@ class CatalogRepository:
         record_id: str,
         device_id: str,
         *,
+        lease_generation: int | None = None,
         lease_seconds: int = 120,
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically claim or renew a production record for one device."""
+        """Atomically claim or renew a production record for one process.
+
+        ``device_id`` identifies a workstation, not one OS process.  A fresh
+        process therefore cannot treat an active lease from an older process on
+        the same workstation as its own.  Only a caller which presents the
+        current fencing generation may renew an active lease; an initial claim
+        must wait for expiry (or explicit release) and receives a new generation.
+        """
 
         record_id = _required_text(record_id, "record_id", maximum=120)
         device_id = _required_text(device_id, "device_id", maximum=300)
@@ -9529,21 +9668,57 @@ class CatalogRepository:
                     "terminal production records cannot be claimed"
                 )
             previous_owner = str(row["lease_owner_device"] or "")
+            previous_generation = int(row["lease_generation"] or 0)
             active = self._lease_is_active(row, now)
-            if active and previous_owner != device_id:
+            expected_generation: int | None = None
+            if lease_generation is not None:
+                try:
+                    expected_generation = int(lease_generation)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise CatalogValidationError(
+                        "lease_generation must be an integer"
+                    ) from error
+                if expected_generation <= 0:
+                    raise CatalogValidationError(
+                        "lease_generation must be positive"
+                    )
+            if active:
+                if previous_owner != device_id:
+                    raise CatalogConflictError(
+                        "production record is already leased by another device"
+                    )
+                if expected_generation is None:
+                    raise CatalogConflictError(
+                        "production record is already leased by another process"
+                    )
+                if expected_generation != previous_generation:
+                    raise CatalogConflictError(
+                        "production record lease generation was superseded"
+                    )
+            elif expected_generation is not None and (
+                previous_owner != device_id
+                or expected_generation != previous_generation
+            ):
+                # A process may recover its own expired lease, but it must not
+                # resurrect a lease which was explicitly released or replaced.
                 raise CatalogConflictError(
-                    "production record is already leased by another device"
+                    "production record lease generation was superseded"
                 )
-            renewed = bool(active and previous_owner == device_id)
+            renewed = bool(active)
             reclaimed = bool(previous_owner and not active)
+            lease_generation = (
+                previous_generation if renewed else previous_generation + 1
+            )
             connection.execute(
                 """
                 UPDATE production_records
-                SET lease_owner_device = ?, lease_expires_at = ?, heartbeat_at = ?
+                SET lease_owner_device = ?, lease_generation = ?,
+                    lease_expires_at = ?, heartbeat_at = ?
                 WHERE id = ? AND site_id = ?
                 """,
                 (
                     device_id,
+                    lease_generation,
                     lease_expires_at,
                     heartbeat_at,
                     record_id,
@@ -9566,10 +9741,12 @@ class CatalogRepository:
                 actor_user_id=actor_user_id,
                 before={
                     "lease_owner_device": previous_owner,
+                    "lease_generation": previous_generation,
                     "lease_expires_at": row["lease_expires_at"],
                 },
                 after={
                     "lease_owner_device": device_id,
+                    "lease_generation": lease_generation,
                     "lease_expires_at": lease_expires_at,
                     "heartbeat_at": heartbeat_at,
                 },
@@ -9586,6 +9763,7 @@ class CatalogRepository:
         record_id: str,
         device_id: str,
         *,
+        lease_generation: int | None = None,
         lease_seconds: int = 120,
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
@@ -9601,6 +9779,25 @@ class CatalogRepository:
                 raise CatalogConflictError(
                     "production record lease belongs to another device"
                 )
+            current_generation = int(row["lease_generation"] or 0)
+            if lease_generation is None:
+                raise CatalogConflictError(
+                    "production record lease generation is required"
+                )
+            try:
+                expected_generation = int(lease_generation)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise CatalogValidationError(
+                    "lease_generation must be an integer"
+                ) from error
+            if expected_generation <= 0:
+                raise CatalogValidationError(
+                    "lease_generation must be positive"
+                )
+            if expected_generation != current_generation:
+                raise CatalogConflictError(
+                    "production record lease generation was superseded"
+                )
             if not self._lease_is_active(row, now):
                 raise CatalogConflictError(
                     "production record lease expired; claim it again"
@@ -9610,6 +9807,7 @@ class CatalogRepository:
                 UPDATE production_records
                 SET lease_expires_at = ?, heartbeat_at = ?
                 WHERE id = ? AND site_id = ? AND lease_owner_device = ?
+                    AND lease_generation = ?
                 """,
                 (
                     lease_expires_at,
@@ -9617,6 +9815,7 @@ class CatalogRepository:
                     record_id,
                     self.site_id,
                     device_id,
+                    current_generation,
                 ),
             )
             result = self._record_dict(self._record_row(connection, record_id))
@@ -9627,6 +9826,7 @@ class CatalogRepository:
         record_id: str,
         device_id: str,
         *,
+        lease_generation: int | None = None,
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Release a lease; retrying after a successful release is idempotent."""
@@ -9645,13 +9845,33 @@ class CatalogRepository:
                     "released": False,
                     "record": self._record_dict(row),
                 }
+            current_generation = int(row["lease_generation"] or 0)
+            if lease_generation is None:
+                raise CatalogConflictError(
+                    "production record lease generation is required"
+                )
+            try:
+                expected_generation = int(lease_generation)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise CatalogValidationError(
+                    "lease_generation must be an integer"
+                ) from error
+            if expected_generation <= 0:
+                raise CatalogValidationError(
+                    "lease_generation must be positive"
+                )
+            if expected_generation != current_generation:
+                raise CatalogConflictError(
+                    "production record lease generation was superseded"
+                )
             connection.execute(
                 """
                 UPDATE production_records
                 SET lease_owner_device = '', lease_expires_at = NULL, heartbeat_at = NULL
                 WHERE id = ? AND site_id = ? AND lease_owner_device = ?
+                    AND lease_generation = ?
                 """,
-                (record_id, self.site_id, device_id),
+                (record_id, self.site_id, device_id, current_generation),
             )
             result = self._record_dict(self._record_row(connection, record_id))
             self._audit(
@@ -9662,11 +9882,13 @@ class CatalogRepository:
                 actor_user_id=actor_user_id,
                 before={
                     "lease_owner_device": previous_owner,
+                    "lease_generation": current_generation,
                     "lease_expires_at": row["lease_expires_at"],
                     "heartbeat_at": row["heartbeat_at"],
                 },
                 after={
                     "lease_owner_device": "",
+                    "lease_generation": current_generation,
                     "lease_expires_at": None,
                     "heartbeat_at": None,
                 },

@@ -10,6 +10,7 @@ param(
     [string]$PythonExe = '',
     [string]$HubEndpoint = '',
     [string]$HubSiteName = 'StoryForge Hub',
+    [switch]$ReleaseBuild,
     [switch]$RequireStableAcceptance,
     [double]$StableStressSeconds = 600,
     [ValidateSet('libx264', 'h264_nvenc', 'h264_qsv', 'h264_amf')]
@@ -22,6 +23,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$releasePackageSmokeReport = ''
+if ($ReleaseBuild -and -not $RequireStableAcceptance) {
+    throw '-ReleaseBuild requires the explicit -RequireStableAcceptance switch. Ordinary local builds should omit both switches.'
+}
+if ($ReleaseBuild -and $StableStressSeconds -lt 600) {
+    throw '-ReleaseBuild requires -StableStressSeconds of at least 600.'
+}
 $specPath = Join-Path $projectRoot 'StoryForge.spec'
 $buildVenv = Join-Path $projectRoot '.build-venv'
 $venvPython = Join-Path $buildVenv 'Scripts\python.exe'
@@ -436,40 +444,92 @@ assert summary['schema_version'] == SCHEMA_VERSION, summary
             $acceptanceArguments += @('--ffprobe', $StableFfprobe)
         }
         Write-Host 'Running the frozen package-bound 10-minute stable release gate...'
-        Invoke-Checked -Command $exePath -CommandArguments $acceptanceArguments
-
-        $stableReport = Get-Content -LiteralPath $acceptanceReportPath -Raw | ConvertFrom-Json
-        if (-not $stableReport.ok -or -not $stableReport.stable_release_eligible) {
-            throw "Stable acceptance did not approve this package: $acceptanceReportPath"
-        }
-        if ([string]$stableReport.storyforge_version -ne $expectedAppVersion) {
-            throw "Stable acceptance version is $($stableReport.storyforge_version), expected $expectedAppVersion."
-        }
-        if (-not $stableReport.package_artifact_bound -or [string]$stableReport.package.kind -ne 'explicit_artifact') {
-            throw 'Stable acceptance is not bound to an explicit package artifact.'
-        }
-        if ([string]$stableReport.code_under_test -ne 'frozen_executable_pipeline_runner' -or -not $stableReport.release_gate.frozen_executable_pipeline_executed) {
-            throw 'Stable acceptance did not execute the frozen StoryForge pipeline.'
-        }
-        if (-not $stableReport.package.runtime_entrypoint_matches) {
-            throw 'Stable acceptance executable does not match the running frozen entrypoint.'
-        }
-        $reportedPackagePath = [System.IO.Path]::GetFullPath([string]$stableReport.package.path)
-        if (-not [string]::Equals($reportedPackagePath, [System.IO.Path]::GetFullPath($exePath), [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Stable acceptance belongs to a different package: $reportedPackagePath"
-        }
-        $actualPackageHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ([string]$stableReport.package.sha256 -ne $actualPackageHash) {
-            throw 'Stable acceptance package SHA-256 does not match the executable being released.'
-        }
-        if ([int64]$stableReport.package.bytes -ne (Get-Item -LiteralPath $exePath).Length) {
-            throw 'Stable acceptance package size does not match the executable being released.'
-        }
-        foreach ($scenario in @($stableReport.scenarios)) {
-            if (-not $scenario.ok -or [string]$scenario.actual_command_encoder -ne $StableAcceptanceEncoder) {
-                throw "Stable scenario did not prove encoder $StableAcceptanceEncoder from its real FFmpeg command: $($scenario.name)"
+        # ``StoryForge Studio.exe`` is a windowed executable. Windows
+        # PowerShell does not reliably wait when it is invoked with ``&`` and
+        # can therefore evaluate a stale LASTEXITCODE while the real
+        # acceptance render is still running in the background. Start the
+        # process explicitly, keep it hidden, and wait for its authoritative
+        # exit code and JSON report.
+        $quotedAcceptanceArguments = @(
+            $acceptanceArguments | ForEach-Object {
+                $argument = [string]$_
+                if ($argument -match '[\s"]') {
+                    '"' + $argument.Replace('"', '\"') + '"'
+                }
+                else {
+                    $argument
+                }
             }
+        )
+        $acceptanceProcess = Start-Process -FilePath $exePath `
+            -ArgumentList $quotedAcceptanceArguments `
+            -WorkingDirectory $bundleRoot -WindowStyle Hidden -PassThru
+        $acceptanceTimeoutSeconds = [Math]::Max(
+            900,
+            [Math]::Ceiling($StableStressSeconds * 4)
+        )
+        $acceptanceTimeoutMilliseconds = [int]($acceptanceTimeoutSeconds * 1000)
+        if (-not $acceptanceProcess.WaitForExit($acceptanceTimeoutMilliseconds)) {
+            Stop-Process -Id $acceptanceProcess.Id -Force -ErrorAction SilentlyContinue
+            throw "The frozen stable acceptance timed out after $acceptanceTimeoutSeconds seconds."
         }
+        $acceptanceProcess.Refresh()
+        if ($acceptanceProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $acceptanceReportPath)) {
+            throw "The frozen stable acceptance failed (exit code $($acceptanceProcess.ExitCode)). Report: $acceptanceReportPath"
+        }
+
+        # The stable report intentionally contains the full progress timeline and
+        # can exceed what Windows PowerShell 5's ConvertFrom-Json handles
+        # reliably. Validate the authoritative report with the build Python
+        # runtime instead of loading the whole document into PowerShell.
+        $stableReportValidationScript = @'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+report_path = Path(sys.argv[1]).resolve(strict=True)
+expected_version = sys.argv[2]
+expected_executable = Path(sys.argv[3]).resolve(strict=True)
+expected_encoder = sys.argv[4]
+report = json.loads(report_path.read_text(encoding="utf-8"))
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+require(report.get("ok") is True and report.get("stable_release_eligible") is True,
+        f"Stable acceptance did not approve this package: {report_path}")
+require(str(report.get("storyforge_version")) == expected_version,
+        f"Stable acceptance version is {report.get('storyforge_version')}, expected {expected_version}.")
+package = report.get("package") or {}
+release_gate = report.get("release_gate") or {}
+require(report.get("package_artifact_bound") is True and package.get("kind") == "explicit_artifact",
+        "Stable acceptance is not bound to an explicit package artifact.")
+require(report.get("code_under_test") == "frozen_executable_pipeline_runner"
+        and release_gate.get("frozen_executable_pipeline_executed") is True,
+        "Stable acceptance did not execute the frozen StoryForge pipeline.")
+require(package.get("runtime_entrypoint_matches") is True,
+        "Stable acceptance executable does not match the running frozen entrypoint.")
+reported_path = Path(str(package.get("path") or "")).resolve(strict=True)
+require(os.path.normcase(str(reported_path)) == os.path.normcase(str(expected_executable)),
+        f"Stable acceptance belongs to a different package: {reported_path}")
+digest = hashlib.sha256(expected_executable.read_bytes()).hexdigest()
+require(package.get("sha256") == digest,
+        "Stable acceptance package SHA-256 does not match the executable being released.")
+require(int(package.get("bytes") or -1) == expected_executable.stat().st_size,
+        "Stable acceptance package size does not match the executable being released.")
+scenarios = report.get("scenarios") or []
+require(bool(scenarios), "Stable acceptance report contains no scenarios.")
+for scenario in scenarios:
+    require(scenario.get("ok") is True and scenario.get("actual_command_encoder") == expected_encoder,
+            f"Stable scenario did not prove encoder {expected_encoder} from its real FFmpeg command: {scenario.get('name')}")
+'@
+        Invoke-Checked -Command $venvPython -CommandArguments @(
+            '-c', $stableReportValidationScript, $acceptanceReportPath,
+            $expectedAppVersion, $exePath, $StableAcceptanceEncoder
+        )
         $bundledAcceptanceReport = Join-Path $bundleRoot 'BUILD_STABILITY_ACCEPTANCE.json'
         if (-not [string]::Equals($acceptanceReportPath, $bundledAcceptanceReport, [StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath $acceptanceReportPath -Destination $bundledAcceptanceReport -Force
@@ -497,6 +557,20 @@ write_release_validation(
         'StoryForge Studio.exe', $expectedAppVersion,
         $(if ($WithLocalAI) { '1' } else { '0' })
     )
+
+    if ($ReleaseBuild) {
+        $releaseGateRoot = Join-Path $buildRoot 'release-gate'
+        [System.IO.Directory]::CreateDirectory($releaseGateRoot) | Out-Null
+        $releasePackageSmokeReport = Join-Path $releaseGateRoot 'package-smoke.json'
+        Write-Host 'Running the independent frozen package smoke gate...'
+        Invoke-Checked -Command $venvPython -CommandArguments @(
+            (Join-Path $projectRoot 'scripts\package_smoke.py'),
+            '--package-root', $bundleRoot,
+            '--expected-version', $expectedAppVersion,
+            '--report', $releasePackageSmokeReport,
+            '--require-stable-acceptance'
+        )
+    }
 }
 finally {
     if ($null -eq $previousDataDir) {
@@ -512,6 +586,9 @@ Write-Host ''
 Write-Host "Build complete: StoryForge v$expectedAppVersion - $exePath ($sizeMb MB)"
 Write-Host "Startup validation: $(Join-Path $bundleRoot 'BUILD_STARTUP_VALIDATION.json')"
 Write-Host "Release attestation: $(Join-Path $bundleRoot 'BUILD_RELEASE_VALIDATION.json')"
+if ($releasePackageSmokeReport) {
+    Write-Host "Release package smoke: $releasePackageSmokeReport"
+}
 if (-not $WithLocalAI) {
     Write-Host 'This is the lightweight build. Use a Kokoro HTTP service or rebuild with -WithLocalAI.'
 }

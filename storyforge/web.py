@@ -34,6 +34,11 @@ from .credentials import (
     validate_new_password,
 )
 from .config import SecretProtector
+from .rpc_contract import (
+    CLIENT_LOCAL_MEDIA_METHODS,
+    WEB_DESKTOP_ONLY_MEDIA_METHODS,
+    WEB_RPC_PERMISSIONS,
+)
 
 
 SESSION_COOKIE = "storyforge_session"
@@ -55,162 +60,6 @@ UPLOAD_KIND_LIMITS = {
     "update_package": 2 * 1024 * 1024 * 1024,
     "component_package": 2 * 1024 * 1024 * 1024,
 }
-
-
-# This is deliberately independent of StoryForgeApi.__dir__. Adding a new
-# desktop bridge method never makes it reachable from the LAN automatically.
-WEB_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
-    "get_bootstrap": (),
-    "get_local_runtime_snapshot": (),
-    "get_local_self_check": (),
-    "get_visual_style_presets": (),
-    "get_production_presets": ("drafts.create", "hub.manage"),
-    "save_production_preset": ("presets.manage_own", "hub.manage"),
-    "delete_production_preset": ("presets.manage_own", "hub.manage"),
-    "get_hub_status": (),
-    "get_hub_backup_status": ("hub.manage",),
-    "list_hub_backups": ("hub.manage",),
-    "create_hub_backup": ("hub.manage",),
-    "get_update_status": (),
-    "check_for_updates": ("updates.manage_own", "hub.manage"),
-    "download_update": ("updates.manage_own", "hub.manage"),
-    "schedule_update_on_restart": ("updates.manage_own", "hub.manage"),
-    "cancel_scheduled_update": ("updates.manage_own", "hub.manage"),
-    "save_local_update_preferences": ("updates.manage_own", "hub.manage"),
-    "publish_update": ("hub.manage",),
-    "clear_published_update": ("hub.manage",),
-    "get_component_update_status": (),
-    "check_component_updates": ("updates.manage_own", "hub.manage"),
-    "install_component_update": ("updates.manage_own", "hub.manage"),
-    "rollback_component_update": ("updates.manage_own", "hub.manage"),
-    "publish_component_update": ("hub.manage",),
-    "clear_published_component": ("hub.manage",),
-    "save_platform": ("platforms.manage",),
-    "delete_platform": ("platforms.manage",),
-    "save_settings": ("hub.manage",),
-    "get_library_bootstrap": ("library.view",),
-    "import_novel_text": ("library.edit",),
-    "import_novel_file": ("library.edit",),
-    "read_text_document": ("library.edit",),
-    "get_novel": ("library.view",),
-    "save_novel": ("library.edit",),
-    "delete_novel": ("hub.manage",),
-    "save_novel_binding": ("platforms.manage",),
-    "add_promo_code": ("promo_codes.manage",),
-    "update_promo_code": ("promo_codes.manage",),
-    "delete_promo_code": ("hub.manage",),
-    "save_publishing_account": ("publishing_accounts.manage",),
-    "delete_publishing_account": ("hub.manage",),
-    "save_production_draft": ("drafts.create", "drafts.manage_all"),
-    "queue_production_draft": ("drafts.create", "drafts.manage_all"),
-    "generate_voice_candidates": ("voice.preview",),
-    "set_local_tts_provider": ("voice.preview",),
-    "generate_intro_card_copy": ("text.assist",),
-    "classify_novel": ("text.assist",),
-    "lock_novel_voice": ("voice.preview",),
-    "save_software_user": ("users.manage",),
-    "delete_software_user": ("users.manage",),
-    "list_software_users": ("users.manage",),
-    "list_managed_devices": ("hub.manage",),
-    "get_managed_device": ("hub.manage",),
-    "acknowledge_managed_device": ("hub.manage",),
-    "rename_managed_device": ("hub.manage",),
-    "set_managed_device_active": ("hub.manage",),
-    "delete_managed_device": ("hub.manage",),
-    "create_managed_device_config": ("hub.manage",),
-    "list_managed_device_configs": ("hub.manage",),
-    "get_managed_device_config": ("hub.manage",),
-    "set_user_permission": ("permissions.manage",),
-    "get_effective_permissions": (),
-    "get_record_artifacts": ("records.view_own", "records.view_all"),
-    "get_production_record_groups": ("records.view_own", "records.view_all"),
-    "cancel_production_records": ("jobs.retry_own", "jobs.retry_all"),
-    "choose_folder": ("drafts.create", "hub.manage"),
-    "open_output_folder": (
-        "drafts.create",
-        "records.view_own",
-        "records.view_all",
-        "hub.manage",
-    ),
-    "trash_production_records": ("records.view_all", "hub.manage"),
-    "restore_trashed_production_records": ("records.view_all", "hub.manage"),
-    "delete_trashed_production_records": ("records.view_all", "hub.manage"),
-    "start_queue": ("drafts.manage_all", "hub.manage"),
-    "cancel_queue": ("drafts.manage_all", "hub.manage"),
-    "get_jobs": ("drafts.create", "records.view_own", "records.view_all"),
-    "get_queue_connection": ("drafts.create", "records.view_own", "records.view_all"),
-    "get_archived_jobs": ("records.view_own", "records.view_all"),
-    "archive_job": ("jobs.retry_own", "jobs.retry_all"),
-    "restore_job": ("jobs.retry_own", "jobs.retry_all"),
-    "archive_batch": ("jobs.retry_own", "jobs.retry_all"),
-    "restore_batch": ("jobs.retry_own", "jobs.retry_all"),
-    "archive_finished_jobs": ("jobs.retry_own", "jobs.retry_all"),
-    "clear_finished_jobs": ("drafts.create", "drafts.manage_all", "hub.manage"),
-    "approve_preview": ("samples.approve_own", "samples.approve_all"),
-    "regenerate_preview": ("samples.approve_own", "samples.approve_all"),
-    "retry_failed": ("jobs.retry_own", "jobs.retry_all"),
-    "analyze_story": ("library.edit",),
-}
-
-# The browser is a shared-data/admin surface.  Media work must be started from
-# an installed desktop client so TTS, subtitle composition, asset selection and
-# FFmpeg consume that computer rather than the Hub host.
-WEB_DESKTOP_ONLY_MEDIA_METHODS = frozenset(
-    {
-        "queue_production_draft",
-        "generate_voice_candidates",
-        "set_local_tts_provider",
-        "start_queue",
-        "cancel_queue",
-        "approve_preview",
-        "regenerate_preview",
-        "retry_failed",
-        "get_jobs",
-        "get_queue_connection",
-        "get_archived_jobs",
-        "archive_job",
-        "restore_job",
-        "archive_batch",
-        "restore_batch",
-        "archive_finished_jobs",
-        "clear_finished_jobs",
-        "choose_folder",
-        "open_output_folder",
-        "get_local_runtime_snapshot",
-        "get_local_self_check",
-        "install_component_update",
-        "rollback_component_update",
-    }
-)
-
-# A Hub-hosted browser is intentionally an administration/shared-data surface.
-# Only a loopback browser owned by an enrolled rendering workstation may call
-# this smaller media allowlist. Historical sample controls stay disabled.
-CLIENT_LOCAL_MEDIA_METHODS = frozenset(
-    {
-        "queue_production_draft",
-        "generate_voice_candidates",
-        "set_local_tts_provider",
-        "start_queue",
-        "cancel_queue",
-        "retry_failed",
-        "get_jobs",
-        "get_queue_connection",
-        "get_archived_jobs",
-        "archive_job",
-        "restore_job",
-        "archive_batch",
-        "restore_batch",
-        "archive_finished_jobs",
-        "clear_finished_jobs",
-        "choose_folder",
-        "open_output_folder",
-        "get_local_runtime_snapshot",
-        "get_local_self_check",
-        "install_component_update",
-        "rollback_component_update",
-    }
-)
 
 
 UPLOAD_EXTENSIONS: dict[str, frozenset[str]] = {

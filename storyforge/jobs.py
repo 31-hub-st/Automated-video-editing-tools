@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,85 @@ from .models import BatchSpec, JobStatus, PlatformProfile, RenderJob, utc_now
 ProgressCallback = Callable[[JobStatus, float, str], None]
 JobProcessor = Callable[[RenderJob, PlatformProfile, ProgressCallback], str]
 JobLoader = Callable[[int], list[RenderJob]]
+DiscardCallback = Callable[[Sequence[RenderJob]], None]
 TerminalCallback = Callable[[RenderJob], None]
+AdmissionCheck = Callable[[RenderJob], bool | Mapping[str, Any]]
+
+
+DEFAULT_RETRYABLE_FAILURE_THRESHOLD = 2
+DEFAULT_COOLDOWN_SECONDS = 30.0
+RESOURCE_RECHECK_SECONDS = 5.0
+TERMINAL_PIPELINE_STAGES = frozenset(
+    {"completed", "failed", "cancelled", "interrupted", "awaiting_approval"}
+)
+
+
+def _canonical_pipeline_stage(
+    status: JobStatus, progress: float, label: str
+) -> str:
+    """Map user-facing progress copy to a stable sequential stage key."""
+
+    if status in {
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.INTERRUPTED,
+        JobStatus.AWAITING_APPROVAL,
+    }:
+        return status.value
+    if status == JobStatus.QUEUED:
+        return "queued"
+    if status in {JobStatus.PREFLIGHT, JobStatus.PREPARING, JobStatus.POLISHING}:
+        return "text"
+    if status == JobStatus.NARRATING:
+        return "tts"
+    if status == JobStatus.COMPOSING:
+        return "subtitles"
+    if status in {JobStatus.PREVIEWING, JobStatus.RENDERING}:
+        normalized_label = str(label or "")
+        if float(progress) >= 0.96 or any(
+            token in normalized_label for token in ("发布", "整理输出", "导出纯旁白")
+        ):
+            return "publish"
+        if float(progress) >= 0.94 or any(
+            token in normalized_label for token in ("检查成片", "质检")
+        ):
+            return "qa"
+        if float(progress) < 0.71 or "素材" in normalized_label:
+            return "asset_preflight"
+        return "render"
+    return "text"
+
+
+def _elapsed_seconds(started_at: str, ended_at: str) -> float:
+    try:
+        return max(
+            0.0,
+            (datetime.fromisoformat(ended_at) - datetime.fromisoformat(started_at))
+            .total_seconds(),
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_governance_reason(value: Any, default: str) -> str:
+    """Keep worker health reasons useful without leaking paths or story text."""
+
+    raw = str(value or "").strip().casefold()
+    if raw and all(
+        character.isascii()
+        and (character.isalnum() or character in {"_", "-"})
+        for character in raw
+    ):
+        return raw[:64]
+    return default
+
+
+def _safe_governance_message(value: Any, default: str) -> str:
+    """Keep one short operator-facing sentence and discard control text."""
+
+    clean = " ".join(str(value or "").split())
+    return clean[:240] if clean else default
 
 
 class _ScheduledBatch:
@@ -31,10 +111,12 @@ class _ScheduledBatch:
         platform_id: str,
         *,
         loader: JobLoader | None = None,
+        on_discard: DiscardCallback | None = None,
     ) -> None:
         self.job_ids = list(job_ids)
         self.platform_id = platform_id
         self.loader = loader
+        self.on_discard = on_discard
         self.loader_failures = 0
         self.loader_retry_at = 0.0
         self.loader_error = ""
@@ -87,7 +169,13 @@ def _persist_job_failure(
 class JobQueue:
     """A deliberately sequential queue so GPU-heavy stages do not overlap."""
 
-    def __init__(self, processor: JobProcessor | None = None) -> None:
+    def __init__(
+        self,
+        processor: JobProcessor | None = None,
+        *,
+        retryable_failure_threshold: int = DEFAULT_RETRYABLE_FAILURE_THRESHOLD,
+        cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS,
+    ) -> None:
         self._processor = processor
         self._jobs: list[RenderJob] = []
         self._platforms: dict[str, PlatformProfile] = {}
@@ -126,6 +214,30 @@ class JobQueue:
         self._stream_last_reconnected_at = ""
         self._terminal_callback: TerminalCallback | None = None
         self._terminal_callback_lock = threading.RLock()
+        # Governance only controls whether the single heavy worker may claim
+        # its *next* job. It never interrupts the processor which already owns
+        # the current job; cancellation retains its existing explicit API.
+        self._paused = False
+        self._draining = False
+        self._governance_wakeup = threading.Event()
+        self._admission_check: AdmissionCheck | None = None
+        self._admission_degraded = False
+        self._admission_fault = ""
+        self._admission_reason = ""
+        self._admission_message = ""
+        self._retryable_failure_threshold = max(
+            1, int(retryable_failure_threshold)
+        )
+        cooldown_value = float(cooldown_seconds)
+        if not math.isfinite(cooldown_value):
+            raise ValueError("cooldown seconds must be finite")
+        self._cooldown_seconds = min(15 * 60.0, max(0.01, cooldown_value))
+        self._max_cooldown_seconds = min(
+            15 * 60.0, self._cooldown_seconds * 8.0
+        )
+        self._consecutive_retryable_failures = 0
+        self._cooling_until = 0.0
+        self._cooling_reason = ""
 
     def set_processor(self, processor: JobProcessor) -> None:
         """Attach the render pipeline before the queue is started.
@@ -238,6 +350,7 @@ class JobQueue:
         platform_id: str,
         *,
         loader: JobLoader | None = None,
+        on_discard: DiscardCallback | None = None,
     ) -> None:
         if not jobs and loader is None:
             return
@@ -246,6 +359,7 @@ class JobQueue:
                 [job.id for job in jobs],
                 platform_id,
                 loader=loader,
+                on_discard=on_discard,
             )
         )
         self._work_revision += 1
@@ -378,6 +492,7 @@ class JobQueue:
         loader: JobLoader,
         platform: PlatformProfile,
         *,
+        on_discard: DiscardCallback | None = None,
         history_limit: int = 50,
     ) -> list[RenderJob]:
         """Queue a bounded first window and lazily request subsequent windows.
@@ -403,6 +518,7 @@ class JobQueue:
                 initial_jobs,
                 platform.id,
                 loader=loader,
+                on_discard=on_discard,
             )
             self._platforms[platform.id] = platform
             self._stream_history_limit = max(1, int(history_limit))
@@ -424,6 +540,7 @@ class JobQueue:
             ):
                 return False
             loader = batch.loader
+            on_discard = batch.on_discard
             platform_id = batch.platform_id
             if batch.loader_retry_at > time.monotonic():
                 return False
@@ -449,6 +566,8 @@ class JobQueue:
         invalid_jobs = {
             id(job) for job in jobs if job.platform_id != platform_id
         }
+        discarded = False
+        terminal_jobs: list[RenderJob] = []
         with self._lock:
             # Whole-queue cancellation can discard the entry while the loader
             # performs I/O. Never resurrect those durable records afterwards.
@@ -457,8 +576,8 @@ class JobQueue:
                 or self._scheduled_batches[0] is not batch
                 or batch.loader is not loader
             ):
-                return False
-            if not jobs:
+                discarded = True
+            elif not jobs:
                 batch.loader = None
                 if batch.loader_failures:
                     self._stream_last_reconnected_at = utc_now()
@@ -468,31 +587,39 @@ class JobQueue:
                 self._discard_exhausted_lazy_cancellations_locked()
                 self._work_revision += 1
                 return False
-            self._promote_lazy_cancellations_locked(jobs)
-            if batch.loader_failures:
-                self._stream_last_reconnected_at = utc_now()
-            batch.loader_failures = 0
-            batch.loader_retry_at = 0.0
-            batch.loader_error = ""
-            now = utc_now()
-            for job in jobs:
-                if job.id in self._cancelled_job_ids:
-                    job.status = JobStatus.CANCELLED
-                    job.stage_label = "已取消"
-                    job.updated_at = now
-                elif id(job) in invalid_jobs:
-                    job.status = JobStatus.FAILED
-                    job.progress = 0.0
-                    job.stage_label = "平台配置不匹配"
-                    job.message = "流式任务的平台与所属批次不一致，已安全跳过。"
-                    job.updated_at = now
-            self._jobs.extend(jobs)
-            batch.job_ids.extend(job.id for job in jobs)
-            self._streamed_job_ids.update(job.id for job in jobs)
-            self._work_revision += 1
-            terminal_jobs = [
-                job for job in jobs if job.status in ARCHIVABLE_JOB_STATUSES
-            ]
+            else:
+                self._promote_lazy_cancellations_locked(jobs)
+                if batch.loader_failures:
+                    self._stream_last_reconnected_at = utc_now()
+                batch.loader_failures = 0
+                batch.loader_retry_at = 0.0
+                batch.loader_error = ""
+                now = utc_now()
+                for job in jobs:
+                    if job.id in self._cancelled_job_ids:
+                        job.status = JobStatus.CANCELLED
+                        job.stage_label = "已取消"
+                        job.updated_at = now
+                    elif id(job) in invalid_jobs:
+                        job.status = JobStatus.FAILED
+                        job.progress = 0.0
+                        job.stage_label = "平台配置不匹配"
+                        job.message = "流式任务的平台与所属批次不一致，已安全跳过。"
+                        job.updated_at = now
+                self._jobs.extend(jobs)
+                batch.job_ids.extend(job.id for job in jobs)
+                self._streamed_job_ids.update(job.id for job in jobs)
+                self._work_revision += 1
+                terminal_jobs = [
+                    job for job in jobs if job.status in ARCHIVABLE_JOB_STATUSES
+                ]
+        if discarded:
+            # The loader may have claimed external resources while it was
+            # outside the lock. Notify its owner only after releasing the
+            # queue lock so cancellation never waits for cleanup.
+            if jobs and on_discard is not None:
+                on_discard(jobs)
+            return False
         for job in terminal_jobs:
             self._finish_streamed_job(job)
         return True
@@ -991,7 +1118,277 @@ class JobQueue:
             self._schedule_existing_jobs_locked([job])
             return job.to_dict()
 
+    def set_admission_check(self, check: AdmissionCheck | None) -> None:
+        """Install a lightweight resource gate for the next heavy job.
+
+        The callback runs before preflight and may return either a boolean or
+        a small mapping containing ``allowed`` and a non-secret ``reason``.
+        Changing the checker wakes a queue which is waiting for resources.
+        """
+
+        if check is not None and not callable(check):
+            raise TypeError("admission check must be callable")
+        with self._lock:
+            self._admission_check = check
+            # A replacement probe owns a new observation cycle. Its first
+            # result will republish degraded/fault if the condition persists.
+            self._admission_degraded = False
+            self._admission_fault = ""
+            self._admission_reason = ""
+            self._work_revision += 1
+        self._governance_wakeup.set()
+
+    def notify_resources_changed(self) -> None:
+        """Wake a degraded queue after an operator frees local resources."""
+
+        self._governance_wakeup.set()
+
+    def pause_new_work(self) -> None:
+        """Stop claiming new heavy jobs while allowing the current one to finish."""
+
+        with self._lock:
+            if self._shutdown_requested.is_set():
+                return
+            self._paused = True
+            self._draining = False
+            self._work_revision += 1
+        self._governance_wakeup.set()
+
+    # A short alias is useful for supervisors while preserving the explicit
+    # name above for callers which must distinguish pause from cancellation.
+    pause = pause_new_work
+
+    def drain(self) -> None:
+        """Finish the current heavy job, then retire without consuming the tail."""
+
+        with self._lock:
+            if self._shutdown_requested.is_set():
+                return
+            self._draining = True
+            self._paused = False
+            self._work_revision += 1
+        self._governance_wakeup.set()
+
+    def resume(self) -> None:
+        """Clear an operator pause/drain and continue queued work when eligible."""
+
+        with self._lock:
+            if self._shutdown_requested.is_set():
+                raise RuntimeError("render queue is shutting down")
+            self._paused = False
+            self._draining = False
+            self._work_revision += 1
+            has_queued_work = any(
+                job.status == JobStatus.QUEUED for job in self._jobs
+            ) or any(batch.loader is not None for batch in self._scheduled_batches)
+        self._governance_wakeup.set()
+        if has_queued_work:
+            self.start()
+
+    def governance_status(self) -> dict[str, Any]:
+        """Return one normalized worker state without changing legacy job data."""
+
+        now = time.monotonic()
+        wall_now = time.time()
+        with self._lock:
+            active_count = len(self._active_job_ids)
+            worker_alive = any(
+                thread is not None and thread.is_alive()
+                for thread in (self._worker, self._retiring_worker)
+            )
+            retry_in_seconds = max(0.0, self._cooling_until - now)
+            cooling = retry_in_seconds > 0.0
+            draining = bool(self._draining or self._shutdown_requested.is_set())
+            paused = bool(self._paused and not draining)
+            if draining:
+                state = "draining"
+                reason = "shutdown" if self._shutdown_requested.is_set() else "operator"
+            elif paused:
+                state = "paused"
+                reason = "operator"
+            elif self._admission_fault:
+                state = "fault"
+                reason = self._admission_fault
+            elif cooling:
+                state = "cooling"
+                reason = self._cooling_reason or "retryable_failure"
+            elif self._admission_degraded:
+                state = "degraded"
+                reason = self._admission_reason or "resources_unavailable"
+            elif active_count:
+                state = "busy"
+                reason = ""
+            else:
+                state = "ready"
+                reason = ""
+            accepting = bool(
+                state in {"ready", "busy"}
+                and not self._shutdown_requested.is_set()
+            )
+            return {
+                "state": state,
+                "accepting_new_work": accepting,
+                "paused": paused,
+                "draining": draining,
+                "drained": bool(
+                    draining and not active_count and not worker_alive
+                ),
+                "cooling": cooling,
+                "degraded": state == "degraded",
+                "fault": state == "fault",
+                "retry_in_seconds": round(retry_in_seconds, 2),
+                "cooling_until_unix": (
+                    round(wall_now + retry_in_seconds, 3) if cooling else 0.0
+                ),
+                "reason": reason,
+                "message": self._admission_message,
+                "consecutive_retryable_failures": (
+                    self._consecutive_retryable_failures
+                ),
+                # Heavy production remains deliberately serial. Lightweight
+                # browser previews are outside this queue and this limit.
+                "heavy_task_limit": 1,
+                "active_heavy_tasks": min(1, active_count),
+            }
+
+    def _governance_hold(self) -> tuple[str, float]:
+        """Return ``run``, ``wait`` or ``exit`` before claiming another job."""
+
+        now = time.monotonic()
+        with self._lock:
+            if self._shutdown_requested.is_set() or self._draining:
+                return "exit", 0.0
+            if self._paused:
+                return "wait", 1.0
+            retry_in_seconds = max(0.0, self._cooling_until - now)
+            if retry_in_seconds:
+                return "wait", min(1.0, retry_in_seconds)
+            return "run", 0.0
+
+    def _admission_allows(self, job: RenderJob) -> bool:
+        with self._lock:
+            check = self._admission_check
+        if check is None:
+            with self._lock:
+                self._admission_degraded = False
+                self._admission_fault = ""
+                self._admission_reason = ""
+                self._admission_message = ""
+            return True
+        try:
+            result = check(job)
+        except Exception as error:
+            message = "制作环境检查失败，请在设置中运行本机自检。"
+            with self._lock:
+                self._admission_degraded = False
+                self._admission_fault = _safe_governance_reason(
+                    type(error).__name__, "admission_check_failed"
+                )
+                self._admission_reason = ""
+                self._admission_message = message
+                job.stage_label = message
+                job.message = message
+                job.updated_at = utc_now()
+            return False
+        if isinstance(result, Mapping):
+            allowed = bool(result.get("allowed", True))
+            reason = _safe_governance_reason(
+                result.get("reason"), "resources_unavailable"
+            )
+            fault = bool(result.get("fault", False))
+            message = _safe_governance_message(
+                result.get("message"),
+                "制作电脑暂时无法领取任务，请查看设备状态。",
+            )
+        else:
+            allowed = bool(result)
+            reason = "resources_unavailable"
+            fault = False
+            message = "制作电脑资源不足，已暂停领取新任务。"
+        with self._lock:
+            previous_message = self._admission_message
+            self._admission_fault = reason if not allowed and fault else ""
+            self._admission_degraded = bool(not allowed and not fault)
+            self._admission_reason = "" if allowed or fault else reason
+            self._admission_message = "" if allowed else message
+            if not allowed:
+                job.stage_label = message
+                job.message = message
+                job.failure_diagnostics = {
+                    "code": reason,
+                    "summary": message,
+                    "stage": "admission",
+                }
+                job.updated_at = utc_now()
+            elif previous_message and job.message == previous_message:
+                job.stage_label = "等待处理"
+                job.message = ""
+                if str(job.failure_diagnostics.get("stage") or "") == "admission":
+                    job.failure_diagnostics = {}
+                job.updated_at = utc_now()
+        return allowed
+
+    @staticmethod
+    def _failure_is_retryable(error: BaseException, job: RenderJob) -> bool:
+        explicit = getattr(error, "retryable", None)
+        if explicit is not None:
+            return bool(explicit)
+        if isinstance(error, (ConnectionError, TimeoutError)):
+            return True
+        code = str(job.failure_diagnostics.get("code") or "").casefold()
+        return code in {"encoder_init", "out_of_memory", "resource_exhausted"}
+
+    def _record_failure_governance(
+        self, error: BaseException, job: RenderJob
+    ) -> None:
+        retryable = self._failure_is_retryable(error, job)
+        with self._lock:
+            if not retryable:
+                self._consecutive_retryable_failures = 0
+                self._cooling_until = 0.0
+                self._cooling_reason = ""
+                return
+            self._consecutive_retryable_failures += 1
+            failures = self._consecutive_retryable_failures
+            if failures < self._retryable_failure_threshold:
+                return
+            exponent = max(
+                0,
+                min(3, failures - self._retryable_failure_threshold),
+            )
+            delay = min(
+                self._max_cooldown_seconds,
+                self._cooldown_seconds * (2**exponent),
+            )
+            self._cooling_until = max(
+                self._cooling_until,
+                time.monotonic() + delay,
+            )
+            self._cooling_reason = "retryable_failure"
+            self._work_revision += 1
+        self._governance_wakeup.set()
+
+    def _record_processing_success(self) -> None:
+        with self._lock:
+            self._consecutive_retryable_failures = 0
+            self._cooling_until = 0.0
+            self._cooling_reason = ""
+
     def start(self) -> None:
+        # Recovered work can auto-start before the loopback Worker gateway is
+        # constructed. Install its dependency-free local safety probe lazily
+        # so that startup cannot bypass memory/disk admission.
+        with self._lock:
+            needs_default_admission = self._admission_check is None
+        if needs_default_admission:
+            try:
+                from .worker import default_heavy_job_admission
+            except ImportError:
+                default_heavy_job_admission = None  # type: ignore[assignment]
+            if callable(default_heavy_job_admission):
+                with self._lock:
+                    if self._admission_check is None:
+                        self._admission_check = default_heavy_job_admission
         if self._processor is None:
             raise RuntimeError("渲染管线尚未初始化。")
         with self._lock:
@@ -1127,11 +1524,13 @@ class JobQueue:
             self._work_revision += 1
         self.cancel_jobs(active_ids)
         self._cancel.set()
+        self._governance_wakeup.set()
 
     def begin_shutdown(self) -> None:
         """Reject any new queue work before the shutdown snapshot is taken."""
 
         self._shutdown_requested.set()
+        self._governance_wakeup.set()
 
     def stop_and_wait(self, timeout_seconds: float = 15.0) -> bool:
         """Permanently stop this queue and confirm its worker has unwound.
@@ -1216,10 +1615,37 @@ class JobQueue:
         with self._lock:
             if job.id in self._cancelled_job_ids and status != JobStatus.CANCELLED:
                 return
+            now = utc_now()
+            next_stage = _canonical_pipeline_stage(status, progress, label)
+            previous_stage = str(job.pipeline_stage or "queued")
+            if next_stage != previous_stage:
+                started_at = str(job.pipeline_stage_started_at or job.updated_at or now)
+                if previous_stage != "queued":
+                    job.pipeline_stage_history.append(
+                        {
+                            "stage": previous_stage,
+                            "label": str(job.stage_label or ""),
+                            "started_at": started_at,
+                            "ended_at": now,
+                            "duration_seconds": round(
+                                _elapsed_seconds(started_at, now), 3
+                            ),
+                            "result": (
+                                status.value
+                                if next_stage in TERMINAL_PIPELINE_STAGES
+                                else "completed"
+                            ),
+                        }
+                    )
+                    del job.pipeline_stage_history[:-32]
+                job.pipeline_stage = next_stage
+                job.pipeline_stage_started_at = (
+                    "" if next_stage in TERMINAL_PIPELINE_STAGES else now
+                )
             job.status = status
             job.progress = max(0.0, min(1.0, progress))
             job.stage_label = label
-            job.updated_at = utc_now()
+            job.updated_at = now
 
     def _run(self) -> None:
         # Pull one queued item at a time. Drafts may be appended while a long
@@ -1234,6 +1660,13 @@ class JobQueue:
                 for item in queued:
                     self._update(item, JobStatus.CANCELLED, item.progress, "已取消")
                 return
+            self._governance_wakeup.clear()
+            governance_action, governance_wait = self._governance_hold()
+            if governance_action == "exit":
+                return
+            if governance_action == "wait":
+                self._governance_wakeup.wait(governance_wait)
+                continue
             with self._lock:
                 stream_paused = self._stream_paused
                 retry_at = self._stream_retry_at
@@ -1268,6 +1701,24 @@ class JobQueue:
                     continue
                 if self._retire_if_idle(observed_revision):
                     return
+                continue
+            if not self._admission_allows(job):
+                with self._lock:
+                    self._active_job_ids.discard(job.id)
+                self._governance_wakeup.clear()
+                self._governance_wakeup.wait(RESOURCE_RECHECK_SECONDS)
+                continue
+            with self._lock:
+                governance_blocked = bool(
+                    self._shutdown_requested.is_set()
+                    or self._paused
+                    or self._draining
+                    or self._cooling_until > time.monotonic()
+                    or job.status != JobStatus.QUEUED
+                )
+                if governance_blocked:
+                    self._active_job_ids.discard(job.id)
+            if governance_blocked:
                 continue
             platform = self._platforms.get(job.platform_id)
             if platform is None:
@@ -1314,6 +1765,7 @@ class JobQueue:
                 else:
                     job.output_file = output
                     self._update(job, JobStatus.COMPLETED, 1.0, "已完成")
+                self._record_processing_success()
             except JobCancelledError:
                 # ``cancel_jobs`` already made cancellation terminal.  Do not
                 # create failure logs or allow the killed child to revive it.
@@ -1338,6 +1790,7 @@ class JobQueue:
                         stage=job.stage_label or "job",
                     )
                 print(traceback_text, end="")
+                self._record_failure_governance(error, job)
                 self._update(job, JobStatus.FAILED, job.progress, "生成失败")
             finally:
                 with self._lock:

@@ -29,16 +29,64 @@ from storyforge.updater import (
 from scripts.build_update_package import build_package, write_release_validation
 
 
-def make_update_package(root: Path, version: str = "0.2.0") -> Path:
+def make_update_package(
+    root: Path,
+    version: str = "0.2.0",
+    *,
+    ui_payload: bytes = b"updated ui",
+) -> Path:
+    build = Path(tempfile.mkdtemp(prefix=f"update-build-{version}-", dir=root))
+    (build / "StoryForge.exe").write_bytes(b"synthetic executable")
+    (build / "ui").mkdir()
+    (build / "ui" / "index.html").write_bytes(ui_payload)
+    (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+        json.dumps({"ok": True, "frozen": True, "app_version": version}),
+        encoding="utf-8",
+    )
+    write_release_validation(
+        build,
+        entrypoint="StoryForge.exe",
+        requested_version=version,
+        with_local_ai=False,
+    )
     package = root / f"StoryForge-{version}.zip"
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             "storyforge-update.json",
             json.dumps({"version": version, "entrypoint": "StoryForge.exe"}),
         )
-        archive.writestr("StoryForge.exe", b"synthetic executable")
-        archive.writestr("ui/index.html", b"updated ui")
+        for path in sorted(build.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(build).as_posix())
     return package
+
+
+def make_unattested_update_package(root: Path, version: str = "0.2.0") -> Path:
+    package = root / f"StoryForge-{version}-unattested.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "storyforge-update.json",
+            json.dumps({"version": version, "entrypoint": "StoryForge.exe"}),
+        )
+        archive.writestr("StoryForge.exe", b"synthetic executable")
+    return package
+
+
+def rewrite_update_package(
+    source: Path,
+    destination: Path,
+    replacements: dict[str, bytes],
+) -> Path:
+    with zipfile.ZipFile(source, "r") as original:
+        with zipfile.ZipFile(
+            destination, "w", compression=zipfile.ZIP_DEFLATED
+        ) as rewritten:
+            for entry in original.infolist():
+                rewritten.writestr(
+                    entry.filename,
+                    replacements.get(entry.filename, original.read(entry)),
+                )
+    return destination
 
 
 class UpdatePackageTests(unittest.TestCase):
@@ -64,6 +112,55 @@ class UpdatePackageTests(unittest.TestCase):
                 file_sha256(repository.resolve_package(manifest)),
                 manifest["sha256"],
             )
+
+    def test_repository_rejects_package_without_release_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = UpdateRepository(root / "published")
+
+            with self.assertRaisesRegex(ValueError, "BUILD_RELEASE_VALIDATION"):
+                repository.publish(
+                    make_unattested_update_package(root),
+                    "0.2.0",
+                )
+
+    def test_repository_rejects_tampered_release_identity_and_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = make_update_package(root)
+            with zipfile.ZipFile(original, "r") as archive:
+                validation = json.loads(
+                    archive.read("BUILD_RELEASE_VALIDATION.json").decode("utf-8")
+                )
+
+            invalid_version = dict(validation)
+            invalid_version["app_version"] = "9.9.9"
+            invalid_entrypoint = dict(validation)
+            invalid_entrypoint["entrypoint"] = "Other.exe"
+            variants = {
+                "version": {
+                    "BUILD_RELEASE_VALIDATION.json": json.dumps(
+                        invalid_version
+                    ).encode("utf-8")
+                },
+                "entrypoint": {
+                    "BUILD_RELEASE_VALIDATION.json": json.dumps(
+                        invalid_entrypoint
+                    ).encode("utf-8")
+                },
+                "bundle": {"ui/index.html": b"tampered ui"},
+            }
+
+            for label, replacements in variants.items():
+                with self.subTest(label=label):
+                    package = rewrite_update_package(
+                        original,
+                        root / f"tampered-{label}.zip",
+                        replacements,
+                    )
+                    repository = UpdateRepository(root / f"published-{label}")
+                    with self.assertRaises(ValueError):
+                        repository.publish(package, "0.2.0")
 
     def test_repository_keeps_current_and_one_recent_previous_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -137,11 +234,11 @@ class UpdatePackageTests(unittest.TestCase):
 
             alternate_root = root / "alternate"
             alternate_root.mkdir()
-            conflicting = make_update_package(alternate_root, "0.2.0")
-            with zipfile.ZipFile(
-                conflicting, "a", compression=zipfile.ZIP_DEFLATED
-            ) as archive:
-                archive.writestr("extra-release-file.txt", b"different bytes")
+            conflicting = make_update_package(
+                alternate_root,
+                "0.2.0",
+                ui_payload=b"different ui bytes",
+            )
 
             with self.assertRaisesRegex(ValueError, "same StoryForge version"):
                 repository.publish(conflicting, "0.2.0")

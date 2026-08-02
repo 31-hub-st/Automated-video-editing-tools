@@ -1,0 +1,66 @@
+name: nightly-full
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-full
+  cancel-in-progress: false
+
+jobs:
+  full-regression:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install runtime dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Check source syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force 'test-results/nightly-full' | Out-Null
+          python -m compileall -q storyforge scripts tests 2>&1 |
+            Tee-Object -FilePath 'test-results/nightly-full/python-syntax.log'
+          if ($LASTEXITCODE -ne 0) { throw 'Python syntax check failed.' }
+          node --check ui/app.js 2>&1 |
+            Tee-Object -FilePath 'test-results/nightly-full/javascript-syntax.log'
+          if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed.' }
+
+      - name: Run the complete unittest suite
+        shell: pwsh
+        run: >-
+          python scripts/run_test_gate.py
+          --name nightly-full
+          --output-dir test-results/nightly-full
+          -- discover -s tests -p test_*.py
+
+      - name: Upload nightly test summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-full-summary-${{ github.run_id }}
+          path: test-results/nightly-full
+          if-no-files-found: warn
+          retention-days: 30

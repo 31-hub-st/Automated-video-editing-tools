@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>StoryForge Studio</title>
-    <link rel="stylesheet" href="styles.css?v=32" />
+    <link rel="stylesheet" href="styles.css?v=33" />
   </head>
   <body>
     <section class="web-login is-hidden" id="web-login" aria-labelledby="web-login-title">
@@ -74,7 +74,7 @@
 
       <main class="workspace">
         <div class="web-session-bar is-hidden" id="web-session-bar" role="status">
-          <span class="web-session-mode"><i></i><b>网页控制台</b><small id="web-session-host">已连接 StoryForge Hub</small><small class="queue-sync-status is-ready" id="queue-sync-status" aria-live="polite">任务同步正常</small></span>
+          <span class="web-session-mode"><i></i><b>网页控制台</b><small id="web-session-host">已连接 StoryForge Hub</small><small class="employee-device-state is-degraded" id="employee-device-state" data-device-state="degraded" title="正在读取当前制作电脑状态">设备：正在检查</small><small class="queue-sync-status is-ready" id="queue-sync-status" aria-live="polite">任务同步正常</small></span>
           <span class="web-session-user"><button type="button" class="employee-update-trigger" id="open-employee-update" aria-label="打开软件更新"><i aria-hidden="true"></i><span><b>软件更新</b><small id="employee-update-trigger-label">检查版本</small></span></button><small>当前账号</small><b id="web-session-name">—</b><button type="button" id="web-change-password">设置密码</button><button type="button" id="web-logout">退出</button></span>
         </div>
         <section class="view is-visible" data-view="queue">
@@ -110,11 +110,14 @@
             </div>
           </section>
 
-          <nav class="production-ribbon production-section-jumpbar" id="production-ribbon" aria-label="本批制作快捷导航">
-            <button type="button" data-production-jump="content" aria-controls="production-section-content-body"><span>01</span><b>内容</b><small data-production-jump-status="content">选择小说后检查</small></button>
-            <button type="button" data-production-jump="voice" aria-controls="production-section-voice-body"><span>02</span><b>配音与节奏</b><small data-production-jump-status="voice">选择小说后检查</small></button>
-            <button type="button" data-production-jump="visual" aria-controls="production-section-visual-body"><span>03</span><b>字幕与画面</b><small data-production-jump-status="visual">选择小说后检查</small></button>
-            <button type="button" data-production-jump="output" aria-controls="production-section-output-body"><span>04</span><b>素材与输出</b><small data-production-jump-status="output">选择小说后检查</small></button>
+          <nav class="production-ribbon production-section-jumpbar" id="production-ribbon" aria-label="从文本到发布的七阶段制作进度">
+            <button type="button" data-stage="text" data-production-jump="content" aria-controls="production-section-content-body"><span>01</span><b>文本</b><small data-production-stage-status="text" data-production-jump-status="content">选择小说后检查</small></button>
+            <button type="button" data-stage="voice" data-production-jump="voice" aria-controls="production-section-voice-body"><span>02</span><b>配音</b><small data-production-stage-status="voice" data-production-jump-status="voice">选择小说后检查</small></button>
+            <button type="button" data-stage="subtitle" data-production-jump="visual" aria-controls="production-section-visual-body"><span>03</span><b>字幕</b><small data-production-stage-status="subtitle" data-production-jump-status="visual">选择小说后检查</small></button>
+            <button type="button" data-stage="preflight" data-production-jump="output" aria-controls="production-section-output-body"><span>04</span><b>素材预检</b><small data-production-stage-status="preflight" data-production-jump-status="output">选择小说后检查</small></button>
+            <div class="production-stage-state" data-stage="render" data-stage-only role="status" aria-label="渲染阶段状态"><span>05</span><b>渲染</b><small data-production-stage-status="render">等待任务</small></div>
+            <div class="production-stage-state" data-stage="quality" data-stage-only role="status" aria-label="质检阶段状态"><span>06</span><b>质检</b><small data-production-stage-status="quality">等待任务</small></div>
+            <div class="production-stage-state" data-stage="publish" data-stage-only role="status" aria-label="发布阶段状态"><span>07</span><b>发布</b><small data-production-stage-status="publish">等待任务</small></div>
           </nav>
 
           <div class="production-local-toolbar">
@@ -231,6 +234,13 @@
                 <div><dt>文案</dt><dd>AI 目标 85–90%·无重复可更高</dd></div>
                 <div><dt>章节</dt><dd>不朗读 · 0.8s 停顿</dd></div>
               </dl>
+              <nav class="preview-config-jumps" aria-label="快速定位关键配置">
+                <span>快速定位</span>
+                <button type="button" data-production-quick-jump="content">文本内容</button>
+                <button type="button" data-production-quick-jump="voice">配音节奏</button>
+                <button type="button" data-production-quick-jump="visual">字幕画面</button>
+                <button type="button" data-production-quick-jump="output">素材输出</button>
+              </nav>
             </aside>
           </div>
         </section>
@@ -901,6 +911,17 @@
               <div class="panel-heading"><div><p class="section-kicker">THIS MACHINE</p><h2>当前制作电脑自检</h2></div><button type="button" class="button button-secondary" id="run-worker-self-check">重新自检</button></div>
               <div class="worker-health-summary" id="worker-health-summary" role="status">正在读取当前电脑的制作环境…</div>
               <div class="health-list" id="health-list"><div class="health-row"><span class="health-dot pending"></span><div><b>正在检测</b><small>读取本机编码器与运行时</small></div></div></div>
+              <section class="local-storage-tools" aria-labelledby="local-storage-title">
+                <div>
+                  <b id="local-storage-title">本机空间与诊断</b>
+                  <small id="local-storage-summary" role="status">只清理可重新生成的缓存、旧日志和过期回滚包；小说源文件与最终成片不会删除。</small>
+                </div>
+                <div class="local-storage-actions">
+                  <button type="button" class="button button-secondary" id="scan-local-storage">扫描空间</button>
+                  <button type="button" class="button button-secondary danger-quiet" id="cleanup-local-storage">预览并清理</button>
+                  <button type="button" class="button button-secondary" id="create-support-bundle">生成诊断包</button>
+                </div>
+              </section>
               <details class="worker-health-details" id="worker-health-details">
                 <summary>查看技术详情</summary>
                 <pre id="worker-health-technical">等待自检结果</pre>

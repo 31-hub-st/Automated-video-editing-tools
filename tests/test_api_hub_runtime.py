@@ -1116,11 +1116,7 @@ class ApiHubRuntimeTests(unittest.TestCase):
         # Completion writes are lease-owner protected in the multi-PC runtime.
         # This test bypasses the real queue, so claim the same lease that the
         # queue normally acquires before rendering.
-        self.client_api._catalog.claim_record_lease(
-            record["id"],
-            self.client_api._current_device_id(),
-            lease_seconds=180,
-        )
+        self.client_api._claim_record_lease(record["id"])
         self.client_api._sync_one_job_record(job)
 
         completed_artifacts = self.host_api.get_record_artifacts(record["id"])
@@ -1340,7 +1336,7 @@ class ApiHubRuntimeTests(unittest.TestCase):
         self.assertFalse(blocked["ok"])
         self.assertIn("不能新建或修改共享数据", blocked["error"])
 
-    def test_restart_reconciliation_releases_stale_draft_gate(self) -> None:
+    def test_restart_reconciliation_does_not_take_live_same_device_lease(self) -> None:
         repository = SettingsRepository(self.root / "recovery-host")
         settings = AppSettings()
         settings.hub.device_name = "recovery-pc"
@@ -1398,9 +1394,23 @@ class ApiHubRuntimeTests(unittest.TestCase):
             for item in self.host_api._catalog.list_records(limit=20)["items"]
             if item["id"] == gate["id"]
         )
-        self.assertEqual(recovered["status"], "interrupted")
-        self.assertEqual(recovered["lease_owner_device"], "")
-        self.assertIsNone(recovered["lease_expires_at"])
+        self.assertEqual(recovered["status"], "queued")
+        self.assertEqual(recovered["lease_owner_device"], "recovery-pc")
+        self.assertIsNotNone(recovered["lease_expires_at"])
+        self.assertIn(
+            "queue_claim", self.host_api._catalog.get_draft(draft["id"])["metadata"]
+        )
+
+        with self.host_api._catalog._write_connection() as connection:
+            connection.execute(
+                "UPDATE production_records SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", gate["id"]),
+            )
+        self.host_api._reconcile_interrupted_records()
+        expired = self.host_api._catalog.get_record(gate["id"])
+        self.assertEqual(expired["status"], "interrupted")
+        self.assertEqual(expired["lease_owner_device"], "")
+        self.assertIsNone(expired["lease_expires_at"])
         self.assertNotIn(
             "queue_claim",
             self.host_api._catalog.get_draft(draft["id"])["metadata"],
@@ -1417,6 +1427,11 @@ class ApiHubRuntimeTests(unittest.TestCase):
         self.host_api._catalog.claim_record_lease(
             already_interrupted["id"], "recovery-pc", lease_seconds=180
         )
+        with self.host_api._catalog._write_connection() as connection:
+            connection.execute(
+                "UPDATE production_records SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", already_interrupted["id"]),
+            )
         self.host_api._reconcile_interrupted_records()
         recovered_again = next(
             item

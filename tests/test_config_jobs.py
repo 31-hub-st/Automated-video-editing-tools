@@ -1803,6 +1803,60 @@ class JobQueueTests(unittest.TestCase):
         self.assertEqual(queue.stream_status()["state"], "connected")
         self.assertTrue(queue.stream_status()["last_reconnected_at"])
 
+    def test_cancel_discards_late_stream_page_once_without_holding_queue_lock(self) -> None:
+        platform = PlatformProfile(id="platform-1", name="NovelBox")
+        late_jobs = self._fifo_jobs("late-page", 2, platform)
+        loader_entered = threading.Event()
+        allow_loader_return = threading.Event()
+        cancel_done = threading.Event()
+        callback_done = threading.Event()
+        discard_calls: list[list[str]] = []
+        callback_observed_unlocked_queue: list[bool] = []
+
+        def loader(_size: int) -> list[RenderJob]:
+            loader_entered.set()
+            self.assertTrue(allow_loader_return.wait(2))
+            return late_jobs
+
+        queue = JobQueue(lambda *_args: "must-not-run.mp4")
+
+        def on_discard(jobs: list[RenderJob]) -> None:
+            probe_done = threading.Event()
+
+            def probe_queue() -> None:
+                queue.list_jobs()
+                probe_done.set()
+
+            probe = threading.Thread(target=probe_queue)
+            probe.start()
+            callback_observed_unlocked_queue.append(probe_done.wait(0.5))
+            probe.join(timeout=1)
+            discard_calls.append([job.id for job in jobs])
+            callback_done.set()
+
+        queue.enqueue_stream([], loader, platform, on_discard=on_discard)
+        queue.start()
+        self.assertTrue(loader_entered.wait(2))
+
+        cancel_thread = threading.Thread(
+            target=lambda: (queue.cancel(), cancel_done.set())
+        )
+        cancel_thread.start()
+        self.assertTrue(
+            cancel_done.wait(0.5),
+            "whole-queue cancellation waited for the blocked stream loader",
+        )
+        self.assertFalse(callback_done.is_set())
+
+        allow_loader_return.set()
+        cancel_thread.join(timeout=1)
+        _join_queue(self, queue)
+
+        self.assertTrue(callback_done.is_set())
+        self.assertEqual(discard_calls, [[job.id for job in late_jobs]])
+        self.assertEqual(callback_observed_unlocked_queue, [True])
+        self.assertEqual(queue.list_jobs(), [])
+
     def test_selected_cancel_is_immediately_terminal_and_ignores_late_progress(self) -> None:
         entered = threading.Event()
         release = threading.Event()

@@ -136,6 +136,45 @@
       summary: "制作、查看和重试自己的任务；不能修改团队资料或系统设置。",
     },
   };
+  const productionStageCatalog = [
+    { id: "text", label: "文本" },
+    { id: "voice", label: "配音" },
+    { id: "subtitle", label: "字幕" },
+    { id: "preflight", label: "素材预检" },
+    { id: "render", label: "渲染" },
+    { id: "quality", label: "质检" },
+    { id: "publish", label: "发布" },
+  ];
+  const employeeDeviceStateCatalog = {
+    ready: {
+      label: "可接任务",
+      description: "设备在线且制作环境正常，可以领取新任务。",
+    },
+    busy: {
+      label: "制作中",
+      description: "正在执行任务，会继续处理当前队列。",
+    },
+    paused: {
+      label: "已暂停",
+      description: "设备已暂停领取新任务，恢复后才会继续。",
+    },
+    draining: {
+      label: "完成后暂停",
+      description: "正在完成手头任务，结束后不再领取新任务。",
+    },
+    cooling: {
+      label: "冷却中",
+      description: "设备正在释放编码或配音资源，稍后会恢复。",
+    },
+    degraded: {
+      label: "状态异常",
+      description: "设备仍可连接，但磁盘、网络或运行环境需要检查。",
+    },
+    fault: {
+      label: "故障",
+      description: "设备当前无法正常制作，需要运行诊断或重新连接。",
+    },
+  };
   const softwarePermissionCatalog = [
     ["library.edit", "编辑小说内容", "导入或修改正文、简介和封面", "内容与平台"],
     ["platforms.manage", "调整平台资料", "修改推广平台和小说绑定", "内容与平台"],
@@ -322,11 +361,11 @@
     desktopInitialized: false,
   };
   const LOCAL_WORKER_PORTS = [18765, 18766, 18767, 18768, 18769, 18770];
-  // Protocol 2 is the V0.4 production contract (durable queue status,
-  // self-check details and explicit MP4+MP3/audio-only output modes). Do not
-  // let a stale V0.3 worker accept a V0.4 browser job halfway.
-  const LOCAL_WORKER_PROTOCOL_VERSION = 2;
-  const LOCAL_WORKER_MIN_COMPATIBLE_PROTOCOL_VERSION = 2;
+  // Protocol 3 adds the unified local RPC contract and strict production-lease
+  // fencing. Do not let an older worker accept a browser job halfway and then
+  // discover that one of the required methods or ownership tokens is missing.
+  const LOCAL_WORKER_PROTOCOL_VERSION = 3;
+  const LOCAL_WORKER_MIN_COMPATIBLE_PROTOCOL_VERSION = 3;
   const localWorkerRpcMethods = new Set([
     "queue_production_draft",
     "generate_voice_candidates",
@@ -351,6 +390,9 @@
     "worker_runtime_snapshot",
     "worker_self_check",
     "worker_set_folders",
+    "get_local_storage_status",
+    "cleanup_local_storage_cache",
+    "create_local_support_bundle",
   ]);
   const MOCK_PREVIEW_VIDEO_URI = "data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAQtbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAdTAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAA1h0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAdTAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAFoAAACgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAHUwAACAAAABAAAAAALQbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAHgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAACe21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAjtzdGJsAAAAw3N0c2QAAAAAAAAAAQAAALNhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAFoAoABIAAAASAAAAAAAAAABFUxhdmM2MS4xOS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAAOWF2Y0MBZAAM/+EAG2dkAAyscgRGFeTwEQAAAwABAAADAAIPFCmEYAEAB2joQ4EEsiz9+PgAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAA04AAANOAAAAGHN0dHMAAAAAAAAAAQAAAB4AAEAAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAACIY3R0cwAAAAAAAAAPAAAAAQAAgAAAAAABAAKAAAAAAAEAAQAAAAAAAwAAAAAAAAAEAABAAAAAAAEAAoAAAAAAAQABAAAAAAADAAAAAAAAAAQAAEAAAAAAAQACgAAAAAABAAEAAAAAAAMAAAAAAAAABAAAQAAAAAABAADAAAAAAAEAAEAAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAeAAAAAQAAAIxzdHN6AAAAAAAAAAAAAAAeAAADPAAAAIcAAABxAAAAQgAAAEMAAAA9AAAAQwAAAEQAAABFAAAAQwAAAIYAAABxAAAAQgAAAEIAAABCAAAARAAAAEUAAABGAAAAQwAAAIwAAAB4AAAAQwAAAEQAAABCAAAAQwAAAEMAAABGAAAAQwAAAHYAAABCAAAAFHN0Y28AAAAAAAAAAQAABF0AAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYxLjcuMTAwAAAACGZyZWUAAAxwbWRhdAAAAq8GBf//q9xF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjQgcjMxOTIgYzI0ZTA2YyAtIEguMjY0L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjQgLSBodHRwOi8vd3d3LnZpZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0xNiBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTMzIG1lPXVtaCBzdWJtZT0xMCBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTI0IGNocm9tYV9tZT0xIHRyZWxsaXM9MiA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTUgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz04IGJfcHlyYW1pZD0yIGJfYWRhcHQ9MiBiX2JpYXM9MCBkaXJlY3Q9MyB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD02MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTQyLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9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";
   const MOCK_NARRATION_AUDIO_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
@@ -1161,6 +1203,8 @@
         sessionToken: String(connection.data.session_token),
         deviceId: String(connection.data.device_id || discovered.health.device_id || ""),
         deviceName: String(connection.data.device_name || discovered.health.device_name || "本机制作电脑"),
+        healthState: String(discovered.health.state || discovered.health.health_state || "ready"),
+        healthSnapshot: { ...(discovered.health || {}) },
         folders: { ...(connection.data.folders || {}) },
         capabilities: [...(connection.data.capabilities || [])],
         runtime: { ...(connection.data.runtime || {}) },
@@ -1562,6 +1606,17 @@
         }
         if (method === "get_local_self_check") {
           return { ok: true, data: { ready: true, status: "ready", summary: "当前制作电脑已就绪", checked_at_unix: Date.now() / 1000, runtime: { app_version: "demo", worker_protocol_version: LOCAL_WORKER_PROTOCOL_VERSION, ffmpeg_ready: true, encoders: ["h264_nvenc", "libx264"], recommended_encoder: "h264_nvenc", edge_tts_runtime_ready: true, embedded_kokoro_ready: true }, checks: [{ key: "ffmpeg", label: "FFmpeg", status: "ok", summary: "FFmpeg 可用", fix: "", technical: { ready: true } }, { key: "encoder", label: "H.264 编码器", status: "ok", summary: "h264_nvenc / libx264", fix: "", technical: { encoders: ["h264_nvenc", "libx264"] } }] } };
+        }
+        if (method === "get_local_storage_status") {
+          return { ok: true, data: { removable: { files: 18, bytes: 186646528 }, categories: {}, skipped_links: 0, unreadable_entries: 0 } };
+        }
+        if (method === "cleanup_local_storage_cache") {
+          const confirmed = args[0]?.confirm === true;
+          const selection = { files: 12, bytes: 134217728, categories: {} };
+          return { ok: true, data: { dry_run: !confirmed, selected: selection, deleted: confirmed ? selection : { files: 0, bytes: 0, categories: {} }, errors: [] } };
+        }
+        if (method === "create_local_support_bundle") {
+          return { ok: true, data: { path: "StoryForge-support-demo.zip", name: "StoryForge-support-demo.zip" } };
         }
         if (method === "get_production_presets") {
           return { ok: true, data: structuredClone(browserMockState.production_presets) };
@@ -3761,11 +3816,20 @@
   }
 
   function updateProductionJumpbar(novel = state.productionNovel, draft = novel ? activeDraft(novel) : null) {
-    const buttons = $$('[data-production-jump]', $("#production-ribbon"));
+    const ribbon = $("#production-ribbon");
+    const buttons = $$('[data-production-jump]', ribbon);
+    const stageOnly = $$('[data-stage-only]', ribbon);
+    stageOnly.forEach((button) => {
+      button.classList.remove("is-complete", "is-incomplete", "is-optional");
+      const proof = $("[data-production-stage-status]", button);
+      if (proof) proof.textContent = "等待任务";
+    });
     if (!novel || !draft) {
       buttons.forEach((button) => {
         button.disabled = true;
         button.classList.remove("is-complete", "is-incomplete", "is-optional");
+        delete button.dataset.productionTarget;
+        delete button.dataset.productionMissing;
         const proof = $(`[data-production-jump-status="${button.dataset.productionJump}"]`, button);
         if (proof) proof.textContent = "选择小说后检查";
       });
@@ -3778,6 +3842,13 @@
       const sectionMissing = missing.filter((item) => item.section === section);
       const optional = section === "visual" && mode === "audio_only";
       button.disabled = optional;
+      if (sectionMissing.length) {
+        button.dataset.productionTarget = sectionMissing[0].selector;
+        button.dataset.productionMissing = sectionMissing[0].key;
+      } else {
+        delete button.dataset.productionTarget;
+        delete button.dataset.productionMissing;
+      }
       button.classList.toggle("is-incomplete", sectionMissing.length > 0);
       button.classList.toggle("is-complete", !optional && sectionMissing.length === 0);
       button.classList.toggle("is-optional", optional);
@@ -5825,6 +5896,114 @@
     });
   }
 
+  function normalizedEmployeeDeviceState(value) {
+    const clean = String(value || "").trim().toLocaleLowerCase().replaceAll("-", "_");
+    const aliases = {
+      idle: "ready",
+      online: "ready",
+      running: "busy",
+      working: "busy",
+      stopped: "paused",
+      disabled: "paused",
+      stopping: "draining",
+      drain: "draining",
+      cooldown: "cooling",
+      warning: "degraded",
+      offline: "degraded",
+      error: "fault",
+      failed: "fault",
+    };
+    const normalized = aliases[clean] || clean;
+    return Object.prototype.hasOwnProperty.call(employeeDeviceStateCatalog, normalized)
+      ? normalized
+      : "";
+  }
+
+  function employeeDeviceStateFor(device = {}) {
+    const metadata = device.metadata && typeof device.metadata === "object" ? device.metadata : {};
+    const capabilities = device.capabilities && typeof device.capabilities === "object" ? device.capabilities : {};
+    const queue = device.queue && typeof device.queue === "object"
+      ? device.queue
+      : metadata.queue && typeof metadata.queue === "object"
+        ? metadata.queue
+        : {};
+    if (device.active === false) return "paused";
+    // Connectivity is authoritative. An offline heartbeat can retain an old
+    // busy queue snapshot, but must never keep showing the device as 制作中.
+    if (device.online === false) return "degraded";
+    const explicit = [
+      device.state,
+      device.governance?.state,
+      device.health_state,
+      device.worker_state,
+      device.runtime_state,
+      metadata.state,
+      metadata.governance?.state,
+      metadata.health_state,
+      metadata.worker_state,
+      metadata.runtime_state,
+      capabilities.worker_state,
+    ].map(normalizedEmployeeDeviceState).find(Boolean) || "";
+    if (["fault", "degraded", "paused", "draining", "cooling"].includes(explicit)) return explicit;
+    if (device.fault || device.error || metadata.last_error || metadata.fault) return "fault";
+    if (queue.draining || metadata.draining) return "draining";
+    if (queue.cooling || metadata.cooling) return "cooling";
+    if (queue.paused || metadata.paused) return "paused";
+    if (queue.busy || device.busy || metadata.queue_busy || explicit === "busy") return "busy";
+    return explicit || "ready";
+  }
+
+  function employeeDeviceIssueFor(device = {}) {
+    const metadata = device.metadata && typeof device.metadata === "object" ? device.metadata : {};
+    const capabilities = device.capabilities && typeof device.capabilities === "object" ? device.capabilities : {};
+    return String(
+      capabilities.worker_message
+      || metadata.governance?.message
+      || metadata.last_error
+      || "",
+    ).trim().slice(0, 240);
+  }
+
+  function currentEmployeeDeviceState() {
+    if (state.localWorkerIssue) return "fault";
+    const selfCheck = state.localWorkerSelfCheck && typeof state.localWorkerSelfCheck === "object"
+      ? state.localWorkerSelfCheck
+      : null;
+    const snapshot = state.localWorker?.healthSnapshot || {};
+    const runtimeState = normalizedEmployeeDeviceState(
+      state.localWorker?.runtime?.state || state.localWorker?.runtime?.health_state,
+    );
+    if (runtimeState && runtimeState !== "ready") return runtimeState;
+    const discoveryState = normalizedEmployeeDeviceState(
+      snapshot.state || state.localWorker?.healthState || snapshot.health_state,
+    );
+    if (["paused", "draining", "cooling", "fault"].includes(discoveryState)) return discoveryState;
+    if (selfCheck?.status === "error" || selfCheck?.ready === false) return "fault";
+    if (selfCheck?.status === "warning") return "degraded";
+    if (
+      snapshot.queue?.busy
+      || snapshot.queue_busy
+      || state.jobs.some((job) => !job.archived && executionStatuses.has(job.status))
+    ) return "busy";
+    if (runtimeState) return runtimeState;
+    if (!selfCheck && discoveryState) return discoveryState;
+    if (state.localWorker || Boolean(effectiveMediaSystem().ffmpeg_ready)) return "ready";
+    return "degraded";
+  }
+
+  function renderEmployeeDeviceStateBadge(deviceState = currentEmployeeDeviceState()) {
+    const normalized = normalizedEmployeeDeviceState(deviceState) || "degraded";
+    const detail = employeeDeviceStateCatalog[normalized];
+    const node = $("#employee-device-state");
+    if (node) {
+      node.dataset.deviceState = normalized;
+      node.className = `employee-device-state is-${normalized}`;
+      node.textContent = `设备：${detail.label}`;
+      node.title = `${detail.label}：${detail.description}`;
+    }
+    return { state: normalized, ...detail };
+  }
+
   function managedDeviceById(deviceId) {
     return state.managedDevices.find((item) => item.id === String(deviceId || "")) || null;
   }
@@ -5873,17 +6052,20 @@
 
     root.innerHTML = devices.map((device) => {
       const enabled = device.active !== false;
-      const stateLabel = enabled ? (device.online ? "在线" : "离线") : "已停用";
+      const connectivityLabel = enabled ? (device.online ? "在线" : "离线") : "已停用";
+      const operationalState = employeeDeviceStateFor(device);
+      const operational = employeeDeviceStateCatalog[operationalState];
+      const operationalDescription = employeeDeviceIssueFor(device) || operational.description;
       const systemLabel = [device.hostname, device.os_name, device.architecture].filter(Boolean).join(" · ") || "系统信息待上报";
-      return `<article class="managed-device-row ${device.online && enabled ? "is-online" : ""} ${enabled ? "" : "is-disabled"}" data-managed-device-row="${escapeHtml(device.id)}">
+      return `<article class="managed-device-row is-state-${escapeHtml(operationalState)} ${device.online && enabled ? "is-online" : ""} ${enabled ? "" : "is-disabled"}" data-managed-device-row="${escapeHtml(device.id)}">
         <span class="managed-device-state-rail" aria-hidden="true"></span>
         <div class="managed-device-identity">
           <div class="managed-device-name-line"><b>${escapeHtml(device.name || device.hostname || "未命名电脑")}</b><em class="managed-device-member">${escapeHtml(managedDeviceMemberLabel(device.last_user_id))}</em>${device.needs_admin_review ? '<em class="managed-device-new-login">新电脑首次登录</em>' : ""}</div>
-          <div class="managed-device-meta"><span>${escapeHtml(stateLabel)}</span><span>${escapeHtml(systemLabel)}</span><span>StoryForge ${escapeHtml(device.app_version || "版本未知")}</span><span>最后在线 ${escapeHtml(formatDeviceCreatedAt(device.last_seen_at))}</span></div>
+          <div class="managed-device-meta"><span>${escapeHtml(connectivityLabel)}</span><span>${escapeHtml(systemLabel)}</span><span>StoryForge ${escapeHtml(device.app_version || "版本未知")}</span><span>最后在线 ${escapeHtml(formatDeviceCreatedAt(device.last_seen_at))}</span></div>
         </div>
         <div class="managed-device-status">
-          <span class="${device.online && enabled ? "is-applied" : ""}">${escapeHtml(stateLabel)}</span>
-          <small>${device.online ? "当前正在连接" : `最后在线 ${escapeHtml(formatDeviceCreatedAt(device.last_seen_at))}`}</small>
+          <span class="device-state-badge is-${escapeHtml(operationalState)}">${escapeHtml(operational.label)}</span>
+          <small>${escapeHtml(operationalDescription)}</small>
           <div class="managed-device-actions">${device.needs_admin_review ? `<button type="button" class="button button-ghost" data-managed-device-action="review" data-managed-device-id="${escapeHtml(device.id)}">我已知道</button>` : ""}<button type="button" class="button button-ghost" data-managed-device-action="rename" data-managed-device-id="${escapeHtml(device.id)}">改名</button><button type="button" class="button button-ghost ${enabled ? "is-danger" : ""}" data-managed-device-action="toggle" data-managed-device-id="${escapeHtml(device.id)}">${enabled ? "停用" : "重新启用"}</button>${!enabled && !device.online ? `<button type="button" class="button button-ghost is-danger" data-managed-device-action="delete" data-managed-device-id="${escapeHtml(device.id)}">删除</button>` : ""}</div>
         </div>
       </article>`;
@@ -6826,6 +7008,80 @@
     return job.stage_label || labels[job.status] || job.status;
   }
 
+  function productionStageForJob(job) {
+    const status = String(job?.status || "").trim().toLocaleLowerCase();
+    const diagnosticStage = String(job?.failure_diagnostics?.stage || "").trim().toLocaleLowerCase();
+    const label = String(job?.stage_label || "").trim().toLocaleLowerCase();
+    const detail = `${diagnosticStage} ${label}`;
+    if (status === "completed") return "publish";
+    if (/整理输出|publish|发布/.test(detail)) return "publish";
+    if (/快速检查|quality|质检|校验成片/.test(detail) || status === "previewing") return "quality";
+    if (/narrat|voice|旁白|配音|语音/.test(detail) || status === "narrating") return "voice";
+    if (/逐段整理视频素材|素材预检|media[_ -]?preflight|素材检查/.test(detail)) return "preflight";
+    if (/subtitle|caption|字幕|编排素材/.test(detail) || status === "composing") return "subtitle";
+    if (/ffmpeg|render|渲染|编码|导出/.test(detail) || status === "rendering") return "render";
+    if (["waiting_preview", "awaiting_approval"].includes(status)) return "quality";
+    if (status === "approved") return "render";
+    return "text";
+  }
+
+  function productionStageLabel(stageId) {
+    return productionStageCatalog.find((item) => item.id === stageId)?.label || "当前步骤";
+  }
+
+  function compactJobFailureReason(job) {
+    const raw = String(job?.failure_diagnostics?.summary || job?.message || "未返回具体原因。")
+      .replace(/^(?:PipelineError|RuntimeError|ValueError|OSError|PermissionError):\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return raw.length > 220 ? `${raw.slice(0, 217)}…` : raw;
+  }
+
+  function jobFailureFix(job) {
+    const code = String(job?.failure_diagnostics?.code || "unknown").trim().toLocaleLowerCase();
+    const fixes = {
+      missing_input: "检查素材路径，重新选择缺失文件后再重试。",
+      corrupt_media: "替换损坏素材，确认本机可以播放后再重试。",
+      permission_denied: "确认素材可读取、输出目录可写入，再重试。",
+      disk_full: "清理磁盘空间或更换输出目录后再重试。",
+      filter_or_subtitle: "检查字体和字幕设置，必要时先恢复默认字幕样式。",
+      encoder_init: "运行设备诊断，切换为兼容编码器后再重试。",
+      resource_exhausted: "关闭占用资源的程序，稍候后重试；必要时使用兼容模式。",
+      out_of_memory: "释放系统资源并重试；反复出现时改用兼容渲染模式。",
+    };
+    if (fixes[code]) return fixes[code];
+    const stage = productionStageForJob(job);
+    return {
+      text: "检查正文与平台资料是否完整，再重新加入队列。",
+      voice: "检查本机配音服务与网络，重新试听可用声线后重试。",
+      subtitle: "检查字幕字体和样式，恢复默认值后再重试。",
+      preflight: "检查素材与输出目录是否可访问，并确认磁盘空间充足。",
+      render: "运行设备诊断，确认编码器与磁盘状态后重试。",
+      quality: "检查生成文件和源素材是否完整，再重试本任务。",
+      publish: "检查输出目录写入权限与剩余空间，再重试。",
+    }[stage] || "查看日志定位原因，处理后再重试。";
+  }
+
+  function jobFailureCardMarkup(job, retryAction = "") {
+    if (job?.status !== "failed") return "";
+    const diagnostics = job.failure_diagnostics && typeof job.failure_diagnostics === "object"
+      ? job.failure_diagnostics
+      : {};
+    const stage = productionStageForJob(job);
+    const safeLog = String(diagnostics.log_tail || job.error_log || "").trim();
+    const logAction = safeLog
+      ? `<details class="job-support-detail"><summary>查看日志</summary><pre>${escapeHtml(safeLog)}</pre></details>`
+      : "";
+    const diagnosticAction = $("#run-worker-self-check")
+      ? '<button type="button" class="job-support-button" data-open-view="providers" data-scroll-target="#worker-health-summary">设备诊断</button>'
+      : "";
+    return `<section class="job-failure-card" aria-label="任务失败处理建议">
+      <div class="job-failure-heading"><span>失败阶段 · ${escapeHtml(productionStageLabel(stage))}</span><b>${escapeHtml(compactJobFailureReason(job))}</b></div>
+      <p><span>修复建议</span>${escapeHtml(jobFailureFix(job))}</p>
+      ${(retryAction || logAction || diagnosticAction) ? `<div class="job-failure-actions">${retryAction}${logAction}${diagnosticAction}</div>` : ""}
+    </section>`;
+  }
+
   function hasPollableWork(jobs = state.jobs) {
     const batches = new Map();
     jobs.filter((job) => !job.archived).forEach((job) => {
@@ -6879,6 +7135,7 @@
     if (localTaskCount) localTaskCount.textContent = `${activeBatches.length} 批 · ${activeJobs.length} 条`;
 
     const activeJob = activeJobs.find((job) => executionStatuses.has(job.status));
+    renderEmployeeDeviceStateBadge();
     document.body.classList.toggle("production-resource-busy", Boolean(activeJob));
     const legacyHoldJob = activeJobs.find((job) => job.status === "awaiting_approval")
       || activeJobs.find((job) => job.status === "waiting_preview");
@@ -6934,30 +7191,36 @@
         ? `开始 ${counts.queued} 个任务`
         : "没有待办";
 
-    const stageOrder = ["script", "voice", "visual", "output"];
-    const stageByStatus = {
-      queued: "script",
-      preflight: "script",
-      preparing: "script",
-      polishing: "script",
-      narrating: "voice",
-      composing: "visual",
-      previewing: "output",
-      rendering: "output",
-      waiting_preview: "output",
-      awaiting_approval: "output",
-      approved: "output",
-      completed: "output",
-    };
-    const reference = activeJob || activeJobs.find((job) => ["queued", "approved"].includes(job.status)) || legacyHoldJob || null;
-    const currentStage = reference ? stageByStatus[reference.status] || "script" : "";
-    const currentIndex = stageOrder.indexOf(currentStage);
-    $$("#production-ribbon [data-stage]").forEach((node, index) => {
-      node.classList.toggle("is-current", Boolean(currentStage) && index === currentIndex);
-      node.classList.toggle("is-done", Boolean(currentStage) && index < currentIndex);
-    });
-    if (!reference && activeJobs.length && counts.completed === activeJobs.length) {
-      $$("#production-ribbon [data-stage]").forEach((node) => node.classList.add("is-done"));
+    updateProductionJumpbar();
+    const stageNodes = $$("#production-ribbon [data-stage]");
+    stageNodes.forEach((node) => node.classList.remove("is-current", "is-done", "is-failed"));
+    const failureJob = activeJobs.find((job) => ["failed", "interrupted"].includes(job.status));
+    const reference = activeJob
+      || activeJobs.find((job) => ["queued", "approved"].includes(job.status))
+      || legacyHoldJob
+      || failureJob
+      || null;
+    const currentStage = reference ? productionStageForJob(reference) : "";
+    const currentIndex = productionStageCatalog.findIndex((item) => item.id === currentStage);
+    if (reference && currentIndex >= 0) {
+      stageNodes.forEach((node, index) => {
+        const proof = $("[data-production-stage-status]", node);
+        const failedHere = reference === failureJob && index === currentIndex;
+        node.classList.toggle("is-current", index === currentIndex);
+        node.classList.toggle("is-done", index < currentIndex);
+        node.classList.toggle("is-failed", failedHere);
+        if (proof) proof.textContent = index < currentIndex
+          ? "已完成"
+          : index === currentIndex
+            ? failedHere ? "在此失败" : statusText(reference)
+            : "等待前序阶段";
+      });
+    } else if (activeJobs.length && counts.completed === activeJobs.length) {
+      stageNodes.forEach((node) => {
+        node.classList.add("is-done");
+        const proof = $("[data-production-stage-status]", node);
+        if (proof) proof.textContent = "已完成";
+      });
     }
   }
 
@@ -7216,25 +7479,23 @@
           const progress = Math.round((Number(job.progress) || 0) * 100);
           const showProgress = !unsuccessfulTerminalStatuses.has(job.status);
           const jobPlatform = state.platforms.find((item) => item.id === job.platform_id);
-          const errorDetail = job.status === "failed" && job.message
-            ? `<p class="job-error">${escapeHtml(job.message)}${job.error_log ? `<span>${escapeHtml(job.error_log)}</span>` : ""}</p>`
+          const resolvedOutputFolder = jobResolvedOutputFolder(job);
+          const outputAction = job.status === "completed" && resolvedOutputFolder
+            ? `<button type="button" class="job-output" data-output-folder="${escapeHtml(resolvedOutputFolder)}">打开输出</button>`
             : "";
-        const resolvedOutputFolder = jobResolvedOutputFolder(job);
-        const outputAction = job.status === "completed" && resolvedOutputFolder
-          ? `<button type="button" class="job-output" data-output-folder="${escapeHtml(resolvedOutputFolder)}">打开输出</button>`
-          : "";
-        const retryAction = !job.archived && job.job_kind !== "preview" && ["failed", "cancelled", "interrupted"].includes(job.status)
-          ? `<button type="button" class="job-output" data-retry-job="${escapeHtml(job.id)}">重试任务</button>`
-          : "";
-        const archiveAction = batch.batchId
-          ? ""
-          : job.archived
-            ? `<button type="button" class="job-archive-action is-restore" data-restore-job="${escapeHtml(job.id)}">恢复</button>`
-            : terminalStatuses.has(job.status)
-              ? `<button type="button" class="job-archive-action" data-archive-job="${escapeHtml(job.id)}">归档</button>`
-              : "";
+          const retryAction = !job.archived && job.job_kind !== "preview" && ["failed", "cancelled", "interrupted"].includes(job.status)
+            ? `<button type="button" class="job-support-button is-primary" data-retry-job="${escapeHtml(job.id)}">重试任务</button>`
+            : "";
+          const errorDetail = jobFailureCardMarkup(job, retryAction);
+          const archiveAction = batch.batchId
+            ? ""
+            : job.archived
+              ? `<button type="button" class="job-archive-action is-restore" data-restore-job="${escapeHtml(job.id)}">恢复</button>`
+              : terminalStatuses.has(job.status)
+                ? `<button type="button" class="job-archive-action" data-archive-job="${escapeHtml(job.id)}">归档</button>`
+                : "";
           return `
-          <article class="job-card job-${escapeHtml(job.status)} ${job.archived ? "is-archived" : ""}" title="${escapeHtml(job.message || "")}">
+          <article class="job-card job-${escapeHtml(job.status)} ${job.status === "failed" ? "has-failure" : ""} ${job.archived ? "is-archived" : ""}" title="${escapeHtml(job.message || "")}">
             <span class="job-index">${String(index + 1).padStart(2, "0")}</span>
             <div class="job-copy">
               <b>${escapeHtml(job.title)}</b>
@@ -7246,7 +7507,7 @@
               <span class="job-state ${stateClass}">${escapeHtml(statusText(job))}</span>
               <strong>${showProgress ? `${progress}%` : "已结束"}</strong>
               ${outputAction}
-              ${retryAction}
+              ${job.status === "failed" ? "" : retryAction}
               ${archiveAction}
             </div>
           </article>`;
@@ -7322,12 +7583,15 @@
       : null;
     const issue = remoteWeb ? state.localWorkerIssue : null;
     const workstationReady = selfCheck ? Boolean(selfCheck.ready) : ffmpegOk;
-    $("#system-light").className = `status-light ${workstationReady ? "ready" : "error"}`;
+    const deviceState = renderEmployeeDeviceStateBadge();
+    $("#system-light").className = `status-light device-${deviceState.state} ${workstationReady ? "ready" : "error"}`;
     $("#system-title").textContent = workstationReady
-      ? remoteWeb ? "当前制作电脑已就绪" : "本地渲染已就绪"
+      ? remoteWeb ? `当前制作电脑 · ${deviceState.label}` : `本地渲染 · ${deviceState.label}`
       : issue?.title || (remoteWeb && !state.localWorker ? "未连接本机制作服务" : "制作环境需要处理");
     $("#system-copy").textContent = workstationReady
-      ? `${remoteWeb ? "本机编码器" : "编码器"}：${system.recommended_encoder || "自动选择"}`
+      ? ["busy", "paused", "draining", "cooling", "degraded", "fault"].includes(deviceState.state)
+        ? deviceState.description
+        : `${remoteWeb ? "本机编码器" : "编码器"}：${system.recommended_encoder || "自动选择"}`
       : issue?.fix || selfCheck?.summary || (remoteWeb && !state.localWorker
         ? "打开或重新启动当前电脑上的 StoryForge 后重新自检"
         : "请打开服务设置查看自检结果");
@@ -9056,6 +9320,14 @@
       stage_label: job.stage_label || "",
       message: job.message || "",
       error_log: job.error_log || "",
+      failure_diagnostics: job.failure_diagnostics
+        ? {
+            code: job.failure_diagnostics.code || "",
+            stage: job.failure_diagnostics.stage || "",
+            summary: job.failure_diagnostics.summary || "",
+            log_tail: job.failure_diagnostics.log_tail || "",
+          }
+        : null,
       archived: Boolean(job.archived),
       preview_uri: job.preview_uri || "",
       preview_approved: Boolean(job.preview_approved),
@@ -9227,6 +9499,21 @@
       const closeProductionPreviewDrawer = event.target.closest("[data-close-production-preview-drawer]");
       if (closeProductionPreviewDrawer) {
         setProductionPreviewDrawerOpen(false);
+        return;
+      }
+      const productionQuickJump = event.target.closest("[data-production-quick-jump]");
+      if (productionQuickJump) {
+        const section = String(productionQuickJump.dataset.productionQuickJump || "");
+        const novel = state.productionNovel;
+        const missing = novel
+          ? productionMissingDescriptors(novel, activeDraft(novel)).find((item) => item.section === section)
+          : null;
+        if (missing?.key === "platform-binding" && novel) {
+          navigate("library");
+          await openNovelDetail(novel.id, productionQuickJump);
+          return;
+        }
+        focusProductionSection(section, missing?.selector || "");
         return;
       }
       const productionJump = event.target.closest("[data-production-jump]");
@@ -10194,6 +10481,62 @@
         });
       } catch (error) {
         toast(error.message || "当前制作电脑自检失败。", "error");
+      }
+    });
+    $("#scan-local-storage")?.addEventListener("click", async (event) => {
+      try {
+        await withBusyButton(event.currentTarget, "正在扫描…", async () => {
+          const result = await checkedCall("get_local_storage_status");
+          const removable = result?.removable || {};
+          const summary = $("#local-storage-summary");
+          if (summary) {
+            summary.textContent = Number(removable.files || 0)
+              ? `发现 ${Number(removable.files || 0)} 个可安全清理文件，共 ${formatFileSize(removable.bytes || 0)}。小说源文件与最终成片已排除。`
+              : "没有发现需要清理的旧缓存；小说源文件与最终成片不会删除。";
+          }
+        });
+      } catch (error) {
+        toast(error.message || "本机空间扫描失败。", "error");
+      }
+    });
+    $("#cleanup-local-storage")?.addEventListener("click", async (event) => {
+      try {
+        await withBusyButton(event.currentTarget, "正在预览…", async () => {
+          const options = { confirm: false, min_age_days: 30, max_delete_bytes: 512 * 1024 * 1024 };
+          const preview = await checkedCall("cleanup_local_storage_cache", options);
+          const selected = preview?.selected || {};
+          const files = Number(selected.files || 0);
+          const bytes = Number(selected.bytes || 0);
+          if (!files) {
+            const summary = $("#local-storage-summary");
+            if (summary) summary.textContent = "没有符合条件的旧缓存需要清理。";
+            toast("没有符合条件的旧缓存。", "info");
+            return;
+          }
+          const accepted = window.confirm(
+            `将清理 30 天前的 ${files} 个可再生文件，共 ${formatFileSize(bytes)}。小说源文件、最终视频、配音和当前更新包不会删除。是否继续？`,
+          );
+          if (!accepted) return;
+          const applied = await checkedCall("cleanup_local_storage_cache", { ...options, confirm: true });
+          const deleted = applied?.deleted || {};
+          const summary = $("#local-storage-summary");
+          if (summary) summary.textContent = `已清理 ${Number(deleted.files || 0)} 个文件，释放 ${formatFileSize(deleted.bytes || 0)}。`;
+          toast(`本机清理完成，释放 ${formatFileSize(deleted.bytes || 0)}。`, "info");
+        });
+      } catch (error) {
+        toast(error.message || "本机缓存清理失败。", "error");
+      }
+    });
+    $("#create-support-bundle")?.addEventListener("click", async (event) => {
+      try {
+        await withBusyButton(event.currentTarget, "正在生成…", async () => {
+          const result = await checkedCall("create_local_support_bundle");
+          const summary = $("#local-storage-summary");
+          if (summary) summary.textContent = `诊断包已保存：${String(result?.path || result?.name || "本机 StoryForge 数据目录")}`;
+          toast("诊断包已生成，可将该 ZIP 发给管理员排查。", "info");
+        });
+      } catch (error) {
+        toast(error.message || "生成诊断包失败。", "error");
       }
     });
     $("#hub-mode").addEventListener("change", updateHubModeHelp);

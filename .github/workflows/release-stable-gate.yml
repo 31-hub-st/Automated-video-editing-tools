@@ -1,0 +1,148 @@
+name: release-stable-gate
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      confirm_stable_gate:
+        description: "Run the full Windows package and 10-minute stable acceptance gate"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-stable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stable-package-gate:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - name: Confirm manual release gate
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          if ('${{ inputs.confirm_stable_gate }}' -ne 'true') {
+            throw 'Manual stable gate requires confirm_stable_gate=true.'
+          }
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install runtime dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Validate source and release identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force 'test-results/release-stable' | Out-Null
+          python -m compileall -q storyforge scripts tests 2>&1 |
+            Tee-Object -FilePath 'test-results/release-stable/python-syntax.log'
+          if ($LASTEXITCODE -ne 0) { throw 'Python syntax check failed.' }
+          node --check ui/app.js 2>&1 |
+            Tee-Object -FilePath 'test-results/release-stable/javascript-syntax.log'
+          if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed.' }
+          $version = python -c "from storyforge import __version__; print(__version__)"
+          if ($LASTEXITCODE -ne 0 -or -not $version) {
+            throw 'Could not read StoryForge version.'
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match StoryForge v$version."
+          }
+          "STORYFORGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run complete release regression
+        shell: pwsh
+        run: >-
+          python scripts/run_test_gate.py
+          --name release-full-regression
+          --output-dir test-results/release-stable
+          -- discover -s tests -p test_*.py
+
+      - name: Build and run the stable frozen-package gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'storyforge-release-dist'
+          $work = Join-Path $env:RUNNER_TEMP 'storyforge-release-work'
+          $reportDir = (Resolve-Path 'test-results/release-stable').Path
+          try {
+            & '.\scripts\build_exe.ps1' `
+              -ReleaseBuild `
+              -RequireStableAcceptance `
+              -Standalone `
+              -OutputDirectory $dist `
+              -WorkDirectory $work `
+              -StableAcceptanceReport (Join-Path $reportDir 'stability-acceptance.json') `
+              2>&1 | Tee-Object -FilePath (Join-Path $reportDir 'build.log')
+          }
+          catch {
+            $_ | Out-String | Add-Content -LiteralPath (Join-Path $reportDir 'build.log')
+            throw
+          }
+          $packageSmoke = Join-Path $work 'release-gate\package-smoke.json'
+          if (-not (Test-Path -LiteralPath $packageSmoke -PathType Leaf)) {
+            throw "Release build did not produce package smoke evidence: $packageSmoke"
+          }
+          Copy-Item -LiteralPath $packageSmoke `
+            -Destination (Join-Path $reportDir 'package-smoke.json') -Force
+
+      - name: Write release gate summary
+        if: always()
+        shell: pwsh
+        run: |
+          $reportDir = 'test-results/release-stable'
+          $testPath = Join-Path $reportDir 'summary.json'
+          $stablePath = Join-Path $reportDir 'stability-acceptance.json'
+          $smokePath = Join-Path $reportDir 'package-smoke.json'
+          $testStatus = if (Test-Path $testPath) {
+            if ((Get-Content $testPath -Raw | ConvertFrom-Json).ok) { 'PASS' } else { 'FAIL' }
+          } else { 'NOT PRODUCED' }
+          $stableStatus = if (Test-Path $stablePath) {
+            if ((Get-Content $stablePath -Raw | ConvertFrom-Json).stable_release_eligible) { 'PASS' } else { 'FAIL' }
+          } else { 'NOT PRODUCED' }
+          $smokeStatus = if (Test-Path $smokePath) {
+            if ((Get-Content $smokePath -Raw | ConvertFrom-Json).ok) { 'PASS' } else { 'FAIL' }
+          } else { 'NOT PRODUCED' }
+          $summary = @"
+          # StoryForge stable release gate
+
+          - Version: **$env:STORYFORGE_VERSION**
+          - Full regression: **$testStatus**
+          - Frozen 10-minute acceptance: **$stableStatus**
+          - Package smoke: **$smokeStatus**
+          - Binary package upload: **not performed by this gate**
+          "@
+          $summary | Set-Content -LiteralPath (Join-Path $reportDir 'release-summary.md') -Encoding utf8
+          if ($env:GITHUB_STEP_SUMMARY) {
+            $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          }
+
+      - name: Upload stable-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-stable-evidence-${{ github.run_id }}
+          path: test-results/release-stable
+          if-no-files-found: warn
+          retention-days: 90

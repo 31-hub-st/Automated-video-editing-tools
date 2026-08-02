@@ -3,15 +3,15 @@
 > 文档用途：供后续开发团队将 StoryForge 的小说资料、分集规划、文案处理、配音、字幕、素材编排、浏览器即时预览、批量渲染、生产记录和多电脑协同能力嫁接到其他程序。
 >
 > 基准日期：2026-08-01
-> 当前源码版本：`storyforge.__version__` 0.4.6（稳定版）
-> 数据库 Schema：12  
+> 当前源码版本：`storyforge.__version__` 0.4.7（稳定版）
+> 数据库 Schema：14
 > 设置 Schema：19
 > Hub 协议：1  
-> Local Worker / 浏览器协议：2  
+> Local Worker / 浏览器协议：3
 > 成片 Manifest：2
 > 更新清单 Schema：1；更新包元数据：1；生产方案 `recipe_version`：1；生产预设 Schema：2
 >
-> 解释优先级：本报告前部的当前嫁接合同覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。后文记录的 0.4.4 完整包、路径、哈希和本机验收结果是**历史稳定发布证据**，不是当前 `0.4.6` 稳定版的交付位置或验收结论；员工电脑的最终硬件冒烟状态仍以设备上报为准。
+> 解释优先级：本报告前部的当前嫁接合同覆盖后文明确标为历史兼容的 0.3.x/0.4.0 描述；后文未冲突的实体、接口和兼容合同继续有效。后文记录的 0.4.6 完整包、路径、哈希和本机验收结果是**历史稳定发布证据**，不是当前 `0.4.7` 稳定版的交付位置或验收结论；员工电脑的最终硬件冒烟状态仍以设备上报为准。
 
 ---
 
@@ -37,7 +37,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - `HubServer` / `HubClient`：局域网目录共享、权限和任务租约；
 - `StoryForgeApi`：现有桌面桥接层，可作为新适配器的参考，但不应直接定义未来公共 API。
 
-### 1.1 0.4.6 当前嫁接合同（兼容 0.3.4/0.4.0）
+### 1.1 0.4.7 当前嫁接合同（兼容 0.3.4/0.4.0）
 
 - **网页与桌面是同一业务产品，媒体运行端不同。**桌面 WebView、Hub 团队网页和制作电脑 loopback 网页复用同一 UI 和账号权限。Hub 网页可发起试听、目录选择、完整建队、队列控制和失败重试，但前端必须先通过一次性设备票据连接访问者电脑上只监听 `127.0.0.1:18765–18770` 的 Local Worker；`WEB_DESKTOP_ONLY_MEDIA_METHODS` 继续阻止这些方法落到 Hub 主机进程。
 - **完整窗口无需常开。**员工发布包在 EXE 同级携带不含密钥的 `storyforge-connection.json`。全新制作电脑只输入账号和 8 位密码；软件自动读取 Windows 电脑名称、登记安装身份、用 DPAPI 保存内部设备凭据，并静默注册登录触发的 `StoryForge Local Worker`。员工不填写 Hub 地址、不复制令牌、不运行脚本。`admin-tools` 中的启用/停用脚本仅保留为管理员维修入口。集成到其他程序时应保留这个独立 Worker 生命周期，不要把媒体能力绑死在可见窗口。
@@ -49,13 +49,24 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - **旧字段只作安全迁移。**旧 `export_narration_audio=true`、`false` 或缺失都迁移为 `output_mode=video_and_mp3`，即当前常规视频模式；新任务不会因此额外生成 MP3。`audio_only` 只登记 `narration` Artifact；`video_and_mp3` 与 `reuse_audio` 只登记 `video` Artifact，`reuse_audio` 的源 MP3 只作为冻结输入引用，不复制为交付物。
 - **生产媒体始终不跨机共享。**`settings.hub.share_narration` 与旧 `share_previews` 只作为 false-only 兼容字段读取，旧 `true` 在加载时迁移并持久化为 `false`，设置 API 也会忽略伪造的开启请求。完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 和字幕对齐文件只把元数据、校验信息和本机引用写入 Hub，文件本身永不上传；Hub 的 72 小时、最多 3 份且摘要去重的固定资料备份不包含这些员工电脑产物，管理员远程页面也不能读取这些路径对应的文件。
 - **视频素材完全由员工选择。**系统只递归扫描员工本批选择的视频素材目录，并在其中按去重、时长和可解码性选择素材；不再根据 `story_mood` 或小说题材寻找分类子目录，也不访问 Hub 或其他电脑目录。所选目录没有有效视频时当前任务才失败并跳过。
-- **核心更新与语言组件分离。**核心程序以完整 ZIP 自动检查、下载并在空闲安全重启时安装；语言资源以独立组件清单更新到 `<StoryForgeData>\components`，逐文件校验后原子切换，并可回退上一版。组件不得替换核心 EXE，核心 ZIP 也不得覆盖组件目录；当前 `0.4.6` 完整包仍内置日语链路。
+- **核心更新与语言组件分离。**核心程序以完整 ZIP 自动检查、下载并在空闲安全重启时安装；语言资源以独立组件清单更新到 `<StoryForgeData>\components`，逐文件校验后原子切换，并可回退上一版。组件不得替换核心 EXE，核心 ZIP 也不得覆盖组件目录；当前 `0.4.7` 完整包仍内置日语链路。
 - **Hub 备份可做管理员离线整库覆盖恢复。**快照位于 `<StoryForgeData>\hub-backups`，保留 72 小时且最多 3 份，内容摘要相同则去重。管理员必须关闭 StoryForge 后运行 `admin-tools\restore_hub_backup.cmd`；选择器优先接受 `.sfbak`，并兼容带完整 StoryForge 清单的旧 `.zip`，所以从其他电脑复制到任意合法目录的备份也可直接选择。恢复器先校验文件类型、清单、逐文件 SHA-256 和压缩包路径安全性，再自动创建 `pre_restore` 快照，最后以所选备份整体覆盖小说、平台绑定、全部口令、设置/预设及其他 Hub 固定资料，不做合并，也不触碰员工视频素材、最终成品或渲染缓存。
 - **胶片带以批次为第一层。**当前/归档任务按稳定 `batch_id` 聚合成默认折叠的“批次卷宗”；摘要显示批次状态、总进度与各状态数量。展开卷宗后才显示单视频卡、错误和操作，单视频可跳转到对应生产记录。该前端投影不改变 Job、ProductionRecord 或 Attempt 的持久实体，也不以批次折叠替代服务端分页和所有权校验。
 - **连续建批次不等待渲染。**`queue_production_draft()` 成功后，前端把已提交草稿视为不可变快照，立即建立 `id=""`、`status="draft"` 的下一批编辑对象。下一批继承 Voice、WPM、完整样式/渲染方案和本机目录，清空 `promo_code_id / publishing_account_id / episode_ids` 及简介卡生成缓存；已提交批次继续在本机严格 FIFO 队列中运行。每个 durable batch 单独保存总数、顺序、完整 Job 快照和汇总进度；Worker/程序重启后，尚未执行的 queued 快照按原批次顺序恢复，失败或中断终态不阻塞同批后续任务或后提交批次。
 - **运行入口。**Hub 团队网页默认端口仍为 `8765`，当前验收地址示例为 `http://10.0.0.225:8765/`，IP 变化时以 Hub 返回地址为准；Worker 仅使用 loopback 端口段。集成端应把“Hub 可访问”和“当前电脑 Worker 可连接”作为两个独立健康检查。
 
-### 1.2 0.3.3 嫁接增量
+### 1.2 0.4.7 稳定基础设施合同
+
+- **Worker 状态机**：本机制作服务对外上报 `ready / busy / paused / draining / cooling / degraded / fault`。一次只运行一条重媒体任务；启动前检查内存、磁盘和 GPU，连续可重试失败进入有上限的冷却期。输出目录是普通本地路径且不存在时可创建；目标盘符或移动盘失联时进入 `fault`，不得无限重新排队。
+- **租约 fencing**：`production_records.lease_generation` 是进程级围栏令牌。同一个 `device_id` 上的第二个进程不能续用第一个进程的有效租约；claim、heartbeat、release、save 都必须携带当前世代。启动恢复不能释放同设备另一进程仍有效的租约。
+- **七阶段遥测**：任务按 `text / voice / captions / media_preflight / render / quality_check / publish` 记录当前阶段、开始时间、完成结果和最近阶段历史。该遥测是对现有串行流程的被动观测，不改变实际执行顺序，也不允许盲目并行渲染。
+- **统一 RPC 合同**：`storyforge.rpc_contract` 是 Hub、Web、Worker 和前端 RPC 白名单的唯一注册来源。本地 Worker / 浏览器最低协议为 3；新增本机方法不得只修改某一端的手写列表。
+- **受控存储维护**：空间扫描只分类可再生缓存、过期日志和旧回滚包；清理必须先预览再显式确认，并受最大字节数和年龄约束。小说源文件、最终 MP4/MP3、当前更新包及路径边界外文件不可删除。诊断 ZIP 只允许结构化错误摘要、脱敏路径、错误码和固定 FFmpeg 分类，不包含正文、prompt、messages 或供应商请求体。
+- **冻结发布证明**：正式核心 ZIP 必须带 `BUILD_STARTUP_VALIDATION.json`、十分钟冻结包稳定验收和与实际目录逐文件匹配的 `BUILD_RELEASE_VALIDATION.json`。发布器会拒绝缺证明、版本/入口不一致或内容被改动的包；组件同版本重装也会重新核验 payload，激活失败自动恢复旧状态及上一版运行时。
+
+以上合同适合其他程序直接复用。不要绕过租约世代写生产记录，不要把 Worker 状态简化成单个 `busy` 布尔值，也不要自行复制一份 RPC 权限表。
+
+### 1.3 0.3.3 嫁接增量
 
 - 当前生产流程不再渲染或审批独立样片。制作台在浏览器中即时投影开头、正文字幕和封面结尾，用户确认后一次调用 `queue_production_draft()`；服务端为每条视频创建 `job_kind="full"`、`status="queued"` 的任务并立即启动本机队列。
 - `queue_production_draft()` 为旧客户端保留 `preview_required` 和 `preview_job_id` 响应键，但新批次固定返回 `false` 与空字符串；`preview` Job 和旧状态只用于读取/迁移历史数据，通用重试会拒绝历史 preview，旧审批 API 不属于新集成路径。
@@ -66,7 +77,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - ASS 顶部 `SearchCard` 固定使用 Layer 7，逐词弹出不再泄漏多余右花括号；制作台 `soft_pop` 关键帧全过程保留 `translateX(-50%)`，避免字幕右偏或越出安全区。
 - 启动恢复会释放当前稳定 `device_id` 名下已经失去内存任务的陈旧生产租约和草稿 queue claim，同时保留其他电脑租约与全部历史记录。
 
-### 1.3 2026-07-29 历史源码整合增量（仅供迁移参考）
+### 1.4 2026-07-29 历史源码整合增量（仅供迁移参考）
 
 - Hub 网页与桌面程序使用同一制作台。浏览器会通过一次性票据连接当前制作电脑仅监听 `127.0.0.1` 的 Local Worker；小说、封面、平台、口令、成员、文本 AI、生产方案和记录来自 Hub，视频素材、音乐、TTS、FFmpeg/GPU、临时文件及成片只使用当前制作电脑。
 - 桌面桥不再直接暴露 `StoryForgeApi`；管理员和员工都需使用 8 位密码登录，会话最长保留 30 天。新员工默认密码为 `xs123456`，首次登录后建议修改但不强制，也不作为验收门槛。员工可制作、试听、修改本批与团队生产方案、重试和查看本人记录，但不能管理小说、平台、口令、发布账号、成员或 Hub；员工账号不能启动 Hub。
@@ -74,7 +85,7 @@ StoryForge 不是单纯的 FFmpeg 脚本，而是一套 Windows 本地优先的�
 - 不再生成审批样片。右侧开头、正文字幕、封面结尾均为即时浏览器预览；正文示例直接抽取当前勾选分集的真实语种句子。简介卡可显式调用文本 AI 优化，保存后预览和最终任务共用同一冻结文本，渲染阶段不再临时重写。
 - 新增可选 `edge_tts` 在线免费客户端：无需 API Key，运行时读取上游真实女声，覆盖 `en / ja / es / fr / de / id / ko / it / pt-BR / hi`，最多返回 3 个，不足时如实返回；不会伪造候选。Edge 文本会发送给第三方上游，因此无离线和 SLA 保证。
 - FFmpeg、外部 TTS CLI、媒体探测与质检均接入任务级取消令牌；Windows 通过 `taskkill /T /F` 强制结束该任务进程树，取消一条不会停止其他任务，迟到回调不能复活记录。
-- 该历史版本曾按题材分类并回退到总目录；`0.4.6` 已取消题材素材匹配，只递归扫描员工本批选择的视频素材目录。背景音乐仍按“成功使用次数最少 → 时长适配 → 路径”选择；视频与音乐只在渲染和快速质检成功后计数。
+- 该历史版本曾按题材分类并回退到总目录；`0.4.7` 已取消题材素材匹配，只递归扫描员工本批选择的视频素材目录。背景音乐仍按“成功使用次数最少 → 时长适配 → 路径”选择；视频与音乐只在渲染和快速质检成功后计数。
 - 无人工生成数量上限。超大批次使用磁盘 Job spool、持久生产记录与有界队列窗口逐段装载，网页只接收当前窗口和总数，不再要求把全部 Job 同时驻留内存。
 - 该历史版本以“每日备份保留 3 天”描述；当前合同改为滚动保留 72 小时、最多 3 份且按内容摘要去重，范围仍不包含员工本机素材、完整 MP4、纯旁白 MP3、历史预览、内部 WAV、ASS 或字幕对齐文件。
 
@@ -1085,7 +1096,7 @@ RPC 请求：
 
 ### 11.6 浏览器生产适配层
 
-网页层包含两个明确隔离的运行面：`StoryForgeWebApplication` 挂载到 `HubServer`，负责共享资料和管理；`ClientLocalWebServer` 只监听制作电脑的 `127.0.0.1`，其 API 绑定当前电脑的本地队列和媒体管线。`ui/app.js` 的 `bridge.call()` 先选择 `window.pywebview.api`；普通 HTTP(S) 页面调用所在运行面的 `/web/api/rpc`。Hub 网页领取短时设备票据时必须携带 `browser_protocol_version=2` 和 `minimum_worker_protocol_version=2`，Worker 也回传自身协议与最低浏览器协议；任一方向低于要求时，在消耗票据或创建媒体任务前明确拒绝并提示升级。显式 `?demo=1` 仅用于无真实数据的界面演示，正常地址永远不回退到 Mock。
+网页层包含两个明确隔离的运行面：`StoryForgeWebApplication` 挂载到 `HubServer`，负责共享资料和管理；`ClientLocalWebServer` 只监听制作电脑的 `127.0.0.1`，其 API 绑定当前电脑的本地队列和媒体管线。`ui/app.js` 的 `bridge.call()` 先选择 `window.pywebview.api`；普通 HTTP(S) 页面调用所在运行面的 `/web/api/rpc`。Hub 网页领取短时设备票据时必须携带 `browser_protocol_version=3` 和 `minimum_worker_protocol_version=3`，Worker 也回传自身协议与最低浏览器协议；任一方向低于要求时，在消耗票据或创建媒体任务前明确拒绝并提示升级。显式 `?demo=1` 仅用于无真实数据的界面演示，正常地址永远不回退到 Mock。
 
 关键集成合同：
 
@@ -1160,7 +1171,7 @@ sequenceDiagram
 - 组件清单声明 `component_id`、组件版本、兼容的应用版本范围、整包摘要和逐文件 SHA-256；客户端只接受与当前核心版本兼容的组件。
 - 组件安装根固定为 `<StoryForgeData>\components`。安全解压拒绝绝对路径、路径穿越、Windows 路径碰撞、符号链接、加密条目、异常压缩比和未声明文件；全部校验通过后写入不可变版本目录，再通过单个原子状态文件切换当前版本。
 - 每个组件保留当前版与上一版，失败可回退；组件不得替换核心 EXE 或程序目录，核心完整 ZIP 也不得覆盖 `<StoryForgeData>\components`。
-- 当前 `0.4.6` 完整包仍内置日语前处理、字典和约定 Voice；独立组件用于后续增加或修复语言资源，不要求员工手工复制散文件。
+- 当前 `0.4.7` 完整包仍内置日语前处理、字典和约定 Voice；独立组件用于后续增加或修复语言资源，不要求员工手工复制散文件。
 
 #### 校验与信任边界
 
@@ -1389,7 +1400,7 @@ hub.manage
 
 API Key 和自动登记的设备凭据使用当前 Windows 用户的 DPAPI 加密。传给 UI 时只显示 `********` / `has_*` 状态，保存掩码时保留原值；主流程不回显设备凭据。
 
-设置迁移说明：Schema 7 为旧安装补入 `video_template=classic`；Schema 8 把旧 30 FPS 默认升级为推荐的 60 FPS；Schema 9 增加简介卡/口令卡/旧结尾卡样式；Schema 10 增加局域网软件更新设置；Schema 11 增加网页安全目录；Schema 12 将历史 preview 的旧默认 30 秒迁为 15 秒；Schema 13 为每个安装生成并持久化稳定安装 ID，并增加设备配置应用状态；Schema 14 增加简介卡入场和画面色调等当前视觉字段；Schema 15 增加旧 `export_narration_audio=false`；Schema 16 增加 `cover_outro_enabled=true`；Schema 17 增加历史 `hub.share_narration=false` 字段；**Schema 18** 增加 `output_mode` 并把旧 `export_narration_audio=true`、`false` 或缺失统一迁移为 `video_and_mp3`，只有已经显式保存的 `output_mode=audio_only` 保持纯音频。`0.4.6` 在兼容枚举层新增 `reuse_audio`，并把 `video_and_mp3` 的当前交付语义收敛为“常规视频只交付 MP4”；历史 Schema 迁移事实保持不变。当前加载器还会把任意版本中残留的 `share_narration=true / share_previews=true` 迁移并持久化为 `false`。当前源码不删除 `preview_seconds`、`outro_card_preset/outro_card` 或旧草稿快照，但新建 `full` 任务不会把这些字段接入审批门或白色结尾卡。迁移后用户已经明确保存的其他设置继续保留。
+设置迁移说明：Schema 7 为旧安装补入 `video_template=classic`；Schema 8 把旧 30 FPS 默认升级为推荐的 60 FPS；Schema 9 增加简介卡/口令卡/旧结尾卡样式；Schema 10 增加局域网软件更新设置；Schema 11 增加网页安全目录；Schema 12 将历史 preview 的旧默认 30 秒迁为 15 秒；Schema 13 为每个安装生成并持久化稳定安装 ID，并增加设备配置应用状态；Schema 14 增加简介卡入场和画面色调等当前视觉字段；Schema 15 增加旧 `export_narration_audio=false`；Schema 16 增加 `cover_outro_enabled=true`；Schema 17 增加历史 `hub.share_narration=false` 字段；**Schema 18** 增加 `output_mode` 并把旧 `export_narration_audio=true`、`false` 或缺失统一迁移为 `video_and_mp3`，只有已经显式保存的 `output_mode=audio_only` 保持纯音频。`0.4.7` 在兼容枚举层继续支持 `reuse_audio`，并把 `video_and_mp3` 的当前交付语义收敛为“常规视频只交付 MP4”；历史 Schema 迁移事实保持不变。当前加载器还会把任意版本中残留的 `share_narration=true / share_previews=true` 迁移并持久化为 `false`。当前源码不删除 `preview_seconds`、`outro_card_preset/outro_card` 或旧草稿快照，但新建 `full` 任务不会把这些字段接入审批门或白色结尾卡。迁移后用户已经明确保存的其他设置继续保留。
 
 ---
 
@@ -1610,7 +1621,7 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 
 ## 19. 测试覆盖与历史质量快照
 
-项目使用 `python -m unittest discover -s tests -p 'test_*.py'` 作为完整回归入口。下述数量是 2026-07-30 的**历史 0.4.0-rc5 测试快照**：共 **674 项测试，0 失败、2 项环境条件跳过**；UI、资料库、更新器、流水线、配置、生产流程与本机网页定向回归均通过，Node `ui/app.js --check` 同时通过。它不能替代 `0.4.6` 的当前构建验收，测试增加后应以新构建的实际输出更新发布记录。
+项目使用 `python -m unittest discover -s tests -p 'test_*.py'` 作为完整回归入口。下述数量是 2026-07-30 的**历史 0.4.0-rc5 测试快照**：共 **674 项测试，0 失败、2 项环境条件跳过**；UI、资料库、更新器、流水线、配置、生产流程与本机网页定向回归均通过，Node `ui/app.js --check` 同时通过。它不能替代 `0.4.7` 的当前构建验收，测试增加后应以新构建的实际输出更新发布记录。
 
 本轮还在真实 Hub 网页与本机制作服务中验证了两批连续提交：第一批运行时第二批进入独立卷宗并保持等待，制作台立即重置下一批必选字段，调度器按 FIFO 接续；验证数据及本机测试输出随后清理。硬取消测试曾因只等待 PID 文件“存在”而在文件内容尚未写入时偶发读取空值，现改为等待完整 PID 字段；业务进程树取消实现未发现缺陷。输出中的 `synthetic provider failure`、`temporary Hub outage` 和 `forced render failure` 堆栈是测试主动注入并验证“单项失败继续/临时故障可恢复”的预期日志，不是测试失败。
 
@@ -1638,7 +1649,7 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 - queued Job 快照与 FIFO 批次在 Worker/程序重启后的自动恢复、运行中任务的明确 interrupted 状态、应用关闭期间拒绝新入队，以及关闭超时不提前释放租约；
 - FFmpeg/TTS/探测/质检的任务级取消令牌与 Windows 进程树终止、取消后迟到回调守卫；
 - 三种输出模式的 staging、事务 journal、原子发布和启动回滚：`video_and_mp3`/常规模式只发布 MP4，`audio_only` 只发布 MP3，`reuse_audio` 冻结源旁白引用且只发布新 MP4；包括最终文件被占用时保留恢复证据；
-- Local Worker 与浏览器协议 2 的双向握手，以及旧 Worker/旧网页在消费票据或创建任务前拒绝；
+- Local Worker 与浏览器协议 3 的双向握手，以及旧 Worker/旧网页在消费票据或创建任务前拒绝；
 - Hub 生产媒体边界：MP4、MP3、WAV、ASS 和历史预览不上传，旧共享开关强制迁移为 false；
 
 嫁接后至少应保留现有测试，并新增：
@@ -1656,7 +1667,7 @@ queue.set_processor(PipelineRunner(lambda: state.settings))
 
 ## 20. 历史构建与分发记录
 
-`storyforge/__init__.py` 是应用版本唯一来源，`pyproject.toml` 动态读取它；制作更新包前必须先把它提升为严格更高的 SemVer。以下是 2026-07-30 的**历史 0.4.1 构建验收记录**，不代表当前 `0.4.6` 发布包；后续重新构建时必须以新生成的校验值替换，不能沿用本表：
+`storyforge/__init__.py` 是应用版本唯一来源，`pyproject.toml` 动态读取它；制作更新包前必须先把它提升为严格更高的 SemVer。以下是 2026-07-30 的**历史 0.4.1 构建验收记录**，不代表当前 `0.4.7` 发布包；后续重新构建时必须以新生成的校验值替换，不能沿用本表：
 
 | 项目 | 当前候选值 |
 |---|---|

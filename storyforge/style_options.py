@@ -69,7 +69,10 @@ _BOOLEANS = {
 
 _ENUMS = {
     "subtitle": {"alignment": {"left", "center", "right"}},
-    "intro_card": {"text_alignment": {"left", "center", "right"}},
+    "intro_card": {
+        "text_alignment": {"left", "center", "right"},
+        "layout": {"standard", "cover_split", "cover_split_noir"},
+    },
     "code_card": {"alignment": {"left", "center", "right"}},
     "outro_card": {"text_alignment": {"left", "center", "right"}},
 }
@@ -100,7 +103,7 @@ _NUMBERS: dict[str, dict[str, tuple[float, float, type[int] | type[float]]]] = {
         "background_opacity": (0.15, 1, float),
         "border_width": (0, 12, int),
         "shadow_opacity": (0, 0.8, float),
-        "width_percent": (40, 82, float),
+        "width_percent": (40, 86, float),
         "position_x_percent": (20, 80, float),
         "position_y_percent": (12, 58, float),
         "padding": (16, 120, int),

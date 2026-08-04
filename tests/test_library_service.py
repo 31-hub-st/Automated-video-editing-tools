@@ -118,8 +118,11 @@ class LibraryServiceTests(unittest.TestCase):
             }
         )
 
+        self.assertEqual(recipe["subtitle_preset"], "clear_outline")
+        self.assertEqual(recipe["subtitle_word_mode"], "single")
         self.assertEqual(recipe["subtitle"]["active_color"], "#FFCC00")
         self.assertEqual(recipe["subtitle"]["pop_scale"], 128)
+        self.assertFalse(recipe["subtitle"]["word_sync_enabled"])
         self.assertEqual(recipe["intro_card"]["background_color"], "#FFF1F5")
         self.assertEqual(recipe["intro_card"]["position_x_percent"], 55.0)
         self.assertEqual(recipe["code_card"]["radius"], 28)
@@ -132,6 +135,31 @@ class LibraryServiceTests(unittest.TestCase):
         snapshot = dict(recipe)
         self.settings.intro_card.background_color = "#000000"
         self.assertEqual(snapshot["intro_card"]["background_color"], "#FFF1F5")
+
+    def test_retired_subtitle_presets_are_normalized_when_old_drafts_are_opened(self) -> None:
+        projected = self.service._ui_draft(
+            {
+                "id": "draft-1",
+                "metadata": {
+                    "production_settings": {
+                        "subtitle_preset": "minimal_bottom",
+                        "subtitle_word_mode": "off",
+                        "subtitle": {"bottom_margin": 275},
+                    }
+                },
+                "subtitle_style_id": "minimal_bottom",
+            }
+        )
+
+        self.assertEqual(
+            projected["production_settings"]["subtitle_preset"],
+            "clear_outline",
+        )
+        self.assertEqual(projected["subtitle_style_id"], "clear_outline")
+        self.assertEqual(
+            projected["production_settings"]["subtitle"]["bottom_margin"],
+            275,
+        )
 
     def test_batch_recipe_persists_concise_preview_duration(self) -> None:
         recipe = self.service._validated_production_settings(
@@ -317,7 +345,11 @@ class LibraryServiceTests(unittest.TestCase):
         self.assertEqual(detached["production_settings"]["narration_wpm"], 260)
         self.assertEqual(
             detached["production_settings"]["subtitle_preset"],
-            "word_pop_sync",
+            "clear_outline",
+        )
+        self.assertEqual(
+            detached["production_settings"]["subtitle_word_mode"],
+            "single",
         )
         self.assertTrue(detached["production_settings"]["export_narration_audio"])
         self.assertTrue(detached_result["warnings"])
@@ -343,8 +375,9 @@ class LibraryServiceTests(unittest.TestCase):
         self.assertEqual(jobs[0].settings_snapshot["narration_wpm"], 260)
         self.assertEqual(
             jobs[0].settings_snapshot["subtitle_preset"],
-            "word_pop_sync",
+            "clear_outline",
         )
+        self.assertEqual(jobs[0].settings_snapshot["subtitle_word_mode"], "single")
 
     def test_import_returns_the_ui_contract_and_deduplicates_body(self) -> None:
         novel = self._import()

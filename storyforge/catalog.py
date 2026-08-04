@@ -21,6 +21,7 @@ from .models import (
     INTRO_ANIMATIONS,
     SUBTITLE_ANIMATIONS,
     VISUAL_STYLE_PRESETS,
+    normalize_retired_subtitle_settings,
 )
 from .services.language_detection import (
     LANGUAGE_NAMES_ZH,
@@ -148,6 +149,7 @@ VOICE_CANDIDATE_FIELDS = frozenset(
         "narration_wpm",
         "cached",
         "cache_key",
+        "selection_key",
     }
 )
 VOICE_LOCK_HISTORY_FIELDS = frozenset({"provider", "voice_id", "label"})
@@ -581,7 +583,9 @@ def normalize_portable_device_config(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, Mapping):
         raise CatalogValidationError("portable config must be an object")
-    incoming = {str(key): item for key, item in value.items()}
+    incoming = normalize_retired_subtitle_settings(
+        {str(key): item for key, item in value.items()}
+    )
     _reject_forbidden_portable_keys(incoming)
     allowed = (
         set(PORTABLE_CONFIG_SCALAR_ENUMS)
@@ -754,6 +758,9 @@ def _voice_candidate(value: Any, *, index: int) -> dict[str, Any]:
         "narration_wpm": narration_wpm,
         "cached": cached,
         "cache_key": _optional_text(candidate.get("cache_key"), maximum=128),
+        "selection_key": _optional_text(
+            candidate.get("selection_key"), maximum=128
+        ),
     }
 
 

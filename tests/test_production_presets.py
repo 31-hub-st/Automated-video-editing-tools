@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,12 +8,88 @@ from pathlib import Path
 from storyforge.catalog import CatalogRepository
 from storyforge.production_presets import (
     CURATED_PRODUCTION_PRESETS,
+    PRESET_SCHEMA_VERSION,
     ProductionPresetStore,
     validate_production_preset,
 )
 
 
 class ProductionPresetTests(unittest.TestCase):
+    def test_schema_four_personal_presets_migrate_retired_subtitle_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "production-presets.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "presets": [
+                            {
+                                "id": "employee_word",
+                                "name": "Employee word captions",
+                                "owner_user_id": "employee-1",
+                                "revision": 7,
+                                "recipe": {
+                                    "production_settings": {
+                                        "subtitle_preset": "word_pop_sync",
+                                        "subtitle_word_mode": "off",
+                                        "subtitle": {"active_color": "#12ABEF"},
+                                    }
+                                },
+                            },
+                            {
+                                "id": "employee_minimal",
+                                "name": "Employee minimal captions",
+                                "owner_user_id": "employee-1",
+                                "revision": 3,
+                                "recipe": {
+                                    "production_settings": {
+                                        "subtitle_preset": "minimal_bottom",
+                                        "subtitle": {"bottom_margin": 275},
+                                    }
+                                },
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = ProductionPresetStore(path)
+
+            presets = {
+                item["id"]: item
+                for item in store.list(
+                    viewer_user_id="employee-1",
+                    can_manage_all=False,
+                )
+            }
+
+            self.assertEqual(PRESET_SCHEMA_VERSION, 5)
+            self.assertEqual(set(presets), {"employee_word", "employee_minimal"})
+            word = presets["employee_word"]
+            minimal = presets["employee_minimal"]
+            self.assertEqual(word["owner_user_id"], "employee-1")
+            self.assertEqual(word["revision"], 7)
+            self.assertEqual(
+                word["recipe"]["production_settings"]["subtitle_preset"],
+                "clear_outline",
+            )
+            self.assertEqual(
+                word["recipe"]["production_settings"]["subtitle_word_mode"],
+                "single",
+            )
+            self.assertEqual(
+                word["recipe"]["production_settings"]["subtitle"]["active_color"],
+                "#12ABEF",
+            )
+            self.assertEqual(
+                minimal["recipe"]["production_settings"]["subtitle_preset"],
+                "clear_outline",
+            )
+            self.assertEqual(
+                minimal["recipe"]["production_settings"]["subtitle"]["bottom_margin"],
+                275,
+            )
+
     def test_schema_three_ownerless_presets_are_preserved_but_hidden(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "production-presets.json"

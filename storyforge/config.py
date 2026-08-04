@@ -21,6 +21,7 @@ from .models import (
     COLOR_GRADES,
     COVER_ANIMATIONS,
     PlatformProfile,
+    normalize_retired_subtitle_settings,
 )
 from .style_options import (
     validate_intro_animation,
@@ -32,7 +33,7 @@ from .style_options import (
 
 APP_NAME = "StoryForge Studio"
 MASKED_SECRET = "********"
-SETTINGS_SCHEMA_VERSION = 19
+SETTINGS_SCHEMA_VERSION = 20
 
 
 class _DataBlob(ctypes.Structure):
@@ -527,6 +528,7 @@ class ApplicationState:
 
     def update_settings(self, value: dict[str, Any]) -> AppSettings:
         with self._lock:
+            value = normalize_retired_subtitle_settings(value)
             enum_fields = {
                 "output_mode": {"video_and_mp3", "audio_only", "reuse_audio"},
                 "video_transition": {"cut", "fade"},

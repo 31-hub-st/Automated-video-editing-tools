@@ -24,6 +24,7 @@ from .models import (
     JobStatus,
     PlatformProfile,
     RenderJob,
+    normalize_retired_subtitle_settings,
 )
 from .pipeline import safe_component
 from .providers.base import ProviderConfig, ProviderError
@@ -644,6 +645,16 @@ class LibraryService:
             if isinstance(metadata.get("production_settings"), Mapping)
             else {}
         )
+        if (
+            "subtitle_preset" not in production_settings
+            and str(value.get("subtitle_style_id") or "").strip()
+        ):
+            production_settings["subtitle_preset"] = str(
+                value.get("subtitle_style_id") or ""
+            ).strip()
+        production_settings = normalize_retired_subtitle_settings(
+            production_settings
+        )
         voice = (
             dict(metadata.get("voice") or {})
             if isinstance(metadata.get("voice"), Mapping)
@@ -672,7 +683,11 @@ class LibraryService:
             "source_narration_audio": str(
                 production_settings.get("source_narration_audio") or ""
             ),
-            "subtitle_style_id": str(value.get("subtitle_style_id") or ""),
+            "subtitle_style_id": str(
+                production_settings.get("subtitle_preset")
+                or value.get("subtitle_style_id")
+                or ""
+            ),
             "outro_style_id": str(value.get("outro_style_id") or ""),
             "status": str(value.get("status") or "draft"),
             "row_version": int(value.get("row_version") or 0),
@@ -714,11 +729,15 @@ class LibraryService:
         # Older saved drafts may not contain the V9 visual-style mappings.
         # Layer them over today's non-secret defaults so reopening an old draft
         # remains renderable and gains editable cards without a data migration.
-        result = {
-            **self.production_settings_snapshot(self._settings_getter()),
-            **dict(base or {}),
-        }
-        incoming = dict(value or {}) if isinstance(value, Mapping) else {}
+        result = normalize_retired_subtitle_settings(
+            {
+                **self.production_settings_snapshot(self._settings_getter()),
+                **dict(base or {}),
+            }
+        )
+        incoming = normalize_retired_subtitle_settings(
+            dict(value or {}) if isinstance(value, Mapping) else {}
+        )
 
         for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
             if boolean_key not in incoming:
@@ -1775,7 +1794,7 @@ class LibraryService:
             "intro_card_text": intro_card_text,
             "intro_card_source": intro_card_source,
             "subtitle_style_id": str(
-                value.get("subtitle_style_id") or "clear_outline"
+                production_settings.get("subtitle_preset") or "clear_outline"
             ),
             "outro_style_id": str(value.get("outro_style_id") or "cover_focus"),
             "production_preset_id": production_preset_id,
@@ -1814,7 +1833,9 @@ class LibraryService:
                 "episode_ids": episode_ids,
                 "creative_line_count": variant_count,
                 "voice_profile": str(voice.get("profile") or ""),
-                "subtitle_style_id": str(value.get("subtitle_style_id") or "clear_outline"),
+                "subtitle_style_id": str(
+                    production_settings.get("subtitle_preset") or "clear_outline"
+                ),
                 "outro_style_id": str(value.get("outro_style_id") or "cover_focus"),
                 "status": "draft",
                 "created_by_user_id": str(value.get("created_by_user_id") or "") or None,

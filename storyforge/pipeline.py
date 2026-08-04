@@ -53,7 +53,12 @@ from .services.quality import (
     QualityReport,
     run_fast_quality_check,
 )
-from .services.subtitles import AssStyleConfig, SubtitleCue, write_ass
+from .services.subtitles import (
+    AssStyleConfig,
+    SubtitleCue,
+    resolve_cover_split_geometry,
+    write_ass,
+)
 from .services.text_processing import (
     ManuscriptAnalysis,
     analyze_manuscript,
@@ -1655,6 +1660,7 @@ def _subtitle_style(settings: AppSettings) -> AssStyleConfig:
         intro_radius=intro.radius,
         intro_text_alignment=intro.text_alignment,
         intro_max_lines=intro.max_lines,
+        intro_layout=str(getattr(intro, "layout", "standard") or "standard"),
         intro_animation=getattr(settings, "intro_animation", "fade_rise"),
         outro_font_name=outro.font_family,
         outro_title_font_size=outro.title_font_size,
@@ -1686,6 +1692,83 @@ def _subtitle_style(settings: AppSettings) -> AssStyleConfig:
         subtitle_animation=settings.subtitle_animation,
     )
     return style
+
+
+def _preview_subtitle_style(settings: AppSettings) -> AssStyleConfig:
+    """Return the exact half-resolution style used by preview ASS and media."""
+
+    full_style = _subtitle_style(settings)
+    return replace(
+        full_style,
+        play_res_x=540,
+        play_res_y=960,
+        subtitle_font_size=max(24, round(full_style.subtitle_font_size / 2)),
+        subtitle_margin_left=max(80, round(full_style.subtitle_margin_left / 2)),
+        subtitle_margin_right=max(80, round(full_style.subtitle_margin_right / 2)),
+        subtitle_margin_bottom=max(130, round(full_style.subtitle_margin_bottom / 2)),
+        card_font_size=max(24, round(full_style.card_font_size / 2)),
+        card_margin_left=max(60, round(full_style.card_margin_left / 2)),
+        card_margin_right=max(60, round(full_style.card_margin_right / 2)),
+        card_margin_top=max(70, round(full_style.card_margin_top / 2)),
+    )
+
+
+def _intro_card_media_options(
+    settings: AppSettings,
+    cover_path: Path | None,
+    *,
+    intro_card_text: str = "",
+    code: str = "",
+    style: AssStyleConfig | None = None,
+    intro_duration: float | None = None,
+) -> dict[str, Any]:
+    """Resolve one geometry contract shared by full and preview renders."""
+
+    resolved_style = (style or _subtitle_style(settings)).safe()
+    layout = resolved_style.intro_layout
+    cover_split = settings.video_template == "platform_story_card" and layout in {
+        "cover_split",
+        "cover_split_noir",
+    }
+    if not cover_split:
+        return {
+            "platform_logo_x_percent": max(
+                10.0,
+                min(90.0, float(resolved_style.intro_position_x_percent)),
+            ),
+            "platform_logo_y_percent": max(
+                5.0,
+                min(
+                    60.0,
+                    float(resolved_style.intro_position_y_percent) + 1.5625,
+                ),
+            ),
+            "intro_card_cover_path": None,
+        }
+
+    geometry = resolve_cover_split_geometry(
+        resolved_style,
+        intro_card_text,
+        code=code,
+        cover_present=bool(cover_path),
+    )
+    duration = (
+        float(settings.intro_card_duration_seconds)
+        if intro_duration is None
+        else float(intro_duration)
+    )
+    return {
+        "platform_logo_x_percent": geometry.platform_logo_x_percent,
+        "platform_logo_y_percent": geometry.platform_logo_y_percent,
+        "intro_card_cover_path": cover_path,
+        "intro_card_cover_start": 0.0,
+        "intro_card_cover_duration": max(2.5, min(8.0, duration)),
+        "intro_card_cover_x_percent": geometry.cover_center_x_percent,
+        "intro_card_cover_y_percent": geometry.cover_center_y_percent,
+        "intro_card_cover_width_percent": geometry.cover_width_percent,
+        "intro_card_cover_height_percent": geometry.cover_height_percent,
+        "intro_card_cover_rotation_degrees": geometry.cover_rotation_degrees,
+    }
 
 
 def _commit_video_usage(video_folder: str, segments: Sequence[Any]) -> None:
@@ -3421,6 +3504,17 @@ class PipelineRunner:
 
         progress(JobStatus.COMPOSING, 0.53, "编排字幕与素材")
         subtitle_path = work_dir / "subtitles.ass"
+        full_subtitle_style = _subtitle_style(settings)
+        cover_image_was_present = bool(
+            job.cover_path and Path(job.cover_path).expanduser().is_file()
+        )
+        requested_cover = self._validated_optional_image(
+            job.cover_path,
+            asset_label="小说封面",
+            fallback_label="改用纯字幕结尾",
+            warnings=warnings,
+        )
+        effective_cover = requested_cover
         write_ass(
             subtitle_path,
             narration.cues,
@@ -3434,8 +3528,9 @@ class PipelineRunner:
             intro_card_duration=intro_card_duration,
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
+            intro_card_cover_present=bool(effective_cover),
             platform_brand_color=platform.brand_color,
-            config=_subtitle_style(settings),
+            config=full_subtitle_style,
         )
         resolver = lambda path: probe_duration_with_ffmpeg(self.ffmpeg_path, path)
         variant_seed: int | str | bytes | None = (
@@ -3534,16 +3629,14 @@ class PipelineRunner:
             staging_dir=publish_staging_dir,
             artifacts=publish_artifacts,
         )
-        cover_image_was_present = bool(
-            job.cover_path and Path(job.cover_path).expanduser().is_file()
+        intro_card_media = _intro_card_media_options(
+            settings,
+            effective_cover,
+            intro_card_text=job.intro_card_text,
+            code=effective_code,
+            style=full_subtitle_style,
+            intro_duration=intro_card_duration,
         )
-        requested_cover = self._validated_optional_image(
-            job.cover_path,
-            asset_label="小说封面",
-            fallback_label="改用纯字幕结尾",
-            warnings=warnings,
-        )
-        effective_cover = requested_cover
         effective_cover_outro = bool(
             _cover_outro_enabled(settings, job)
             and (effective_cover or not cover_image_was_present)
@@ -3638,12 +3731,11 @@ class PipelineRunner:
             cover_outro_enabled=effective_cover_outro,
             color_grade=render_color_grade,
             end_card_without_cover=True,
-            cover_intro_enabled=not story_card_template,
+            cover_intro_enabled=False,
             platform_logo_path=platform_logo_path,
             platform_logo_duration=intro_card_duration,
-            platform_logo_x_percent=settings.intro_card.position_x_percent,
-            platform_logo_y_percent=settings.intro_card.position_y_percent + 1.5625,
             video_transition=render_transition,
+            **intro_card_media,
         )
         (job_dir / "render-command.txt").write_text(
             plan.readable_command, encoding="utf-8", newline="\n"
@@ -3839,14 +3931,11 @@ class PipelineRunner:
                 cover_outro_enabled=effective_cover_outro,
                 color_grade=render_color_grade,
                 end_card_without_cover=True,
-                cover_intro_enabled=not story_card_template,
+                cover_intro_enabled=False,
                 platform_logo_path=platform_logo_path,
                 platform_logo_duration=intro_card_duration,
-                platform_logo_x_percent=settings.intro_card.position_x_percent,
-                platform_logo_y_percent=(
-                    settings.intro_card.position_y_percent + 1.5625
-                ),
                 video_transition=render_transition,
+                **intro_card_media,
             )
             (job_dir / "render-command-fallback.txt").write_text(
                 fallback_plan.readable_command,
@@ -3990,14 +4079,11 @@ class PipelineRunner:
                     cover_outro_enabled=effective_cover_outro,
                     color_grade="neutral",
                     end_card_without_cover=True,
-                    cover_intro_enabled=not story_card_template,
+                    cover_intro_enabled=False,
                     platform_logo_path=platform_logo_path,
                     platform_logo_duration=intro_card_duration,
-                    platform_logo_x_percent=settings.intro_card.position_x_percent,
-                    platform_logo_y_percent=(
-                        settings.intro_card.position_y_percent + 1.5625
-                    ),
                     video_transition="cut",
+                    **intro_card_media,
                 )
                 with (job_dir / "render-command-low-memory.txt").open(
                     "a",
@@ -4487,9 +4573,22 @@ class PipelineRunner:
         # subtitle and full-screen cover are visible; a shorter four-second
         # intro leaves a distinct body window in the 15-second default.
         end_card_duration = 5.0
-        intro_card_duration = min(
-            4.0,
-            max(2.5, preview_seconds - end_card_duration - 3.0),
+        intro_card_duration = (
+            min(
+                4.0,
+                max(2.5, preview_seconds - end_card_duration - 3.0),
+            )
+            if story_card_template
+            else 0.0
+        )
+        preview_style = _preview_subtitle_style(settings)
+        intro_card_media = _intro_card_media_options(
+            settings,
+            preview_cover,
+            intro_card_text=job.intro_card_text,
+            code=effective_code,
+            style=preview_style,
+            intro_duration=intro_card_duration,
         )
         preview_dir = job_dir / ".previews"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -4656,20 +4755,6 @@ class PipelineRunner:
             f"编排{int(round(target_duration))}秒审核样片",
         )
         subtitle_path = work_dir / "preview-subtitles.ass"
-        full_style = _subtitle_style(settings)
-        preview_style = replace(
-            full_style,
-            play_res_x=540,
-            play_res_y=960,
-            subtitle_font_size=max(24, round(full_style.subtitle_font_size / 2)),
-            subtitle_margin_left=max(80, round(full_style.subtitle_margin_left / 2)),
-            subtitle_margin_right=max(80, round(full_style.subtitle_margin_right / 2)),
-            subtitle_margin_bottom=max(130, round(full_style.subtitle_margin_bottom / 2)),
-            card_font_size=max(24, round(full_style.card_font_size / 2)),
-            card_margin_left=max(60, round(full_style.card_margin_left / 2)),
-            card_margin_right=max(60, round(full_style.card_margin_right / 2)),
-            card_margin_top=max(70, round(full_style.card_margin_top / 2)),
-        )
         write_ass(
             subtitle_path,
             clipped_cues,
@@ -4683,6 +4768,7 @@ class PipelineRunner:
             intro_card_duration=intro_card_duration,
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
+            intro_card_cover_present=bool(preview_cover),
             platform_brand_color=platform.brand_color,
             config=preview_style,
         )
@@ -4760,11 +4846,10 @@ class PipelineRunner:
             cover_outro_enabled=preview_cover_outro,
             color_grade=getattr(settings, "color_grade", "neutral"),
             end_card_without_cover=True,
-            cover_intro_enabled=not story_card_template,
+            cover_intro_enabled=False,
             platform_logo_path=platform_logo_path,
             platform_logo_duration=intro_card_duration,
-            platform_logo_x_percent=settings.intro_card.position_x_percent,
-            platform_logo_y_percent=settings.intro_card.position_y_percent + 1.5625,
+            **intro_card_media,
         )
         (preview_dir / "render-command.txt").write_text(
             plan.readable_command,
@@ -4816,11 +4901,10 @@ class PipelineRunner:
                 cover_outro_enabled=preview_cover_outro,
                 color_grade=getattr(settings, "color_grade", "neutral"),
                 end_card_without_cover=True,
-                cover_intro_enabled=not story_card_template,
+                cover_intro_enabled=False,
                 platform_logo_path=platform_logo_path,
                 platform_logo_duration=intro_card_duration,
-                platform_logo_x_percent=settings.intro_card.position_x_percent,
-                platform_logo_y_percent=settings.intro_card.position_y_percent + 1.5625,
+                **intro_card_media,
             )
             (preview_dir / "render-command-fallback.txt").write_text(
                 plan.readable_command,

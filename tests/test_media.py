@@ -991,6 +991,130 @@ class FFmpegPlanningTests(unittest.TestCase):
                 platform_logo_duration=0,
             )
 
+    def test_intro_card_cover_is_an_independent_contain_overlay_before_logo(self) -> None:
+        base = Path("C:/Story Forge/intro-card-cover")
+        full_screen_cover = base / "outro cover.jpg"
+        card_cover = base / "card cover.webp"
+        logo = base / "platform logo.png"
+
+        plan = build_ffmpeg_plan(
+            [VideoSegment(base / "source.mp4", 14.0, 14.0)],
+            base / "voice.wav",
+            base / "music.mp3",
+            base / "captions.ass",
+            base / "output.mp4",
+            14.0,
+            cover_path=full_screen_cover,
+            cover_intro_enabled=False,
+            cover_outro_enabled=True,
+            intro_card_cover_path=card_cover,
+            intro_card_cover_start=0.0,
+            intro_card_cover_duration=5.5,
+            intro_card_cover_x_percent=74.0,
+            intro_card_cover_y_percent=35.0,
+            intro_card_cover_width_percent=30.0,
+            intro_card_cover_height_percent=32.0,
+            intro_card_cover_rotation_degrees=-4.0,
+            platform_logo_path=logo,
+            platform_logo_duration=5.5,
+        )
+
+        command = plan.as_list()
+        self.assertIn(str(full_screen_cover), command)
+        self.assertIn(str(card_cover), command)
+        card_cover_argument_index = command.index(str(card_cover))
+        self.assertEqual(
+            command[card_cover_argument_index - 5 : card_cover_argument_index],
+            ["-loop", "1", "-framerate", "60", "-i"],
+        )
+        self.assertIn(
+            "[4:v:0]fps=60,scale=324:614:force_original_aspect_ratio=decrease,"
+            "format=rgba,pad=324:614:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+            "rotate=-0.069813:ow=rotw(iw):oh=roth(ih):c=none[intro_card_cover]",
+            plan.filter_complex,
+        )
+        self.assertIn(
+            "[subtitled][intro_card_cover]overlay="
+            "x='max(0,min(W-w,799-w/2))':y='max(0,min(H-h,672-h/2))':"
+            "enable='between(t,0,5.5)':eof_action=pass[intro_card_covered]",
+            plan.filter_complex,
+        )
+        self.assertIn(
+            "[intro_card_covered][platform_logo]overlay=508:550:",
+            plan.filter_complex,
+        )
+        self.assertNotIn("cover_intro", plan.filter_complex)
+        self.assertIn("cover_end_scene", plan.filter_complex)
+
+    def test_intro_card_cover_scales_with_preview_and_can_render_without_other_images(self) -> None:
+        base = Path("C:/Story Forge/intro-card-cover-preview")
+        card_cover = base / "card-cover.png"
+
+        plan = build_ffmpeg_plan(
+            [VideoSegment(base / "source.mp4", 10.0, 10.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "preview.mp4",
+            10.0,
+            width=540,
+            height=960,
+            cover_intro_enabled=False,
+            cover_outro_enabled=False,
+            intro_card_cover_path=card_cover,
+            intro_card_cover_duration=4.25,
+            intro_card_cover_x_percent=74.0,
+            intro_card_cover_y_percent=35.0,
+            intro_card_cover_width_percent=30.0,
+            intro_card_cover_height_percent=32.0,
+            intro_card_cover_rotation_degrees=3.0,
+        )
+
+        self.assertIn(
+            "[2:v:0]fps=60,scale=162:308:force_original_aspect_ratio=decrease,"
+            "format=rgba,pad=162:308:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+            "rotate=0.05236:ow=rotw(iw):oh=roth(ih):c=none[intro_card_cover]",
+            plan.filter_complex,
+        )
+        self.assertIn("[joined]ass=filename=", plan.filter_complex)
+        self.assertIn(
+            "[subtitled][intro_card_cover]overlay="
+            "x='max(0,min(W-w,400-w/2))':y='max(0,min(H-h,336-h/2))':"
+            "enable='between(t,0,4.25)':eof_action=pass[vout]",
+            plan.filter_complex,
+        )
+        self.assertNotIn("platform_logo", plan.filter_complex)
+        self.assertNotIn("cover_end_scene", plan.filter_complex)
+
+    def test_intro_card_cover_rejects_unsafe_layout_or_timing(self) -> None:
+        base = Path("C:/StoryForge/intro-card-cover-validation")
+        common = (
+            [VideoSegment(base / "source.mp4", 10.0, 10.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "output.mp4",
+            10.0,
+        )
+        invalid_cases = (
+            ({"intro_card_cover_start": -0.1}, "start must be non-negative"),
+            ({"intro_card_cover_duration": 0.0}, "duration must be a positive finite"),
+            ({"intro_card_cover_start": 8.0, "intro_card_cover_duration": 2.1}, "cannot exceed"),
+            ({"intro_card_cover_x_percent": 101.0}, "x_percent must be between 0 and 100"),
+            ({"intro_card_cover_y_percent": float("nan")}, "y_percent must be between 0 and 100"),
+            ({"intro_card_cover_width_percent": 0.0}, "width_percent must be between 1 and 100"),
+            ({"intro_card_cover_height_percent": 101.0}, "height_percent must be between 1 and 100"),
+            ({"intro_card_cover_rotation_degrees": 16.0}, "rotation_degrees must be between -15 and 15"),
+        )
+        for overrides, message in invalid_cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_ffmpeg_plan(
+                        *common,
+                        intro_card_cover_path=base / "card-cover.png",
+                        **overrides,
+                    )
+
     def test_amf_uses_speed_first_quality_without_changing_output_geometry(self) -> None:
         base = Path("C:/StoryForge")
         segment = VideoSegment(base / "source.mp4", 12.0, 12.0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,8 +13,10 @@ from storyforge.services.subtitles import (
     build_sentence_cues,
     colour_to_ass,
     generate_ass,
+    _split_intro_card_copy,
     paginate_sentence,
     parse_narration_text,
+    resolve_cover_split_geometry,
     seconds_to_ass_time,
     split_semantic_phrases,
     wrap_sentence,
@@ -325,7 +328,7 @@ class AssGenerationTests(unittest.TestCase):
         self.assertIn("Style: IntroSummary,Arial,18,", document)
         self.assertIn("Style: EndTitle,Arial,33,", document)
         self.assertIn(r"\move(94,269,94,260", document)
-        self.assertIn(r"\pos(270,75)", document)
+        self.assertIn(r"\an5\pos(270,98)", document)
         self.assertIn(r"\move(270,127,270,118", document)
         self.assertIn(r"\move(270,371,270,362", document)
         self.assertIn(r"\pos(270,490)", document)
@@ -377,7 +380,7 @@ class AssGenerationTests(unittest.TestCase):
         self.assertNotIn("STORY PREVIEW", document)
         self.assertNotRegex(document, r"(?i)part\s+\d+(?:\s+of\s+\d+)?")
         self.assertIn(r"\move(188,538,188,520", document)
-        self.assertIn(r"\pos(540,150)", document)
+        self.assertIn(r"\an5\pos(540,198)", document)
         self.assertIn(r"\move(540,254,540,236", document)
         self.assertIn(r"\pos(540,646)", document)
         self.assertIn(r"\move(540,742,540,724", document)
@@ -980,6 +983,349 @@ class AssGenerationTests(unittest.TestCase):
         self.assertIn(",188,188,360,1", subtitle_style)
         self.assertIn(",150,150,100,1", search_style)
         self.assertIn("WrapStyle: 0", content)
+
+    def test_search_card_text_is_vertically_centered_in_its_panel(self) -> None:
+        content = generate_ass(
+            [SubtitleCue(0.0, 2.0, "A short sentence.")],
+            platform="GoodNovel",
+            code="B56826",
+            video_duration=2.0,
+            config=AssStyleConfig(),
+        )
+
+        search_event = next(
+            line for line in content.splitlines() if ",SearchCard," in line
+        )
+        self.assertIn(r"\an5\pos(540,198)", search_event)
+        self.assertNotIn(r"\an8\pos(540,150)", search_event)
+
+    def test_cover_split_intro_uses_two_synopsis_regions_and_integrated_code(self) -> None:
+        summary = (
+            "On her wedding anniversary, she finds a hidden photo album. "
+            "Her husband has been meeting the same woman in secret for years. "
+            "The final photograph exposes who helped him hide the truth."
+        )
+        content = generate_ass(
+            [SubtitleCue(5.5, 7.0, "The story continues after the intro.")],
+            platform="GoodNovel",
+            code="B56826",
+            video_duration=8.0,
+            video_template="platform_story_card",
+            intro_card_text=summary,
+            intro_headline="THIS MUST NOT APPEAR",
+            intro_card_duration=5.5,
+            platform_logo_present=True,
+            config=AssStyleConfig(
+                intro_layout="cover_split",
+                intro_background_color="#0B1220",
+                intro_body_color="#F8FAFC",
+                intro_label_color="#FF6B4A",
+                intro_border_color="#42516B",
+                card_background_color="#1A2334",
+                card_text_color="#FFFFFF",
+                card_outline_color="#FF6B4A",
+            ),
+        )
+
+        intro_events = [
+            line
+            for line in content.splitlines()
+            if line.startswith("Dialogue:") and ",0:00:05.50," in line
+        ]
+        rendered_intro = "\n".join(intro_events)
+        visible_intro = rendered_intro.replace(r"\N", " ")
+        self.assertIn(",IntroPlatform,", rendered_intro)
+        self.assertIn(",IntroCode,", rendered_intro)
+        self.assertEqual(rendered_intro.count(",IntroSummary,"), 2)
+        self.assertIn("On her wedding", visible_intro)
+        self.assertIn("Her husband has been", visible_intro)
+        self.assertNotIn("THIS MUST NOT APPEAR", rendered_intro)
+        self.assertNotIn(",IntroHeadline,", rendered_intro)
+        self.assertNotIn(",IntroFooter,", rendered_intro)
+        self.assertIn(colour_to_ass("#0B1220", opacity=1.0), rendered_intro)
+        self.assertIn(colour_to_ass("#FF6B4A"), rendered_intro)
+
+    def test_noir_cover_split_is_a_supported_distinct_layout(self) -> None:
+        safe = AssStyleConfig(intro_layout="cover_split_noir").safe()
+        self.assertEqual(safe.intro_layout, "cover_split_noir")
+        content = generate_ass(
+            [SubtitleCue(5.5, 7.0, "The story continues after the intro.")],
+            platform="GoodNovel",
+            code="B56826",
+            video_duration=8.0,
+            video_template="platform_story_card",
+            intro_card_text=(
+                "She finds the photograph that proves he has been living another life. "
+                "The final page reveals who helped him hide it."
+            ),
+            intro_card_duration=5.5,
+            platform_logo_present=True,
+            config=safe,
+        )
+        visible_content = content.replace(r"\N", " ")
+        self.assertIn('Search "B56826"', visible_content)
+        self.assertIn("She finds the", visible_content)
+        self.assertIn("photograph that", visible_content)
+
+    def test_cover_split_geometry_keeps_media_inside_the_final_safe_panel(self) -> None:
+        summaries = (
+            "A hidden photograph changes everything.",
+            (
+                "On her wedding anniversary, she finds a hidden photo album. "
+                "Her husband has been meeting the same woman in secret for years."
+            ),
+            (
+                "On her wedding anniversary, she finds a hidden photo album. "
+                "Her husband has been meeting the same woman in secret for years. "
+                "The final photograph exposes who helped him hide the truth, why the "
+                "entire family protected his second life, and what she must risk next."
+            ),
+        )
+        for layout in ("cover_split", "cover_split_noir"):
+            for position_x in (20.0, 80.0):
+                for position_y in (12.0, 58.0):
+                    for summary in summaries:
+                        with self.subTest(
+                            layout=layout,
+                            x=position_x,
+                            y=position_y,
+                            words=len(summary.split()),
+                        ):
+                            geometry = resolve_cover_split_geometry(
+                                AssStyleConfig(
+                                    intro_layout=layout,
+                                    intro_width_percent=82.0,
+                                    intro_position_x_percent=position_x,
+                                    intro_position_y_percent=position_y,
+                                    intro_padding=120,
+                                    intro_max_lines=8,
+                                ),
+                                summary,
+                            )
+                            self.assertGreaterEqual(geometry.panel_x, geometry.safe_left)
+                            self.assertLessEqual(
+                                geometry.panel_x + geometry.panel_width,
+                                geometry.play_res_x - geometry.safe_left,
+                            )
+                            self.assertGreaterEqual(geometry.panel_y, geometry.safe_top)
+                            self.assertLessEqual(
+                                geometry.panel_y + geometry.panel_height,
+                                geometry.play_res_y - geometry.safe_bottom,
+                            )
+                            self.assertGreaterEqual(
+                                geometry.cover_footprint_left,
+                                geometry.panel_x + geometry.padding,
+                            )
+                            self.assertLessEqual(
+                                geometry.cover_footprint_right,
+                                geometry.panel_x + geometry.panel_width - geometry.padding,
+                            )
+                            self.assertLessEqual(
+                                geometry.upper_text_x + geometry.upper_text_width,
+                                geometry.cover_footprint_left - geometry.content_gap,
+                            )
+                            self.assertGreaterEqual(geometry.platform_logo_x_percent, 10.0)
+                            self.assertLessEqual(geometry.platform_logo_x_percent, 90.0)
+                            self.assertGreaterEqual(geometry.platform_logo_y_percent, 5.0)
+                            self.assertLessEqual(geometry.platform_logo_y_percent, 60.0)
+
+    def test_cover_split_places_both_synopsis_blocks_beside_the_cover(self) -> None:
+        geometry = resolve_cover_split_geometry(
+            AssStyleConfig(
+                intro_layout="cover_split_noir",
+                intro_body_font_size=44,
+                intro_max_lines=8,
+            ),
+            (
+                "On her anniversary, she discovers years of lies. "
+                "One final photograph exposes the person who protected him."
+            ),
+            code="B56826",
+        )
+
+        self.assertEqual(geometry.lower_text_x, geometry.upper_text_x)
+        self.assertEqual(geometry.lower_text_width, geometry.upper_text_width)
+        self.assertLessEqual(
+            geometry.lower_text_x + geometry.lower_text_width,
+            geometry.cover_footprint_left - geometry.content_gap,
+        )
+        self.assertLess(
+            geometry.cover_footprint_top,
+            geometry.upper_y + geometry.upper_text_height,
+        )
+        self.assertGreater(geometry.cover_footprint_bottom, geometry.lower_y)
+
+    def test_cover_split_code_chip_fits_the_full_search_copy_inside_the_panel(self) -> None:
+        code = "W" * 24
+        self.assertEqual(len(code), 24)
+        geometry = resolve_cover_split_geometry(
+            AssStyleConfig(
+                intro_layout="cover_split",
+                intro_width_percent=40,
+                intro_label_font_size=22,
+            ),
+            "A hidden photograph changes everything.",
+            code=code,
+        )
+
+        search_copy = f'Search "{code}"'
+        # Arial Bold renders W at roughly one em.  This independent upper bound
+        # also reserves 5.5 em for the fixed Search/quote prefix and suffix.
+        estimated_text_width = (5.5 + len(code) * 1.05) * geometry.code_font_size
+        horizontal_padding = max(8, round(10 * geometry.play_res_x / 1080)) * 2
+
+        self.assertGreaterEqual(
+            geometry.code_chip_x,
+            geometry.panel_x + geometry.padding,
+        )
+        self.assertLessEqual(
+            geometry.code_chip_x + geometry.code_chip_width,
+            geometry.panel_x + geometry.panel_width - geometry.padding,
+        )
+        self.assertLessEqual(
+            estimated_text_width,
+            geometry.code_chip_width - horizontal_padding,
+        )
+
+        content = generate_ass(
+            [SubtitleCue(5.5, 7.0, "The story continues.")],
+            platform="GoodNovel",
+            code=code,
+            video_duration=8.0,
+            video_template="platform_story_card",
+            intro_card_text="A hidden photograph changes everything.",
+            intro_card_duration=5.5,
+            config=AssStyleConfig(
+                intro_layout="cover_split",
+                intro_width_percent=40,
+                intro_label_font_size=22,
+            ),
+        )
+        intro_code_event = next(
+            line for line in content.splitlines() if ",IntroCode," in line
+        )
+        self.assertIn(rf"\fs{geometry.code_font_size}", intro_code_event)
+
+    def test_cover_split_without_cover_expands_copy_instead_of_leaving_a_hole(self) -> None:
+        style = AssStyleConfig(
+            intro_layout="cover_split",
+            intro_body_font_size=44,
+            intro_max_lines=8,
+        )
+        summary = (
+            "A hidden photograph changes everything. "
+            "The final page reveals who helped him hide the truth."
+        )
+        with_cover = resolve_cover_split_geometry(style, summary, cover_present=True)
+        without_cover = resolve_cover_split_geometry(style, summary, cover_present=False)
+
+        self.assertGreater(with_cover.cover_width, 0)
+        self.assertEqual(without_cover.cover_width, 0)
+        self.assertEqual(without_cover.cover_height, 0)
+        self.assertGreater(without_cover.upper_text_width, with_cover.upper_text_width)
+        self.assertEqual(without_cover.lower_text_width, without_cover.upper_text_width)
+        self.assertLessEqual(
+            without_cover.upper_text_x + without_cover.upper_text_width,
+            without_cover.panel_x + without_cover.panel_width - without_cover.padding,
+        )
+
+        content = generate_ass(
+            [SubtitleCue(5.5, 7.0, "The story continues.")],
+            platform="GoodNovel",
+            code="B56826",
+            video_duration=8.0,
+            video_template="platform_story_card",
+            intro_card_text=summary,
+            intro_card_duration=5.5,
+            intro_card_cover_present=False,
+            config=style,
+        )
+        self.assertIn(
+            rf"\an7\pos({without_cover.upper_text_x},{without_cover.upper_y})\q2",
+            content,
+        )
+
+    def test_cover_split_uses_japanese_sentence_boundary_without_spaces(self) -> None:
+        geometry = resolve_cover_split_geometry(
+            AssStyleConfig(intro_layout="cover_split", intro_max_lines=8),
+            "結婚記念日に隠された写真を見つけた。夫は何年も別の人生を送っていた。最後の一枚が共犯者を暴く。",
+        )
+
+        self.assertTrue(geometry.fitted_upper.rstrip(r"\N").endswith("。"))
+        self.assertTrue(geometry.fitted_lower.startswith("夫"))
+
+    def test_cover_split_preserves_every_japanese_character_across_multiple_short_sentences(self) -> None:
+        source = "嘘だ。逃げた。戻った。秘密だ。終わった。"
+
+        upper, lower = _split_intro_card_copy(source)
+
+        self.assertEqual(upper + lower, source)
+        self.assertTrue(lower.startswith("秘密だ。"))
+
+    def test_cover_split_geometry_is_normalized_between_preview_and_export(self) -> None:
+        summary = (
+            "She finds proof of his second life. The final photograph exposes the "
+            "person who protected him, and the truth changes everything."
+        )
+        full_style = AssStyleConfig(
+            play_res_x=1080,
+            play_res_y=1920,
+            intro_layout="cover_split_noir",
+            intro_position_x_percent=80.0,
+            intro_position_y_percent=58.0,
+            intro_width_percent=72.0,
+        )
+        preview_style = replace(
+            full_style,
+            play_res_x=540,
+            play_res_y=960,
+            subtitle_font_size=max(24, round(full_style.subtitle_font_size / 2)),
+        )
+        full = resolve_cover_split_geometry(full_style, summary)
+        preview = resolve_cover_split_geometry(preview_style, summary)
+
+        for full_value, preview_value in (
+            (full.platform_logo_x_percent, preview.platform_logo_x_percent),
+            (full.platform_logo_y_percent, preview.platform_logo_y_percent),
+            (full.cover_center_x_percent, preview.cover_center_x_percent),
+            (full.cover_center_y_percent, preview.cover_center_y_percent),
+            (full.cover_width_percent, preview.cover_width_percent),
+            (full.cover_height_percent, preview.cover_height_percent),
+        ):
+            self.assertAlmostEqual(full_value, preview_value, delta=0.35)
+
+    def test_cover_split_ass_uses_the_resolved_panel_and_text_coordinates(self) -> None:
+        summary = (
+            "She finds proof of his second life. The final photograph exposes "
+            "the person who protected him."
+        )
+        style = AssStyleConfig(
+            intro_layout="cover_split",
+            intro_position_x_percent=80.0,
+            intro_position_y_percent=58.0,
+            intro_width_percent=72.0,
+        )
+        geometry = resolve_cover_split_geometry(style, summary, code="B56826")
+        content = generate_ass(
+            [SubtitleCue(5.5, 7.0, "The story continues.")],
+            platform="GoodNovel",
+            code="B56826",
+            video_duration=8.0,
+            video_template="platform_story_card",
+            intro_card_text=summary,
+            intro_card_duration=5.5,
+            platform_logo_present=True,
+            config=style,
+        )
+
+        self.assertIn(
+            rf"\an7\pos({geometry.panel_x},{geometry.panel_y})\p1",
+            content,
+        )
+        self.assertIn(
+            rf"\an7\pos({geometry.upper_text_x},{geometry.upper_y})\q2",
+            content,
+        )
 
     def test_half_resolution_safe_margins_scale_with_frame(self) -> None:
         content = generate_ass(

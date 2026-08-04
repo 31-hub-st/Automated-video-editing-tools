@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
 import socket
-from typing import Any
+from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 from . import __version__
@@ -123,6 +123,7 @@ class IntroCardStyle:
     radius: int = 32
     text_alignment: str = "center"
     max_lines: int = 5
+    layout: str = "standard"
 
 
 @dataclass(slots=True)
@@ -213,6 +214,68 @@ COVER_ANIMATIONS = frozenset(
 )
 
 
+# These presets are no longer offered for new work, but saved settings, drafts,
+# portable workstation configs and personal production presets may still refer
+# to them.  Keep their complete visual patches here so migration never changes
+# the appearance of an existing recipe merely because its preset id retired.
+RETIRED_SUBTITLE_PRESET_MIGRATIONS: dict[str, dict[str, Any]] = {
+    "word_pop_sync": {
+        "font_size": 52,
+        "outline_width": 4,
+        "bold": True,
+        "max_lines": 2,
+        "word_sync_enabled": True,
+        "unread_color": "#D0D5DD",
+        "active_color": "#FFE06A",
+        "read_color": "#FFFFFF",
+        "pop_scale": 112,
+        "pop_duration_ms": 140,
+        "pop_intensity": 0.65,
+    },
+    "minimal_bottom": {
+        "font_family": "Segoe UI",
+        "font_size": 46,
+        "text_color": "#FFFFFF",
+        "outline_color": "#111827",
+        "outline_width": 3,
+        "shadow_width": 0.5,
+        "bottom_margin": 250,
+        "horizontal_margin": 200,
+        "bold": False,
+        "max_lines": 2,
+    },
+}
+
+
+def normalize_retired_subtitle_settings(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an idempotent compatibility projection for retired presets.
+
+    The old preset's complete patch is materialized into ``subtitle`` before
+    selecting ``clear_outline``.  Explicit values saved by the user win over
+    that compatibility patch.  Word-follow behavior is now represented solely
+    by ``subtitle_word_mode`` rather than the retired style boolean.
+    """
+
+    result = dict(value)
+    selected = str(result.get("subtitle_preset") or "").strip().casefold()
+    retired_patch = RETIRED_SUBTITLE_PRESET_MIGRATIONS.get(selected)
+    if retired_patch is None:
+        return result
+
+    incoming_patch = result.get("subtitle")
+    merged_patch = dict(retired_patch)
+    if isinstance(incoming_patch, Mapping):
+        merged_patch.update(incoming_patch)
+    merged_patch.pop("word_sync_enabled", None)
+    result["subtitle"] = merged_patch
+    result["subtitle_preset"] = "clear_outline"
+    if selected == "word_pop_sync":
+        word_mode = str(result.get("subtitle_word_mode") or "").strip().casefold()
+        if word_mode not in {"single", "cumulative"}:
+            result["subtitle_word_mode"] = "single"
+    return result
+
+
 # Presets are complete style patches rather than renderer-only aliases.  This
 # lets the UI display/edit every resolved value, and lets a production draft
 # freeze the exact appearance even when presets evolve in a future release.
@@ -250,19 +313,6 @@ VISUAL_STYLE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
             "background_color": "#F7F9FC",
             "background_opacity": 0.86,
             "max_lines": 2,
-        },
-        "word_pop_sync": {
-            "font_size": 52,
-            "outline_width": 4,
-            "bold": True,
-            "max_lines": 2,
-            "word_sync_enabled": True,
-            "unread_color": "#D0D5DD",
-            "active_color": "#FFE06A",
-            "read_color": "#FFFFFF",
-            "pop_scale": 112,
-            "pop_duration_ms": 140,
-            "pop_intensity": 0.65,
         },
         "romance_glow": {
             "font_family": "Georgia",
@@ -320,21 +370,51 @@ VISUAL_STYLE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
             "max_chars_per_line": 30,
             "max_lines": 3,
         },
-        "minimal_bottom": {
-            "font_family": "Segoe UI",
-            "font_size": 46,
-            "text_color": "#FFFFFF",
-            "outline_color": "#111827",
-            "outline_width": 3,
-            "shadow_width": 0.5,
-            "bottom_margin": 250,
-            "horizontal_margin": 200,
-            "bold": False,
-            "max_lines": 2,
-        },
     },
     "intro_card": {
         "editorial_white": {},
+        "cover_story_dark": {
+            "layout": "cover_split",
+            "font_family": "Segoe UI",
+            "headline_font_size": 62,
+            "headline_color": "#FFFFFF",
+            "body_font_size": 44,
+            "body_color": "#F8FAFC",
+            "label_font_size": 22,
+            "label_color": "#FF6B4A",
+            "background_color": "#0B1220",
+            "background_opacity": 0.94,
+            "border_color": "#42516B",
+            "border_width": 2,
+            "shadow_opacity": 0.46,
+            "width_percent": 84.0,
+            "position_y_percent": 27.0,
+            "padding": 52,
+            "radius": 28,
+            "text_alignment": "left",
+            "max_lines": 8,
+        },
+        "cover_story_noir": {
+            "layout": "cover_split_noir",
+            "font_family": "Segoe UI",
+            "headline_font_size": 64,
+            "headline_color": "#FFFFFF",
+            "body_font_size": 44,
+            "body_color": "#FFF7ED",
+            "label_font_size": 22,
+            "label_color": "#FF7657",
+            "background_color": "#080B12",
+            "background_opacity": 0.96,
+            "border_color": "#596274",
+            "border_width": 2,
+            "shadow_opacity": 0.58,
+            "width_percent": 85.0,
+            "position_y_percent": 27.0,
+            "padding": 50,
+            "radius": 24,
+            "text_alignment": "left",
+            "max_lines": 8,
+        },
         "cinematic_dark": {
             "headline_color": "#FFE06A",
             "body_color": "#F8FAFC",
@@ -710,6 +790,7 @@ class AppSettings:
     def from_dict(cls, value: dict[str, Any]) -> "AppSettings":
         if not isinstance(value, dict):
             value = {}
+        value = normalize_retired_subtitle_settings(value)
         defaults = cls()
         subtitle_patch = value.get("subtitle")
         intro_card_patch = value.get("intro_card")

@@ -20,6 +20,7 @@ from storyforge.config import (
 from storyforge.jobs import JobQueue
 from storyforge.models import (
     DEFAULT_PREVIEW_SECONDS,
+    VISUAL_STYLE_PRESETS,
     AppSettings,
     BatchSpec,
     JobStatus,
@@ -72,6 +73,70 @@ def _join_queue(test: unittest.TestCase, queue: JobQueue) -> None:
 
 
 class SettingsRepositoryTests(unittest.TestCase):
+    def test_retired_subtitle_presets_migrate_without_losing_visual_style(self) -> None:
+        word_pop = AppSettings.from_dict(
+            {
+                "subtitle_preset": "word_pop_sync",
+                "subtitle_word_mode": "off",
+                "subtitle": {"active_color": "#12ABEF", "pop_scale": 126},
+            }
+        )
+        minimal = AppSettings.from_dict(
+            {
+                "subtitle_preset": "minimal_bottom",
+                "subtitle_word_mode": "off",
+                "subtitle": {"bottom_margin": 275},
+            }
+        )
+
+        self.assertEqual(word_pop.subtitle_preset, "clear_outline")
+        self.assertEqual(word_pop.subtitle_word_mode, "single")
+        self.assertEqual(word_pop.subtitle.font_size, 52)
+        self.assertEqual(word_pop.subtitle.active_color, "#12ABEF")
+        self.assertEqual(word_pop.subtitle.pop_scale, 126)
+        self.assertFalse(word_pop.subtitle.word_sync_enabled)
+        self.assertEqual(minimal.subtitle_preset, "clear_outline")
+        self.assertEqual(minimal.subtitle_word_mode, "off")
+        self.assertEqual(minimal.subtitle.font_family, "Segoe UI")
+        self.assertEqual(minimal.subtitle.bottom_margin, 275)
+        self.assertNotIn("word_pop_sync", VISUAL_STYLE_PRESETS["subtitle"])
+        self.assertNotIn("minimal_bottom", VISUAL_STYLE_PRESETS["subtitle"])
+
+        round_trip = AppSettings.from_dict(word_pop.to_dict())
+        self.assertEqual(round_trip.to_dict(), word_pop.to_dict())
+
+    def test_schema_nineteen_settings_are_rewritten_with_retired_preset_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = SettingsRepository(Path(temp))
+            repository.settings_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 19,
+                        "settings": {
+                            "subtitle_preset": "word_pop_sync",
+                            "subtitle_word_mode": "off",
+                            "subtitle": {"active_color": "#12ABEF"},
+                        },
+                        "platforms": [],
+                        "batches": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            migrated, _, _ = repository.load()
+            persisted = json.loads(
+                repository.settings_path.read_text(encoding="utf-8")
+            )
+
+        self.assertGreater(SETTINGS_SCHEMA_VERSION, 19)
+        self.assertEqual(migrated.subtitle_preset, "clear_outline")
+        self.assertEqual(migrated.subtitle_word_mode, "single")
+        self.assertEqual(persisted["schema_version"], SETTINGS_SCHEMA_VERSION)
+        self.assertEqual(persisted["settings"]["subtitle_preset"], "clear_outline")
+        self.assertEqual(persisted["settings"]["subtitle_word_mode"], "single")
+        self.assertEqual(persisted["settings"]["subtitle"]["active_color"], "#12ABEF")
+
     def test_recommended_narration_default_is_240_wpm(self) -> None:
         self.assertEqual(AppSettings().narration_wpm, 240)
 
@@ -606,6 +671,17 @@ class SettingsRepositoryTests(unittest.TestCase):
 
 
 class ApplicationStateAndApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests validate application state and API orchestration.  The
+        # production disk/memory gate is covered separately and must not make
+        # this suite depend on the current developer machine's free space.
+        admission_patch = mock.patch(
+            "storyforge.worker.default_heavy_job_admission",
+            return_value={"allowed": True, "reason": "", "message": ""},
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+
     def test_settings_api_cannot_enable_hub_production_media_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository = SettingsRepository(Path(temp))
@@ -1039,7 +1115,9 @@ class ApplicationStateAndApiTests(unittest.TestCase):
 
             self.assertTrue(saved["ok"], saved)
             settings = saved["data"]
-            self.assertTrue(settings["subtitle"]["word_sync_enabled"])
+            self.assertEqual(settings["subtitle_preset"], "clear_outline")
+            self.assertEqual(settings["subtitle_word_mode"], "single")
+            self.assertFalse(settings["subtitle"]["word_sync_enabled"])
             self.assertEqual(settings["subtitle"]["active_color"], "#12ABEF")
             self.assertEqual(settings["intro_card"]["background_color"], "#111827")
             self.assertEqual(settings["intro_card"]["position_x_percent"], 56.0)
@@ -1047,7 +1125,8 @@ class ApplicationStateAndApiTests(unittest.TestCase):
 
             bootstrap = api.get_bootstrap()["data"]
             presets = bootstrap["visual_style_presets"]
-            self.assertIn("word_pop_sync", presets["subtitle"])
+            self.assertNotIn("word_pop_sync", presets["subtitle"])
+            self.assertNotIn("minimal_bottom", presets["subtitle"])
             self.assertIn("cinematic_dark", presets["intro_card"])
             self.assertEqual(
                 api.get_visual_style_presets()["data"]["code_card"]["light_chip"]["radius"],
@@ -1064,7 +1143,7 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             api = StoryForgeApi(repository=repository, queue=JobQueue(lambda *_: ""))
 
             presets = api.get_visual_style_presets()["data"]
-            self.assertGreaterEqual(len(presets["subtitle"]), 12)
+            self.assertGreaterEqual(len(presets["subtitle"]), 11)
             self.assertGreaterEqual(len(presets["intro_card"]), 10)
             self.assertGreaterEqual(len(presets["code_card"]), 8)
             for preset in (
@@ -1073,9 +1152,10 @@ class ApplicationStateAndApiTests(unittest.TestCase):
                 "confession_clean",
                 "golden_hook",
                 "midnight_reader",
-                "minimal_bottom",
             ):
                 self.assertIn(preset, presets["subtitle"])
+            self.assertNotIn("word_pop_sync", presets["subtitle"])
+            self.assertNotIn("minimal_bottom", presets["subtitle"])
             for preset in (
                 "social_post",
                 "paper_note",
@@ -1487,6 +1567,17 @@ class ApplicationStateAndApiTests(unittest.TestCase):
 
 
 class JobQueueTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Queue unit tests exercise scheduling semantics, not the workstation's
+        # live disk/memory admission policy.  Keep them deterministic when the
+        # developer machine happens to be below the production safety limit.
+        admission_patch = mock.patch(
+            "storyforge.worker.default_heavy_job_admission",
+            return_value={"allowed": True, "reason": "", "message": ""},
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+
     @staticmethod
     def _fifo_jobs(
         prefix: str,

@@ -428,7 +428,7 @@ class StoryForgeApi:
         client: HubClient,
         error: BaseException,
         *,
-        force: bool = False,
+        allow_uninstalled: bool = False,
     ) -> bool:
         """Disconnect only the rejected installed credential.
 
@@ -440,9 +440,17 @@ class StoryForgeApi:
 
         message = str(error) or type(error).__name__
         with self._hub_client_lock:
-            if not force and self._hub_client is not client:
+            # A password reconnect can install a fresh client while a request
+            # made by the just-revoked client is still completing.  That stale
+            # failure must never clear the newer transport.  During initial
+            # activation there may be no installed client yet; reporting that
+            # failure is safe only while the synchronized slot is still empty.
+            if self._hub_client is client:
+                self._hub_client = None
+            elif allow_uninstalled and self._hub_client is None:
+                pass
+            else:
                 return False
-            self._hub_client = None
             self._hub_error = message
         self._set_device_sync_status(
             state="authentication_required",
@@ -460,7 +468,11 @@ class StoryForgeApi:
             catalog = HubCatalogProxy(client)
             remote_platforms = catalog.list_platforms().get("items", [])
         except HubAuthenticationError as error:
-            self._mark_hub_authentication_failed(client, error, force=True)
+            self._mark_hub_authentication_failed(
+                client,
+                error,
+                allow_uninstalled=True,
+            )
             raise
         library = LibraryService(
             catalog,

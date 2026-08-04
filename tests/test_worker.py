@@ -385,6 +385,28 @@ class LocalWorkerGatewayTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        memory_patch = patch(
+            "storyforge.worker._memory_status",
+            return_value={
+                "observable": True,
+                "total_bytes": 16 * 1024**3,
+                "available_bytes": 8 * 1024**3,
+                "low": False,
+            },
+        )
+        disk_patch = patch(
+            "storyforge.worker._disk_status",
+            return_value={
+                "observable": True,
+                "total_bytes": 200 * 1024**3,
+                "free_bytes": 100 * 1024**3,
+                "low_space": False,
+            },
+        )
+        memory_patch.start()
+        disk_patch.start()
+        self.addCleanup(memory_patch.stop)
+        self.addCleanup(disk_patch.stop)
         self.api = _ApiStub(self.root)
         self.gateway = LocalWorkerGateway(self.api)
 

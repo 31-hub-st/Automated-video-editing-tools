@@ -3,10 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 import wave
+from dataclasses import fields
 from pathlib import Path
 from unittest.mock import patch
 
 from storyforge import maintenance
+from storyforge.catalog import VOICE_CANDIDATE_FIELDS
 from storyforge.models import AppSettings
 from storyforge.providers.base import ProviderConfigurationError
 from storyforge.providers.tts import (
@@ -14,7 +16,11 @@ from storyforge.providers.tts import (
     TTSResult,
     female_voice_candidates,
 )
-from storyforge.services.voice_preview import VoicePreviewService, audition_excerpt
+from storyforge.services.voice_preview import (
+    VoiceCandidate,
+    VoicePreviewService,
+    audition_excerpt,
+)
 
 
 def _write_wav(path: Path, seconds: float = 0.05) -> None:
@@ -71,6 +77,11 @@ class _TimedFakeProvider(_FakeProvider):
 
 
 class VoicePreviewTests(unittest.TestCase):
+    def test_generated_candidate_schema_is_accepted_by_hub_catalog(self) -> None:
+        generated_fields = {item.name for item in fields(VoiceCandidate)}
+
+        self.assertLessEqual(generated_fields, VOICE_CANDIDATE_FIELDS)
+
     def test_excerpt_uses_real_body_and_hides_chapter_heading(self) -> None:
         excerpt = audition_excerpt(
             "Chapter 1\nThe phone rang at ten. She whispered my husband's name."

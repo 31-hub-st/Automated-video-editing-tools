@@ -850,6 +850,49 @@ class CatalogProxyTests(HubTestCase):
         with self.assertRaises(AttributeError):
             _ = proxy._connect
 
+    def test_proxy_retries_selection_key_for_legacy_voice_schema(self) -> None:
+        proxy = HubCatalogProxy(self.client)
+        attempts: list[dict] = []
+
+        def legacy_call(method: str, parameters: dict) -> dict:
+            attempts.append({"method": method, "parameters": parameters})
+            candidates = parameters["voice_state"]["voice_candidates"]
+            if "selection_key" in candidates[0]:
+                raise HubRemoteError(
+                    400,
+                    "validation_error",
+                    "voice candidate 1 contains unsupported fields: selection_key",
+                )
+            return {"id": "novel-1", "metadata": {"voice_candidates": candidates}}
+
+        with patch.object(self.client, "call", side_effect=legacy_call):
+            saved = proxy.save_novel_voice_state(
+                "novel-1",
+                {
+                    "voice_candidates": [
+                        {
+                            "provider": "local_kokoro",
+                            "voice_id": "af_heart",
+                            "selection_key": "stable-key",
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertIn(
+            "selection_key",
+            attempts[0]["parameters"]["voice_state"]["voice_candidates"][0],
+        )
+        self.assertNotIn(
+            "selection_key",
+            attempts[1]["parameters"]["voice_state"]["voice_candidates"][0],
+        )
+        self.assertEqual(
+            saved["metadata"]["voice_candidates"][0]["voice_id"],
+            "af_heart",
+        )
+
 
 class PermissionEnforcementTests(HubTestCase):
     def restart_with_users(self, users: dict[str, str | None]) -> dict[str, HubClient]:

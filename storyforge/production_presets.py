@@ -17,11 +17,12 @@ from .models import (
     COVER_ANIMATIONS,
     INTRO_ANIMATIONS,
     SUBTITLE_ANIMATIONS,
+    normalize_retired_subtitle_settings,
 )
 from .style_options import preset_names, validate_style_patch
 
 
-PRESET_SCHEMA_VERSION = 4
+PRESET_SCHEMA_VERSION = 5
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _FORBIDDEN_RECIPE_KEYS = frozenset(
     {
@@ -132,6 +133,7 @@ def _recipe(
     intro_animation: str,
     subtitle: str,
     subtitle_animation: str,
+    subtitle_word_mode: str = "off",
     code: str,
     cover_animation: str,
     color_grade: str,
@@ -155,6 +157,7 @@ def _recipe(
             "caption_mode": "semantic",
             "subtitle_preset": subtitle,
             "subtitle_animation": subtitle_animation,
+            "subtitle_word_mode": subtitle_word_mode,
             "code_card_preset": code,
             "cover_animation": cover_animation,
             "color_grade": color_grade,
@@ -261,7 +264,7 @@ CURATED_PRODUCTION_PRESETS: tuple[dict[str, Any], ...] = (
             bgm=0.28,
             intro="minimal_clean",
             intro_animation="none",
-            subtitle="minimal_bottom",
+            subtitle="clear_outline",
             subtitle_animation="none",
             code="minimal_dark",
             cover_animation="none",
@@ -296,8 +299,9 @@ CURATED_PRODUCTION_PRESETS: tuple[dict[str, Any], ...] = (
             bgm=0.30,
             intro="blue_glass",
             intro_animation="layered_story",
-            subtitle="word_pop_sync",
+            subtitle="clear_outline",
             subtitle_animation="soft_pop",
+            subtitle_word_mode="single",
             code="dark_glass",
             cover_animation="ken_burns_left",
             color_grade="night_lift",
@@ -364,7 +368,9 @@ def validate_production_preset(value: Mapping[str, Any], *, existing_id: str = "
                 "production preset cannot store device or provider settings: "
                 + ", ".join(unsupported_settings)
             )
-        normalized_settings = dict(production_settings)
+        normalized_settings = normalize_retired_subtitle_settings(
+            production_settings
+        )
         for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
             if boolean_key in normalized_settings and not isinstance(
                 normalized_settings[boolean_key], bool
@@ -496,6 +502,7 @@ class ProductionPresetStore:
             1,
             2,
             3,
+            4,
             PRESET_SCHEMA_VERSION,
         }:
             return {}

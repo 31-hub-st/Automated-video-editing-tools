@@ -198,6 +198,8 @@
   const visualStylePresetCatalog = {
     intro: {
       editorial_white: { label: "杂志白卡", values: { "intro-font": "Arial", "intro-headline-size": 66, "intro-headline-color": "#FFE06A", "intro-body-size": 32, "intro-body-color": "#263247", "intro-label-size": 24, "intro-label-color": "#315BD8", "intro-background": "#FFFFFF", "intro-opacity": 98, "intro-border": "#FFFFFF", "intro-border-width": 2, "intro-shadow-opacity": 28, "intro-width": 65, "intro-x": 50, "intro-y": 27, "intro-padding": 40, "intro-radius": 32, "intro-alignment": "center", "intro-max-lines": 5 } },
+      cover_story_dark: { label: "深色封面故事卡", values: { "intro-font": "Segoe UI", "intro-headline-size": 62, "intro-headline-color": "#FFFFFF", "intro-body-size": 44, "intro-body-color": "#F8FAFC", "intro-label-size": 22, "intro-label-color": "#FF6B4A", "intro-background": "#0B1220", "intro-opacity": 94, "intro-border": "#42516B", "intro-border-width": 2, "intro-shadow-opacity": 46, "intro-width": 84, "intro-x": 50, "intro-y": 27, "intro-padding": 52, "intro-radius": 28, "intro-alignment": "left", "intro-max-lines": 8 } },
+      cover_story_noir: { label: "电影黑卡", values: { "intro-font": "Segoe UI", "intro-headline-size": 64, "intro-headline-color": "#FFFFFF", "intro-body-size": 44, "intro-body-color": "#FFF7ED", "intro-label-size": 22, "intro-label-color": "#FF7657", "intro-background": "#080B12", "intro-opacity": 96, "intro-border": "#596274", "intro-border-width": 2, "intro-shadow-opacity": 58, "intro-width": 85, "intro-x": 50, "intro-y": 27, "intro-padding": 50, "intro-radius": 24, "intro-alignment": "left", "intro-max-lines": 8 } },
       cinematic_dark: { label: "电影暗卡", values: { "intro-font": "Bahnschrift", "intro-headline-size": 70, "intro-headline-color": "#FFE06A", "intro-body-size": 32, "intro-body-color": "#F5F7FB", "intro-label-size": 23, "intro-label-color": "#FF8174", "intro-background": "#111827", "intro-opacity": 92, "intro-border": "#4B5870", "intro-border-width": 2, "intro-shadow-opacity": 44, "intro-width": 68, "intro-x": 50, "intro-y": 26, "intro-padding": 42, "intro-radius": 24, "intro-alignment": "center", "intro-max-lines": 5 } },
       romance_soft: { label: "柔光浪漫", values: { "intro-font": "Georgia", "intro-headline-size": 64, "intro-headline-color": "#FFF3F5", "intro-body-size": 31, "intro-body-color": "#4B3040", "intro-label-size": 23, "intro-label-color": "#B44972", "intro-background": "#FFF4F7", "intro-opacity": 94, "intro-border": "#F4C1D2", "intro-border-width": 2, "intro-shadow-opacity": 24, "intro-width": 68, "intro-x": 50, "intro-y": 28, "intro-padding": 42, "intro-radius": 42, "intro-alignment": "center", "intro-max-lines": 5 } },
       minimal_clean: { label: "纯净极简", values: { "intro-font": "Segoe UI", "intro-headline-size": 58, "intro-headline-color": "#FFFFFF", "intro-body-size": 30, "intro-body-color": "#17243C", "intro-label-size": 21, "intro-label-color": "#315BD8", "intro-background": "#FFFFFF", "intro-opacity": 88, "intro-border": "#D5DEEA", "intro-border-width": 1, "intro-shadow-opacity": 14, "intro-width": 62, "intro-x": 50, "intro-y": 29, "intro-padding": 34, "intro-radius": 12, "intro-alignment": "left", "intro-max-lines": 5 } },
@@ -215,13 +217,11 @@
       bold_drama: { label: "强力戏剧", values: { "subtitle-font": "Bahnschrift", "subtitle-size": 56, "subtitle-color": "#FFFFFF", "subtitle-outline": "#000000", "subtitle-outline-width": 5, "subtitle-shadow-width": 5, "subtitle-background": "#101828", "subtitle-background-opacity": 84, "subtitle-alignment": "center", "subtitle-position-x": 50, "subtitle-bold": true, "subtitle-italic": false, "subtitle-word-sync": false } },
       reader_focus: { label: "阅读聚焦", values: { "subtitle-font": "Georgia", "subtitle-size": 49, "subtitle-color": "#FFFDF7", "subtitle-outline": "#15233D", "subtitle-outline-width": 3, "subtitle-shadow-width": 5, "subtitle-background": "#15233D", "subtitle-background-opacity": 34, "subtitle-alignment": "center", "subtitle-position-x": 50, "subtitle-bold": true, "subtitle-italic": false, "subtitle-word-sync": false } },
       soft_box: { label: "柔和底板", values: { "subtitle-font": "Segoe UI", "subtitle-size": 48, "subtitle-color": "#17243C", "subtitle-outline": "#FFFFFF", "subtitle-outline-width": 0, "subtitle-shadow-width": 2, "subtitle-background": "#F7F9FC", "subtitle-background-opacity": 86, "subtitle-alignment": "center", "subtitle-position-x": 50, "subtitle-bold": true, "subtitle-italic": false, "subtitle-word-sync": false } },
-      word_pop_sync: { label: "逐词弹出", values: { "subtitle-font": "Bahnschrift", "subtitle-size": 52, "subtitle-color": "#FFFFFF", "subtitle-outline": "#101828", "subtitle-outline-width": 4, "subtitle-shadow-width": 5, "subtitle-background": "#101828", "subtitle-background-opacity": 12, "subtitle-alignment": "center", "subtitle-position-x": 50, "subtitle-bold": true, "subtitle-italic": false, "subtitle-word-sync": true, "subtitle-unread-color": "#FFFFFF", "subtitle-active-color": "#FFE06A", "subtitle-read-color": "#FFFFFF", "subtitle-pop-intensity": 65, "subtitle-pop-scale": 112, "subtitle-pop-duration": 160 } },
       romance_glow: { label: "浪漫柔光" },
       suspense_noir: { label: "悬疑黑金" },
       confession_clean: { label: "对白清透" },
       golden_hook: { label: "金色钩子" },
       midnight_reader: { label: "午夜阅读" },
-      minimal_bottom: { label: "底部极简" },
     },
     code: {
       brand_pill: { label: "品牌胶囊", values: { "code-font": "Arial", "code-size": 42, "code-bold": true, "code-color": "#FFFFFF", "code-background": "#2446C8", "code-opacity": 92, "code-outline": "#FFFFFF", "code-outline-width": 1, "code-padding": 20, "code-radius": 12, "code-alignment": "center", "code-width": 62, "code-x": 50, "code-y": 9 } },
@@ -294,14 +294,22 @@
     }[normalizedProductionOutputMode(mode)];
   }
 
-  function visibleProductionSubtitlePreset(value) {
+  function normalizeRetiredSubtitlePreset(value) {
     const key = String(value || "clear_outline");
+    const retiredWordEffect = ["word", "pop", "sync"].join("_");
+    const retiredBottomEffect = ["minimal", "bottom"].join("_");
+    if (key === retiredWordEffect) return "clear_outline";
+    if (key === retiredBottomEffect) return "clear_outline";
+    return key;
+  }
+
+  function visibleProductionSubtitlePreset(value) {
+    const key = normalizeRetiredSubtitlePreset(value);
     return {
       cinematic_shadow: "suspense_noir",
       clean_minimal: "clear_outline",
       bold_drama: "golden_hook",
       reader_focus: "clear_outline",
-      midnight_reader: "minimal_bottom",
     }[key] || key;
   }
 
@@ -3239,6 +3247,183 @@
     }
   }
 
+  function paintIntroCardCover(container, novel, introCardEnabled = true) {
+    if (!container) return;
+    const image = $("img", container);
+    const title = String(novel?.title || "Novel").trim() || "Novel";
+    const source = webAssetUrl(novel?.cover_uri || "");
+    const visible = Boolean(introCardEnabled && source);
+    container.closest(".story-summary-card")?.classList.toggle("has-story-cover", visible);
+    container.hidden = !visible;
+    container.classList.toggle("has-cover-image", visible);
+    container.setAttribute("aria-label", visible ? `${title} 小说封面` : "");
+    if (!image) return;
+    image.onerror = () => {
+      image.hidden = true;
+      container.hidden = true;
+      container.classList.remove("has-cover-image");
+      container.closest(".story-summary-card")?.classList.remove("has-story-cover");
+    };
+    if (visible && image.getAttribute("src") !== source) image.setAttribute("src", source);
+    if (!visible) image.removeAttribute("src");
+    image.alt = visible ? `${title} 小说封面` : "";
+    image.hidden = !visible;
+  }
+
+  const coverSplitPreviewContract = Object.freeze({
+    referenceWidth: 1080,
+    referenceHeight: 1920,
+    safeHorizontal: 76,
+    safeTop: 150,
+    safeBottom: 360,
+    coverAspect: 1.38,
+    contentGap: 22,
+    minimumPanelHeight: 430,
+    maximumPanelHeight: 1050,
+  });
+
+  function previewCardCharacterWidth(character) {
+    if (!character || /\p{Mark}/u.test(character)) return 0;
+    return /[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(character) ? 2 : 1;
+  }
+
+  function previewCardTextWidth(value) {
+    return Array.from(String(value || "")).reduce(
+      (total, character) => total + previewCardCharacterWidth(character),
+      0,
+    );
+  }
+
+  function coverSplitCodeCopy(value) {
+    const code = String(value || "").trim();
+    return `Search "${code}"`;
+  }
+
+  function coverSplitCodeCharacterEmWidth(character) {
+    if (!character || /\p{Mark}/u.test(character)) return 0;
+    if (/[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(character)) return 1.05;
+    if (/[WMwm@#%&]/u.test(character)) return 1.05;
+    if (/[A-Z]/u.test(character)) return 0.82;
+    if (/[0-9]/u.test(character)) return 0.66;
+    if (/[ilI|!.,:;'`"()[\]{}]/u.test(character)) return 0.38;
+    if (/\s/u.test(character)) return 0.34;
+    if (/[-_+\\/]/u.test(character)) return 0.56;
+    if (/[a-z]/u.test(character)) return 0.68;
+    return 0.78;
+  }
+
+  function coverSplitCodeEmWidth(value) {
+    return Array.from(String(value || "")).reduce(
+      (total, character) => total + coverSplitCodeCharacterEmWidth(character),
+      0,
+    );
+  }
+
+  function previewCardSentenceBoundaries(value) {
+    return Array.from(
+      String(value || "").matchAll(/(?<=[.!?。！？])\s+|(?<=[。！？])(?=\S)/gu),
+      (match) => ({ start: match.index, end: match.index + match[0].length }),
+    );
+  }
+
+  function splitIntroPreviewCopy(value) {
+    const compact = String(value || "").replace(/\s+/gu, " ").trim();
+    if (!compact) return { primary: "", secondary: "", size: "short" };
+    const isCompactScript = /[\u2e80-\u9fff\u3040-\u30ff\uac00-\ud7af]/u.test(compact);
+    const units = isCompactScript ? Array.from(compact) : compact.split(/\s+/u);
+    const size = units.length <= (isCompactScript ? 22 : 9)
+      ? "short"
+      : units.length <= (isCompactScript ? 36 : 15)
+        ? "medium"
+        : "long";
+    const boundaries = previewCardSentenceBoundaries(compact);
+    const sentences = [];
+    let sentenceStart = 0;
+    for (const boundary of boundaries) {
+      const sentence = compact.slice(sentenceStart, boundary.start).trim();
+      if (sentence) sentences.push(sentence);
+      sentenceStart = boundary.end;
+    }
+    const finalSentence = compact.slice(sentenceStart).trim();
+    if (finalSentence) sentences.push(finalSentence);
+    const targetWidth = Math.max(28, Math.round(previewCardTextWidth(compact) * 0.40));
+    if (sentences.length > 1) {
+      const lead = [];
+      let used = 0;
+      for (const sentence of sentences.slice(0, -1)) {
+        const sentenceWidth = previewCardTextWidth(sentence);
+        if (lead.length && used + 1 + sentenceWidth > targetWidth) break;
+        lead.push(sentence);
+        used += sentenceWidth + (used ? 1 : 0);
+      }
+      if (!lead.length) lead.push(sentences[0]);
+      const boundary = boundaries[lead.length - 1];
+      const primary = compact.slice(0, boundary.start).trim();
+      const secondary = compact.slice(boundary.end).trim();
+      if (secondary) return { primary, secondary, size };
+    }
+    const desired = Math.max(1, Math.min(compact.length - 1, Math.round(compact.length * 0.40)));
+    const candidates = Array.from(compact.matchAll(/\s/gu), (match) => match.index);
+    const splitAt = candidates.length
+      ? candidates.reduce((best, index) => Math.abs(index - desired) < Math.abs(best - desired) ? index : best)
+      : desired;
+    return {
+      primary: compact.slice(0, splitAt).trim() || compact,
+      secondary: compact.slice(splitAt).trim(),
+      size,
+    };
+  }
+
+  function wrapPreviewCardCopy(value, width) {
+    let remaining = String(value || "").replace(/\s+/gu, " ").trim();
+    const lineWidth = Math.max(8, Math.trunc(width));
+    const noLineStart = new Set(Array.from("，。！？；：、,.!?;:)]}》〉」』】”’"));
+    const lines = [];
+    while (remaining) {
+      let used = 0;
+      let lastBreak = 0;
+      let overflowAt = remaining.length;
+      const characters = Array.from(remaining);
+      for (let index = 0; index < characters.length; index += 1) {
+        const character = characters[index];
+        const characterWidth = previewCardCharacterWidth(character);
+        if (used + characterWidth > lineWidth) {
+          overflowAt = index;
+          break;
+        }
+        used += characterWidth;
+        if (/\s/u.test(character) || characterWidth === 2) lastBreak = index + 1;
+      }
+      if (overflowAt === characters.length) {
+        lines.push(remaining.trim());
+        break;
+      }
+      const splitAt = lastBreak > 0 ? lastBreak : Math.max(1, overflowAt);
+      let line = characters.slice(0, splitAt).join("").trimEnd();
+      remaining = characters.slice(splitAt).join("").trimStart();
+      while (remaining && noLineStart.has(Array.from(remaining)[0])) {
+        const [punctuation, ...tail] = Array.from(remaining);
+        line += punctuation;
+        remaining = tail.join("").trimStart();
+      }
+      if (line) lines.push(line);
+    }
+    return lines;
+  }
+
+  function fitPreviewCardLines(value, width, maxLines) {
+    const limit = Math.max(1, Math.trunc(maxLines));
+    const lines = wrapPreviewCardCopy(value, width);
+    if (lines.length <= limit) return { text: lines.join("\n"), lineCount: lines.length };
+    const fitted = lines.slice(0, limit);
+    let finalLine = fitted.at(-1)?.replace(/[ ,;:\-.…，。！？；：]+$/u, "") || "";
+    while (finalLine && previewCardTextWidth(`${finalLine}…`) > Math.max(8, Math.trunc(width))) {
+      finalLine = Array.from(finalLine).slice(0, -1).join("").trimEnd();
+    }
+    fitted[fitted.length - 1] = `${finalLine || fitted.at(-1)?.slice(0, 1) || ""}…`;
+    return { text: fitted.join("\n"), lineCount: fitted.length };
+  }
+
   function episodeDisplayTitle(episode) {
     return String(episode?.display_title || episode?.title || `第${Number(episode?.number) || 1}集`).trim();
   }
@@ -3584,6 +3769,11 @@
       outro_card: structuredClone(defaults.outro_card || {}),
     };
     novel.draft.production_settings.video_template ||= defaults.video_template || "classic";
+    const savedSubtitlePreset = String(
+      novel.draft.production_settings.subtitle_preset || defaults.subtitle_preset || "clear_outline",
+    );
+    const savedWordEffectPreset = ["word", "pop", "sync"].join("_");
+    novel.draft.production_settings.subtitle_preset = normalizeRetiredSubtitlePreset(savedSubtitlePreset);
     novel.draft.production_settings.intro_card_enabled = typeof novel.draft.production_settings.intro_card_enabled === "boolean"
       ? novel.draft.production_settings.intro_card_enabled
       : novel.draft.production_settings.video_template === "platform_story_card";
@@ -3618,9 +3808,11 @@
     novel.draft.production_settings.subtitle_word_mode = new Set(["off", "cumulative", "single"])
       .has(String(novel.draft.production_settings.subtitle_word_mode || ""))
       ? String(novel.draft.production_settings.subtitle_word_mode)
-      : novel.draft.production_settings.subtitle?.word_sync_enabled === true
-        ? "cumulative"
-        : "off";
+      : savedSubtitlePreset === savedWordEffectPreset
+        ? "single"
+        : novel.draft.production_settings.subtitle?.word_sync_enabled === true
+          ? "cumulative"
+          : "off";
     // 常规视频模式只交付 MP4；需要独立旁白时使用“仅生成配音”。
     novel.draft.production_settings.export_narration_audio = false;
     novel.draft.production_settings.intro_animation ||= defaults.intro_animation || "fade_rise";
@@ -4499,7 +4691,7 @@
                   <i aria-hidden="true"></i>
                 </label>
                 <label class="field"><span>出现时长</span><input id="production-intro-card-duration" type="number" min="2.5" max="8" step="0.5" value="${Number(settings.intro_card_duration_seconds || 5.5)}" /><small>2.5–8 秒</small></label>
-                <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset"><option value="editorial_white">杂志白卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
+                <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset"><option value="editorial_white">杂志白卡</option><option value="cover_story_dark">深色封面故事卡</option><option value="cover_story_noir">电影黑卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
                 <label class="field production-intro-copy-field"><span>简介短文案</span><textarea id="production-intro-card-copy" rows="3" maxlength="155" placeholder="${escapeHtml(storyPreviewText(novel, draft))}">${escapeHtml(draft.intro_card_text || "")}</textarea><small>留空则使用 AI 精简结果；只保留最有吸引力的冲突，不显示小说名和多余标签。</small></label>
               </div>
               ${productionVideoSpeedMarkup(settings)}
@@ -4512,7 +4704,7 @@
             <section class="production-semantic-panel" data-visual-panel="captions" aria-labelledby="production-captions-panel-title">
               <div class="production-semantic-heading"><span aria-hidden="true">Aa</span><div><h4 id="production-captions-panel-title">字幕与口令</h4><p>文字怎样出现、怎样更易读</p></div></div>
               <div class="workbench-field-grid workbench-field-grid-two production-caption-primary-grid">
-                <label class="field"><span>字幕预设</span><select id="production-subtitle-preset"><option value="clear_outline">清晰描边</option><option value="soft_box">柔和底板</option><option value="word_pop_sync">逐词弹出</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="minimal_bottom">底部极简</option></select></label>
+                <label class="field"><span>字幕预设</span><select id="production-subtitle-preset"><option value="clear_outline">清晰描边</option><option value="soft_box">柔和底板</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="midnight_reader">午夜阅读</option></select></label>
                 <label class="field"><span>字幕行为</span><select id="production-subtitle-word-mode"><option value="off">整句稳定</option><option value="cumulative">逐词累积高亮</option><option value="single">单词逐个出现</option></select></label>
                 <label class="field"><span>口令卡样式</span><select id="production-code-card-preset"><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
                 <label class="field"><span>字幕切分</span><select id="production-caption-mode"><option value="semantic">按语义停顿</option><option value="sentence">按完整句子</option></select></label>
@@ -5052,11 +5244,199 @@
     return Math.min(maximum, Math.max(minimum, value));
   }
 
-  function normalizedIntroPreviewGeometry(intro = {}, code = {}) {
+  function coverSplitPreviewPercent(value, origin, span) {
+    return `${(((value - origin) * 100) / Math.max(1, span)).toFixed(4)}%`;
+  }
+
+  function resolveCoverSplitPreviewGeometry(intro = {}, code = {}, introPreset = "", introCardText = "", coverPresent = true) {
+    const contract = coverSplitPreviewContract;
+    const canvasWidth = contract.referenceWidth;
+    const canvasHeight = contract.referenceHeight;
+    const noirLayout = String(intro.layout || "") === "cover_split_noir" || introPreset === "cover_story_noir";
+    const widthPercent = clampPreviewNumber(finitePreviewNumber(intro.width_percent, noirLayout ? 85 : 84), 40, 86);
+    const safeWidth = canvasWidth - (2 * contract.safeHorizontal);
+    const panelWidth = Math.min(safeWidth, Math.round(canvasWidth * widthPercent / 100));
+    const requestedCenterPercent = clampPreviewNumber(finitePreviewNumber(intro.position_x_percent, 50), 20, 80);
+    const requestedCenter = Math.round(canvasWidth * requestedCenterPercent / 100);
+    const minimumCenter = contract.safeHorizontal + Math.round(panelWidth / 2);
+    const maximumCenter = canvasWidth - contract.safeHorizontal - Math.round(panelWidth / 2);
+    const panelCenter = clampPreviewNumber(requestedCenter, minimumCenter, maximumCenter);
+    const panelX = panelCenter - Math.round(panelWidth / 2);
+    const requestedPadding = Math.max(10, Math.round(clampPreviewNumber(finitePreviewNumber(intro.padding, 52), 16, 120)));
+    const padding = Math.min(requestedPadding, Math.max(10, Math.round(panelWidth * 0.14)), 72);
+    const labelFontSize = clampPreviewNumber(finitePreviewNumber(intro.label_font_size, 22), 16, 52);
+    const bodyFontSize = clampPreviewNumber(finitePreviewNumber(intro.body_font_size, 44), 20, 72);
+    const subtitleFontSize = clampPreviewNumber(finitePreviewNumber(intro.preview_subtitle_font_size, 52), 24, 96);
+    const maximumLines = Math.trunc(clampPreviewNumber(finitePreviewNumber(intro.max_lines, 8), 2, 8));
+    const headerHeight = Math.max(86, Math.round(labelFontSize * 2.1));
+    const contentGap = contract.contentGap;
+    const rotationDegrees = noirLayout ? -5 : 0;
+    const rotation = Math.abs(rotationDegrees) * Math.PI / 180;
+    const footprintWidthFactor = Math.cos(rotation) + contract.coverAspect * Math.sin(rotation);
+    const footprintHeightFactor = Math.sin(rotation) + contract.coverAspect * Math.cos(rotation);
+    const minimumTextWidth = Math.max(120, Math.round(panelWidth * 0.30));
+    const maximumFootprintWidth = Math.max(2, panelWidth - (2 * padding) - contentGap - minimumTextWidth);
+    const splitCopy = splitIntroPreviewCopy(introCardText);
+    const coverScale = { short: 0.72, medium: 0.86, long: 1 }[splitCopy.size] || 1;
+    const desiredCoverWidth = Math.round(
+      Math.max(noirLayout ? 176 : 190, Math.round(panelWidth * (noirLayout ? 0.35 : 0.36))) * coverScale,
+    );
+    const coverWidth = coverPresent
+      ? Math.max(2, Math.min(desiredCoverWidth, Math.floor(maximumFootprintWidth / footprintWidthFactor)))
+      : 0;
+    const coverHeight = coverPresent ? Math.max(2, Math.round(coverWidth * contract.coverAspect)) : 0;
+    const coverFootprintWidth = (coverWidth * Math.cos(rotation)) + (coverHeight * Math.sin(rotation));
+    const coverFootprintHeight = (coverWidth * Math.sin(rotation)) + (coverHeight * Math.cos(rotation));
+    const accentWidth = Math.max(3, 7);
+    const summaryIndent = accentWidth + 18;
+    const coverGap = coverPresent ? contentGap : 0;
+    const textWidthPixels = Math.max(
+      1,
+      Math.floor(panelWidth - (2 * padding) - coverGap - coverFootprintWidth - summaryIndent),
+    );
+    const summaryFontSize = Math.max(Math.round(bodyFontSize), Math.round(subtitleFontSize * 0.58));
+    const characterWidth = Math.max(8, Math.round(textWidthPixels / Math.max(1, summaryFontSize * 0.53)));
+    let upperLinesLimit = Math.max(2, Math.min(4, Math.trunc(maximumLines / 2) + 1));
+    let lowerLinesLimit = Math.max(1, maximumLines - upperLinesLimit);
+    const lineHeight = Math.max(39, Math.round(summaryFontSize * 1.28));
+    const maximumPanelHeight = Math.min(
+      contract.maximumPanelHeight,
+      canvasHeight - contract.safeTop - contract.safeBottom,
+    );
+
+    const fitCopy = () => {
+      const upper = fitPreviewCardLines(splitCopy.primary, characterWidth, upperLinesLimit);
+      const lower = fitPreviewCardLines(splitCopy.secondary, characterWidth, lowerLinesLimit);
+      const upperTextHeight = upper.lineCount * lineHeight;
+      const lowerTextHeight = lower.lineCount * lineHeight;
+      const textStackHeight = upperTextHeight + (lower.text ? contentGap : 0) + lowerTextHeight;
+      const contentHeight = Math.max(Math.ceil(coverFootprintHeight), textStackHeight);
+      const requiredHeight = (2 * padding) + headerHeight + contentGap + contentHeight;
+      return { upper, lower, upperTextHeight, lowerTextHeight, contentHeight, requiredHeight };
+    };
+
+    let fitted = fitCopy();
+    while (fitted.requiredHeight > maximumPanelHeight && (lowerLinesLimit > 1 || upperLinesLimit > 2)) {
+      if (lowerLinesLimit > 1) lowerLinesLimit -= 1;
+      else upperLinesLimit -= 1;
+      fitted = fitCopy();
+    }
+    const panelHeight = Math.max(
+      contract.minimumPanelHeight,
+      Math.min(maximumPanelHeight, fitted.requiredHeight),
+    );
+    const requestedY = Math.round(canvasHeight * clampPreviewNumber(finitePreviewNumber(intro.position_y_percent, 27), 12, 58) / 100);
+    const maximumPanelY = Math.max(contract.safeTop, canvasHeight - contract.safeBottom - panelHeight);
+    const panelY = clampPreviewNumber(requestedY, contract.safeTop, maximumPanelY);
+    const upperX = panelX + padding;
+    const upperY = panelY + padding + headerHeight + contentGap;
+    const upperTextX = upperX + summaryIndent;
+    const lowerY = upperY + fitted.upperTextHeight + (fitted.lower.text ? contentGap : 0);
+    const coverFootprintRight = panelX + panelWidth - padding;
+    const coverFootprintLeft = coverFootprintRight - coverFootprintWidth;
+    const coverFootprintTop = upperY + Math.max(0, (fitted.contentHeight - coverFootprintHeight) / 2);
+    const coverCenterX = (coverFootprintLeft + coverFootprintRight) / 2;
+    const coverCenterY = coverFootprintTop + (coverFootprintHeight / 2);
+    const coverLeft = coverCenterX - (coverWidth / 2);
+    const coverTop = coverCenterY - (coverHeight / 2);
+    const accentHeight = Math.max(54, Math.min(fitted.upperTextHeight || lineHeight, 118));
+    const codeCopy = coverSplitCodeCopy(code.preview_value);
+    const codeTextEmWidth = Math.max(0.1, coverSplitCodeEmWidth(codeCopy));
+    const baseCodeFontSize = Math.max(22, Math.round(labelFontSize * 0.86));
+    const codeChipHorizontalPadding = 10;
+    const codeChipMeasurementSafety = 12;
+    const maximumCodeChipWidth = Math.max(
+      1,
+      Math.min(panelWidth - (2 * padding), Math.round(panelWidth * 0.60)),
+    );
+    const desiredCodeChipWidth = Math.max(
+      224,
+      Math.round((codeTextEmWidth * baseCodeFontSize) + (2 * codeChipHorizontalPadding) + codeChipMeasurementSafety),
+    );
+    const codeChipWidth = Math.min(maximumCodeChipWidth, desiredCodeChipWidth);
+    const availableCodeTextWidth = Math.max(1, codeChipWidth - (2 * codeChipHorizontalPadding));
+    const codeFontSize = Math.max(
+      6,
+      Math.min(baseCodeFontSize, Math.floor(availableCodeTextWidth / codeTextEmWidth)),
+    );
+    const codeChipHeight = Math.max(54, Math.round(labelFontSize * 1.6));
+    const codeChipX = panelX + panelWidth - padding - codeChipWidth;
+    const codeChipY = panelY + padding;
+    const logoBox = 64;
+    const desiredLogoCenter = panelX + padding + (logoBox / 2);
+    const desiredLogoTop = panelY + padding + Math.round(headerHeight * 0.28) - (logoBox / 2);
+    const logoCenterPercent = clampPreviewNumber(desiredLogoCenter * 100 / canvasWidth, 10, 90);
+    const logoTopPercent = clampPreviewNumber(desiredLogoTop * 100 / canvasHeight, 5, 60);
+    const logoLeft = clampPreviewNumber(
+      Math.round(canvasWidth * logoCenterPercent / 100) - Math.round(logoBox / 2),
+      contract.safeHorizontal,
+      canvasWidth - contract.safeHorizontal - logoBox,
+    );
+    const logoTop = clampPreviewNumber(
+      Math.round(canvasHeight * logoTopPercent / 100),
+      contract.safeTop,
+      canvasHeight - contract.safeBottom - logoBox,
+    );
+
+    return {
+      layout: "coverSplit",
+      centerPercent: ((panelX + panelWidth / 2) * 100) / canvasWidth,
+      widthPercent: (panelWidth * 100) / canvasWidth,
+      titleTopPercent: (panelY * 100) / canvasHeight,
+      cardTopPercent: (panelY * 100) / canvasHeight,
+      heightPercent: (panelHeight * 100) / canvasHeight,
+      referencePanelWidth: panelWidth,
+      codeFontSize,
+      codePadding: codeChipHorizontalPadding,
+      copy: {
+        primary: fitted.upper.text,
+        secondary: fitted.lower.text,
+        size: splitCopy.size,
+      },
+      cssVariables: {
+        "--cover-brand-left": coverSplitPreviewPercent(logoLeft, panelX, panelWidth),
+        "--cover-brand-top": coverSplitPreviewPercent(logoTop, panelY, panelHeight),
+        "--cover-logo-width": `${(logoBox * 100 / panelWidth).toFixed(4)}%`,
+        "--cover-logo-height": `${(logoBox * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-code-left": coverSplitPreviewPercent(codeChipX, panelX, panelWidth),
+        "--cover-code-top": coverSplitPreviewPercent(codeChipY, panelY, panelHeight),
+        "--cover-code-width": `${(codeChipWidth * 100 / panelWidth).toFixed(4)}%`,
+        "--cover-code-height": `${(codeChipHeight * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-code-font-size": `${(codeFontSize / 4).toFixed(2)}px`,
+        "--cover-code-padding": `${(codeChipHorizontalPadding / 4).toFixed(2)}px`,
+        "--cover-primary-left": coverSplitPreviewPercent(upperTextX, panelX, panelWidth),
+        "--cover-primary-top": coverSplitPreviewPercent(upperY, panelY, panelHeight),
+        "--cover-copy-width": `${(textWidthPixels * 100 / panelWidth).toFixed(4)}%`,
+        "--cover-primary-height": `${(fitted.upperTextHeight * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-secondary-left": coverSplitPreviewPercent(upperTextX, panelX, panelWidth),
+        "--cover-secondary-top": coverSplitPreviewPercent(lowerY, panelY, panelHeight),
+        "--cover-secondary-height": `${(fitted.lowerTextHeight * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-image-left": coverSplitPreviewPercent(coverLeft, panelX, panelWidth),
+        "--cover-image-top": coverSplitPreviewPercent(coverTop, panelY, panelHeight),
+        "--cover-image-width": `${(coverWidth * 100 / panelWidth).toFixed(4)}%`,
+        "--cover-image-height": `${(coverHeight * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-image-rotation": `${rotationDegrees}deg`,
+        "--cover-accent-left": coverSplitPreviewPercent(upperX, panelX, panelWidth),
+        "--cover-accent-top": coverSplitPreviewPercent(upperY, panelY, panelHeight),
+        "--cover-accent-width": `${(accentWidth * 100 / panelWidth).toFixed(4)}%`,
+        "--cover-accent-height": `${(accentHeight * 100 / panelHeight).toFixed(4)}%`,
+        "--cover-summary-font-size": `${(summaryFontSize / 4).toFixed(2)}px`,
+        "--cover-summary-line-height": `${(lineHeight / 4).toFixed(2)}px`,
+      },
+    };
+  }
+
+  function normalizedIntroPreviewGeometry(intro = {}, code = {}, introPreset = "", introCardText = "", coverPresent = true) {
+    const coverStoryPreset = new Set(["cover_story_dark", "cover_story_noir"]).has(String(introPreset || ""));
+    if (coverStoryPreset) {
+      return resolveCoverSplitPreviewGeometry(intro, code, introPreset, introCardText, coverPresent);
+    }
+    const minimumWidth = coverStoryPreset ? 82 : 48;
+    const maximumWidth = coverStoryPreset ? 86 : introPreviewSafeArea.widthPercent;
     const widthPercent = clampPreviewNumber(
-      finitePreviewNumber(intro.width_percent, 65),
-      48,
-      introPreviewSafeArea.widthPercent,
+      finitePreviewNumber(intro.width_percent, coverStoryPreset ? 84 : 65),
+      minimumWidth,
+      maximumWidth,
     );
     const codeTop = clampPreviewNumber(finitePreviewNumber(code.position_y_percent, 9), 5, 26);
     const codeFontPixels = clampPreviewNumber(finitePreviewNumber(code.font_size, 42), 28, 64) / 4.2;
@@ -5067,27 +5447,29 @@
     const requestedCardTop = finitePreviewNumber(intro.position_y_percent, 27);
     const titleTop = Math.max(17, codeTop + codeHeightPercent + 1.5);
     const maximumCardTop = 100 - introPreviewSafeArea.bottomPercent - introPreviewSafeArea.cardHeightPercent;
-    const cardTop = clampPreviewNumber(
-      Math.max(requestedCardTop, titleTop + titleHeightPercent + 1.25),
-      28,
-      maximumCardTop,
-    );
+    const cardTop = coverStoryPreset
+      ? clampPreviewNumber(requestedCardTop, 27, 29)
+      : clampPreviewNumber(
+        Math.max(requestedCardTop, titleTop + titleHeightPercent + 1.25),
+        28,
+        maximumCardTop,
+      );
 
     return {
-      centerPercent: 50,
+      centerPercent: clampPreviewNumber(finitePreviewNumber(intro.position_x_percent, 50), 20, 80),
       widthPercent,
       titleTopPercent: Math.min(titleTop, cardTop - titleHeightPercent - 1.25),
       cardTopPercent: cardTop,
     };
   }
 
-  function applyIntroPreviewGeometry(introTitle, introCard, intro = {}, code = {}) {
-    const geometry = normalizedIntroPreviewGeometry(intro, code);
+  function applyIntroPreviewGeometry(introTitle, introCard, intro = {}, code = {}, introPreset = "", introCardText = "", coverPresent = true) {
+    const geometry = normalizedIntroPreviewGeometry(intro, code, introPreset, introCardText, coverPresent);
     if (introTitle) {
       introTitle.style.left = `${geometry.centerPercent}%`;
       introTitle.style.right = "auto";
       introTitle.style.width = `${geometry.widthPercent}%`;
-      introTitle.style.maxWidth = `${introPreviewSafeArea.widthPercent}%`;
+      introTitle.style.maxWidth = `${geometry.widthPercent}%`;
       introTitle.style.top = `${geometry.titleTopPercent}%`;
       introTitle.style.transform = "translateX(-50%)";
     }
@@ -5095,25 +5477,53 @@
       introCard.style.left = `${geometry.centerPercent}%`;
       introCard.style.right = "auto";
       introCard.style.width = `${geometry.widthPercent}%`;
-      introCard.style.maxWidth = `${introPreviewSafeArea.widthPercent}%`;
+      introCard.style.maxWidth = `${geometry.widthPercent}%`;
       introCard.style.top = `${geometry.cardTopPercent}%`;
       introCard.style.transform = "translateX(-50%)";
+      introCard.style.height = geometry.heightPercent ? `${geometry.heightPercent}%` : "";
+      introCard.style.minHeight = geometry.heightPercent ? `${geometry.heightPercent}%` : "";
+      introCard.style.maxHeight = geometry.heightPercent ? `${geometry.heightPercent}%` : "";
+      Object.entries(geometry.cssVariables || {}).forEach(([key, value]) => {
+        introCard.style.setProperty(key, value);
+      });
+      if (geometry.referencePanelWidth && geometry.codeFontSize) {
+        const previewPanelWidth = introCard.getBoundingClientRect().width || introCard.clientWidth || 0;
+        if (previewPanelWidth > 0) {
+          const previewScale = previewPanelWidth / geometry.referencePanelWidth;
+          introCard.style.setProperty(
+            "--cover-code-font-size",
+            `${Math.max(2.5, geometry.codeFontSize * previewScale).toFixed(2)}px`,
+          );
+          introCard.style.setProperty(
+            "--cover-code-padding",
+            `${Math.max(1, Number(geometry.codePadding || 0) * previewScale).toFixed(2)}px`,
+          );
+        }
+      }
     }
     return geometry;
   }
 
-  function applyProductionCardStyles(root, settings) {
+  function applyProductionCardStyles(root, settings, { introCardText = "", codeValue = "", coverPresent = true } = {}) {
     const intro = settings.intro_card || {};
     const code = settings.code_card || {};
     const outro = settings.outro_card || {};
     const introTitle = $(".story-preview-title", root);
     const introCard = $(".story-summary-card", root);
-    const introBody = $(".story-summary-card p", root);
+    const introBodies = $$(".story-card-copy", root);
     const introLabel = $(".story-card-label", root);
     const codeCard = $(".code-card", root);
     const ticket = $(".story-card-ticket", root);
     const outroCard = $(".production-outro-preview", root);
-    applyIntroPreviewGeometry(introTitle, introCard, intro, code);
+    const introGeometry = applyIntroPreviewGeometry(
+      introTitle,
+      introCard,
+      { ...intro, preview_subtitle_font_size: settings.subtitle?.font_size },
+      { ...code, preview_value: codeValue },
+      settings.intro_card_preset,
+      introCardText,
+      coverPresent,
+    );
 
     if (introTitle) {
       introTitle.style.fontFamily = intro.font_family || "Arial";
@@ -5131,13 +5541,22 @@
       introCard.style.boxShadow = `0 10px 28px rgba(15,27,54,${Number(intro.shadow_opacity ?? 0.28)})`;
       introCard.style.fontFamily = intro.font_family || "Arial";
       introCard.style.textAlign = intro.text_alignment || "center";
+      introCard.style.setProperty("--intro-card-heading", intro.headline_color || "#FFFFFF");
+      introCard.style.setProperty("--intro-card-copy", intro.body_color || "#263247");
+      introCard.style.setProperty("--intro-card-accent", intro.label_color || "#315BD8");
+      introCard.style.setProperty("--intro-card-border", intro.border_color || "#FFFFFF");
+      introCard.style.setProperty("--story-code-color", code.text_color || "#FFFFFF");
+      introCard.style.setProperty("--story-code-background", colorWithOpacity(code.background_color || "#2446C8", Number(code.opacity ?? 0.92)));
+      introCard.style.setProperty("--story-code-border", code.outline_color || "#FFFFFF");
+      introCard.style.setProperty("--story-code-border-width", `${Number(code.outline_width || 1) / 3}px`);
+      introCard.style.setProperty("--story-code-radius", `${Number(code.radius || 12) / 4.2}px`);
     }
-    if (introBody) {
+    introBodies.forEach((introBody) => {
       introBody.style.fontSize = `${Number(intro.body_font_size || 32) / 4}px`;
       introBody.style.color = intro.body_color || "#263247";
       introBody.style.textAlign = intro.text_alignment || "center";
       introBody.style.webkitLineClamp = String(Number(intro.max_lines || 5));
-    }
+    });
     if (introLabel) {
       introLabel.style.fontSize = `${Number(intro.label_font_size || 24) / 4}px`;
       introLabel.style.color = intro.label_color || "#315BD8";
@@ -5182,6 +5601,7 @@
       if (body) { body.style.fontSize = `${Number(outro.body_font_size || 32) / 4}px`; body.style.color = outro.body_color || "#53627A"; }
       if (codeText) { codeText.style.fontSize = `${Number(outro.code_font_size || 42) / 4}px`; codeText.style.color = outro.code_color || "#315BD8"; }
     }
+    return introGeometry;
   }
 
   function updateProductionPreview() {
@@ -5196,14 +5616,17 @@
     const subtitle = $("#preview-subtitle");
     const outroSubtitle = $("#preview-outro-caption");
     const settings = draft.production_settings || {};
+    const introCardText = storyPreviewText(novel, draft);
     const previewLanguage = novelLanguageInfo(novel).code || "en";
     const root = $("#video-preview");
     const introCardEnabled = settings.intro_card_enabled === true;
     const videoTemplate = introCardEnabled ? "platform_story_card" : "classic";
     const coverAnimation = normalizedCoverAnimation(settings.cover_animation);
     const coverOutroEnabled = settings.cover_outro_enabled !== false;
+    let introPreviewGeometry = null;
     if (root) {
       root.dataset.videoTemplate = videoTemplate;
+      root.dataset.introCardEnabled = String(introCardEnabled);
       root.dataset.subtitlePreset = settings.subtitle_preset || "clear_outline";
       root.dataset.subtitleAnimation = settings.subtitle_animation || "none";
       root.dataset.codePreset = settings.code_card_preset || "brand_pill";
@@ -5215,28 +5638,44 @@
       root.dataset.introAnimation = settings.intro_animation || "fade_rise";
       paintOutroCover($("#preview-outro-cover"), novel, coverAnimation);
       setProductionPreviewScene(state.productionPreviewScene);
-      applyProductionCardStyles(root, settings);
+      const coverPresent = Boolean(introCardEnabled && webAssetUrl(novel?.cover_uri || ""));
+      introPreviewGeometry = applyProductionCardStyles(root, settings, { introCardText, codeValue: code, coverPresent });
     }
     if ($("#preview-output")) $("#preview-output").textContent = `1080 × 1920 · ${Number(settings.output_fps || 60)} FPS`;
     if ($("#preview-template")) $("#preview-template").textContent = introCardEnabled
       ? `简介卡开启 · ${Number(settings.intro_card_duration_seconds || 5.5)}秒`
       : "简介卡关闭";
-    if ($("#preview-story-search")) $("#preview-story-search").textContent = `${platform?.name || "Platform"} · Search “${code}”`;
+    if ($("#preview-story-platform-name")) $("#preview-story-platform-name").textContent = platform?.name || "Platform";
+    if ($("#preview-story-platform-tagline")) {
+      $("#preview-story-platform-tagline").textContent = platform?.tagline || "Stories that stay with you";
+    }
+    const combinedStorySearchLabel = `${platform?.name || "Platform"} · Search “${code}”`;
+    if ($("#preview-story-search")) {
+      $("#preview-story-search").textContent = coverSplitCodeCopy(code);
+      $("#preview-story-search").setAttribute("aria-label", combinedStorySearchLabel);
+    }
     paintPlatformLogo(
       $("#preview-story-platform-mark"),
       platform || { name: "Platform", brand_color: "#315bd8" },
     );
-    if ($("#preview-story-copy")) {
-      $("#preview-story-copy").textContent = storyPreviewText(novel, draft);
-      $("#preview-story-copy").lang = previewLanguage;
+    const introCopy = introPreviewGeometry?.copy || splitIntroPreviewCopy(introCardText);
+    if (root) root.dataset.introCopySize = introCopy.size;
+    if ($("#preview-story-copy-primary")) {
+      $("#preview-story-copy-primary").textContent = introCopy.primary;
+      $("#preview-story-copy-primary").lang = previewLanguage;
     }
+    if ($("#preview-story-copy-secondary")) {
+      $("#preview-story-copy-secondary").textContent = introCopy.secondary;
+      $("#preview-story-copy-secondary").lang = previewLanguage;
+    }
+    paintIntroCardCover($("#preview-story-cover"), novel, introCardEnabled);
     const outroCopy = platform
       ? safeTemplate(platform.ending_template, platform.name, code)
       : "Download the novel app to discover what happened next.";
     if ($("#preview-outro-copy")) $("#preview-outro-copy").textContent = outroCopy;
     if ($("#preview-outro-code")) $("#preview-outro-code").textContent = `Search “${code}”`;
     const subtitleSettings = settings.subtitle || {};
-    const legacyWordSync = settings.subtitle_preset === "word_pop_sync" || subtitleSettings.word_sync_enabled === true;
+    const legacyWordSync = subtitleSettings.word_sync_enabled === true;
     const wordMode = new Set(["off", "cumulative", "single"]).has(settings.subtitle_word_mode)
       ? settings.subtitle_word_mode
       : legacyWordSync
@@ -8207,7 +8646,7 @@
     assignValue("#video-template", settings.video_template || "classic");
     assignValue("#intro-card-preset", settings.intro_card_preset || "editorial_white");
     assignValue("#caption-mode", settings.caption_mode || "semantic");
-    assignValue("#subtitle-preset", settings.subtitle_preset || "clear_outline");
+    assignValue("#subtitle-preset", normalizeRetiredSubtitlePreset(settings.subtitle_preset));
     assignValue("#code-card-preset", settings.code_card_preset || "brand_pill");
     assignValue("#outro-card-preset", settings.outro_card_preset || "editorial_white");
     assignValue("#subtitle-animation", settings.subtitle_animation || "none");
@@ -9004,31 +9443,52 @@
     const root = $("#style-preview");
     if (!root) return;
     const stylePlatform = state.platforms[0] || { name: "GoodNovel", brand_color: "#315bd8" };
+    const styleNovel = previewCoverNovel();
     paintPlatformLogo($("#style-story-platform-mark"), stylePlatform);
-    if ($("#style-story-search")) $("#style-story-search").textContent = `${stylePlatform.name || "Platform"} · Search “B56826”`;
+    if ($("#style-story-platform-name")) $("#style-story-platform-name").textContent = stylePlatform.name || "Platform";
+    if ($("#style-story-platform-tagline")) {
+      $("#style-story-platform-tagline").textContent = stylePlatform.tagline || "Stories that stay with you";
+    }
+    if ($("#style-story-search")) $("#style-story-search").textContent = coverSplitCodeCopy("B56826");
     const subtitle = $(".preview-subtitle:not(.outro-caption-preview)", root);
     const outroSubtitle = $(".outro-caption-preview", root);
     const card = $(".code-card", root);
     const introTitle = $(".story-preview-title", root);
     const introCard = $(".story-summary-card", root);
-    const introBody = $(".story-summary-card p", root);
+    const introBodies = $$(".story-card-copy", root);
     const introLabel = $(".story-card-label", root);
     const outro = $(".outro-style-preview", root);
-    applyIntroPreviewGeometry(
+    const introPreset = $("#intro-card-preset")?.value || "editorial_white";
+    const videoTemplate = $("#video-template")?.value || "classic";
+    const introCardEnabled = videoTemplate === "platform_story_card";
+    const styleIntroText = storyPreviewText(styleNovel);
+    const presetIntro = state.visual_style_presets?.intro_card?.[introPreset] || {};
+    const styleCoverPresent = Boolean(introCardEnabled && webAssetUrl(styleNovel?.cover_uri || ""));
+    const styleIntroGeometry = applyIntroPreviewGeometry(
       introTitle,
       introCard,
       {
+        ...presetIntro,
         width_percent: $("#intro-width")?.value,
+        position_x_percent: $("#intro-x")?.value,
         position_y_percent: $("#intro-y")?.value,
         headline_font_size: $("#intro-headline-size")?.value,
+        body_font_size: $("#intro-body-size")?.value,
+        label_font_size: $("#intro-label-size")?.value,
+        padding: $("#intro-padding")?.value,
+        max_lines: $("#intro-max-lines")?.value,
+        preview_subtitle_font_size: $("#subtitle-size")?.value,
       },
       {
         position_y_percent: $("#code-y")?.value,
         font_size: $("#code-size")?.value,
         padding: $("#code-padding")?.value,
+        preview_value: "B56826",
       },
+      introPreset,
+      styleIntroText,
+      styleCoverPresent,
     );
-    const videoTemplate = $("#video-template")?.value || "classic";
     const captionMode = $("#caption-mode")?.value || "semantic";
     const subtitlePreset = $("#subtitle-preset")?.value || "clear_outline";
     const subtitleAnimation = $("#subtitle-animation")?.value || "none";
@@ -9039,6 +9499,8 @@
     const colorGrade = $("#color-grade")?.value || "neutral";
     const introAnimation = $("#intro-animation")?.value || "fade_rise";
     root.dataset.videoTemplate = videoTemplate;
+    root.dataset.introCardEnabled = String(introCardEnabled);
+    root.dataset.introPreset = introPreset;
     root.dataset.captionMode = captionMode;
     root.dataset.subtitlePreset = subtitlePreset;
     root.dataset.subtitleAnimation = subtitleAnimation;
@@ -9048,6 +9510,12 @@
     root.dataset.colorGrade = colorGrade;
     root.dataset.introAnimation = introAnimation;
     root.dataset.previewScene = state.stylePreviewScene || "intro";
+    if (introCard) introCard.className = `story-summary-card preset-${introPreset}`;
+    const styleCopy = styleIntroGeometry?.copy || splitIntroPreviewCopy(styleIntroText);
+    root.dataset.introCopySize = styleCopy.size;
+    if ($("#style-story-copy-primary")) $("#style-story-copy-primary").textContent = styleCopy.primary;
+    if ($("#style-story-copy-secondary")) $("#style-story-copy-secondary").textContent = styleCopy.secondary;
+    paintIntroCardCover($("#style-story-cover"), styleNovel, introCardEnabled);
     const subtitleSettings = {
       font_family: $("#subtitle-font")?.value || "Arial",
       font_size: Number($("#subtitle-size")?.value || 52),
@@ -9124,13 +9592,22 @@
       introCard.style.boxShadow = `0 10px 28px rgba(15,27,54,${Number($("#intro-shadow-opacity")?.value || 28) / 100})`;
       introCard.style.fontFamily = $("#intro-font")?.value || "Arial";
       introCard.style.textAlign = $("#intro-alignment")?.value || "center";
+      introCard.style.setProperty("--intro-card-heading", $("#intro-headline-color")?.value || "#FFFFFF");
+      introCard.style.setProperty("--intro-card-copy", $("#intro-body-color")?.value || "#263247");
+      introCard.style.setProperty("--intro-card-accent", $("#intro-label-color")?.value || "#315BD8");
+      introCard.style.setProperty("--intro-card-border", $("#intro-border")?.value || "#FFFFFF");
+      introCard.style.setProperty("--story-code-color", $("#code-color")?.value || "#FFFFFF");
+      introCard.style.setProperty("--story-code-background", colorWithOpacity($("#code-background")?.value || "#2446C8", Number($("#code-opacity")?.value || 92) / 100));
+      introCard.style.setProperty("--story-code-border", $("#code-outline")?.value || "#FFFFFF");
+      introCard.style.setProperty("--story-code-border-width", `${Number($("#code-outline-width")?.value || 1) / 3}px`);
+      introCard.style.setProperty("--story-code-radius", `${Number($("#code-radius")?.value || 12) / 4.2}px`);
     }
-    if (introBody) {
+    introBodies.forEach((introBody) => {
       introBody.style.fontSize = `${Number($("#intro-body-size")?.value || 32) / 4}px`;
       introBody.style.color = $("#intro-body-color")?.value || "#263247";
       introBody.style.textAlign = $("#intro-alignment")?.value || "center";
       introBody.style.webkitLineClamp = String(Number($("#intro-max-lines")?.value || 5));
-    }
+    });
     if (introLabel) {
       introLabel.style.fontSize = `${Number($("#intro-label-size")?.value || 24) / 4}px`;
       introLabel.style.color = $("#intro-label-color")?.value || "#315BD8";
@@ -9168,7 +9645,7 @@
     const strategyProof = $("#style-strategy-proof");
     if (strategyProof) {
       const captionLabels = { semantic: "语义切分", sentence: "完整句切分" };
-      const presetLabels = { clear_outline: "清晰描边", cinematic_shadow: "电影阴影", clean_minimal: "极简阅读", bold_drama: "强力戏剧", reader_focus: "阅读聚焦", soft_box: "柔和底板", word_pop_sync: "逐词弹出", romance_glow: "浪漫柔光", suspense_noir: "悬疑黑金", confession_clean: "对白清透", golden_hook: "金色钩子", midnight_reader: "午夜阅读", minimal_bottom: "底部极简" };
+      const presetLabels = { clear_outline: "清晰描边", cinematic_shadow: "电影阴影", clean_minimal: "极简阅读", bold_drama: "强力戏剧", reader_focus: "阅读聚焦", soft_box: "柔和底板", romance_glow: "浪漫柔光", suspense_noir: "悬疑黑金", confession_clean: "对白清透", golden_hook: "金色钩子", midnight_reader: "午夜阅读" };
       const animationLabels = { none: "字幕无动画", fade: "字幕淡入", soft_pop: "字幕轻弹", rise: "字幕上浮", mask_reveal: "遮罩揭示", typewriter: "逐字显现" };
       const renderLabels = { speed: "速度优先", quality: "质量优先", compatibility: "兼容模式" };
       const coverLabel = coverAnimationCatalog[coverAnimation]?.label || coverAnimationCatalog.gentle_push.label;
@@ -10291,6 +10768,10 @@
 
     $$('[data-view="styles"] input, [data-view="styles"] select').forEach((control) =>
       control.addEventListener("input", () => {
+        if (["intro-card-preset", "subtitle-preset", "code-card-preset", "outro-card-preset"].includes(control.id)) {
+          applyStylePreset(styleCategoryForControl(control.id), control.value);
+          return;
+        }
         if (control.id === "cover-animation") {
           setStyleEditorPanel("outro");
           setStylePreviewScene("outro");

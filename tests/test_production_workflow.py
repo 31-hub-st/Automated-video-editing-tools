@@ -17,6 +17,17 @@ from storyforge.models import JobStatus, PlatformProfile, RenderJob
 
 
 class ProductionWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Workflow tests validate durable records, leases, retries and shutdown
+        # ordering.  They must not inherit the host workstation's current disk
+        # pressure; resource admission has a dedicated governance test module.
+        admission_patch = patch(
+            "storyforge.worker.default_heavy_job_admission",
+            return_value={"allowed": True, "reason": "", "message": ""},
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+
     def _wait_for(self, api: StoryForgeApi, expected: set[str]) -> list[dict]:
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:

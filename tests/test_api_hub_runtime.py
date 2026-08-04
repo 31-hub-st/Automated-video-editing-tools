@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from storyforge.api import StoryForgeApi
 from storyforge.config import SettingsRepository
-from storyforge.hub import HubRemoteError
+from storyforge.hub import HubAuthenticationError, HubRemoteError
 from storyforge.models import AppSettings, JobStatus, PlatformProfile, RenderJob
 from storyforge.pipeline import PipelineRunner, job_workspace_directory
 from storyforge.providers.text import TextRequest, TextResult
@@ -41,6 +41,33 @@ class ApiHubRuntimeTests(unittest.TestCase):
         if self.host_api is not None:
             self.host_api._shutdown()
         self.temporary.cleanup()
+
+    def test_stale_activation_failure_cannot_disconnect_newer_hub_client(self) -> None:
+        repository = SettingsRepository(self.root / "activation-race-client")
+        repository.save(AppSettings(), [], [])
+        self.client_api = StoryForgeApi(repository=repository)
+
+        newer_client = object()
+
+        class RejectedStaleClient:
+            authentication_failure_callback = None
+
+            @staticmethod
+            def verify_identity() -> dict:
+                raise HubAuthenticationError(
+                    401,
+                    "device_session_revoked",
+                    "the stale workstation token was revoked",
+                )
+
+        stale_client = RejectedStaleClient()
+        with self.client_api._hub_client_lock:
+            self.client_api._hub_client = newer_client  # type: ignore[assignment]
+
+        with self.assertRaises(HubAuthenticationError):
+            self.client_api._activate_hub_client(stale_client)  # type: ignore[arg-type]
+
+        self.assertIs(self.client_api._hub_client_snapshot(), newer_client)
 
     def test_hub_status_prefers_real_lan_address_over_virtual_adapter(self) -> None:
         values = [
@@ -1258,6 +1285,7 @@ class ApiHubRuntimeTests(unittest.TestCase):
                     "excerpt": "Last night the telephone rang.",
                     "language": language,
                     "voice_name": "Heart",
+                    "selection_key": "stable-voice-key",
                 }
             ]
 
@@ -1267,6 +1295,10 @@ class ApiHubRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(generated["ok"], generated)
         self.assertEqual(generated["data"]["candidates"][0]["voice_id"], "af_heart")
+        self.assertEqual(
+            generated["data"]["candidates"][0]["selection_key"],
+            "stable-voice-key",
+        )
         remote = self.host_api._catalog.get_novel(novel["id"])
         remote_candidate = remote["metadata"]["voice_candidates"][0]
         self.assertTrue(

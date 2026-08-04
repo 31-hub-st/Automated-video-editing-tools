@@ -36,6 +36,17 @@ def _jobs(platform: PlatformProfile, *identities: str) -> list[RenderJob]:
 
 
 class JobQueueGovernanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Tests that need a degraded/faulted resource state install their own
+        # admission function below.  All other governance scenarios should not
+        # inherit the developer machine's live disk pressure.
+        admission_patch = patch(
+            "storyforge.worker.default_heavy_job_admission",
+            return_value={"allowed": True, "reason": "", "message": ""},
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+
     def test_pause_finishes_current_job_without_claiming_the_next(self) -> None:
         platform = PlatformProfile(id="platform-1", name="NovelBox")
         entered = threading.Event()

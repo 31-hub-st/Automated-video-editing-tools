@@ -16,6 +16,7 @@ from storyforge.catalog import (
     PromoCodeLimitError,
     SCHEMA_VERSION,
     installation_id_sha256,
+    normalize_portable_device_config,
 )
 
 
@@ -177,6 +178,27 @@ class DeviceManagementTests(CatalogTestCase):
             },
             actor_user_id=self.worker["id"],
         )["device"]
+
+    def test_portable_config_accepts_and_normalizes_retired_subtitle_presets(self) -> None:
+        word = normalize_portable_device_config(
+            {
+                "subtitle_preset": "word_pop_sync",
+                "subtitle_word_mode": "off",
+                "subtitle": {"active_color": "#12abef"},
+            }
+        )
+        minimal = normalize_portable_device_config(
+            {
+                "subtitle_preset": "minimal_bottom",
+                "subtitle": {"bottom_margin": 275},
+            }
+        )
+
+        self.assertEqual(word["subtitle_preset"], "clear_outline")
+        self.assertEqual(word["subtitle_word_mode"], "single")
+        self.assertEqual(word["subtitle"]["active_color"], "#12ABEF")
+        self.assertEqual(minimal["subtitle_preset"], "clear_outline")
+        self.assertEqual(minimal["subtitle"]["bottom_margin"], 275)
 
     def test_registration_reuses_installation_not_name_and_device_can_be_managed(self) -> None:
         first = self.register_device("installation-one")
@@ -1326,6 +1348,7 @@ Three."""
             "excerpt": "The phone rang at midnight.",
             "language": "en",
             "voice_name": "Heart",
+            "selection_key": "stable-voice-key",
         }
 
         with_candidates = self.catalog.save_novel_voice_state(
@@ -1345,6 +1368,10 @@ Three."""
         self.assertEqual(
             with_candidates["metadata"]["voice_candidates"][0]["voice_id"],
             "af_heart",
+        )
+        self.assertEqual(
+            with_candidates["metadata"]["voice_candidates"][0]["selection_key"],
+            "stable-voice-key",
         )
         self.assertEqual(locked["metadata"]["locked_voice_id"], "af_heart")
         self.assertEqual(locked["metadata"]["editorial_note"], "must survive")
@@ -1370,6 +1397,27 @@ Three."""
                     ]
                 },
             )
+
+    def test_voice_state_still_accepts_candidates_from_older_clients(self) -> None:
+        novel = self.import_story()["novel"]
+
+        saved = self.catalog.save_novel_voice_state(
+            novel["id"],
+            {
+                "voice_candidates": [
+                    {
+                        "profile": "warm",
+                        "label": "Warm",
+                        "provider": "local_kokoro",
+                        "voice_id": "af_bella",
+                    }
+                ]
+            },
+        )
+
+        candidate = saved["metadata"]["voice_candidates"][0]
+        self.assertEqual(candidate["voice_id"], "af_bella")
+        self.assertEqual(candidate["selection_key"], "")
 
 
 class BindingAndPromoCodeTests(CatalogTestCase):

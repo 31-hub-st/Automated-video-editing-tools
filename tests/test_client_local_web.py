@@ -130,9 +130,22 @@ class ClientLocalWebTests(unittest.TestCase):
         )
 
     def _local_session(self) -> tuple[str, str, dict]:
-        with self._request(self.client_url, "/web/api/session") as response:
-            payload = self._json(response)
-            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+        try:
+            with self._request(self.client_url, "/web/api/session") as response:
+                payload = self._json(response)
+                cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+        except HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            error.close()
+            hub_status = (
+                self.client_api._hub_status_value()
+                if self.client_api is not None
+                else {}
+            )
+            self.fail(
+                "local session request failed: "
+                f"HTTP {error.code}; body={body}; hub_status={hub_status}"
+            )
         self.assertTrue(payload["ok"], payload)
         return cookie, payload["data"]["csrf_token"], payload["data"]
 

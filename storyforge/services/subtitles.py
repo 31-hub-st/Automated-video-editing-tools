@@ -27,6 +27,11 @@ PathLike = str | os.PathLike[str]
 # preserves the proven TikTok action-rail boundary instead of gaining visual
 # width by drifting back under the platform controls.
 _STORY_SAFE_HORIZONTAL = 188
+# The approved cover-led intro is intentionally wider than captions/search
+# cards.  Its opaque panel may approach the frame edge, while all readable
+# copy and the cover remain inset by the panel padding.  A 76px rail yields a
+# centered 82-86% card at 1080p without crossing the approved intro safe area.
+_COVER_SPLIT_SAFE_HORIZONTAL = 76
 _STORY_SAFE_TOP = 150
 _STORY_SAFE_BOTTOM = 360
 _STORY_REFERENCE_WIDTH = 1080
@@ -134,6 +139,7 @@ class AssStyleConfig:
     intro_radius: int = 32
     intro_text_alignment: str = "center"
     intro_max_lines: int = 5
+    intro_layout: str = "standard"
     intro_animation: str = "fade_rise"
     outro_font_name: str = "Arial"
     outro_title_font_size: int = 58
@@ -215,6 +221,9 @@ class AssStyleConfig:
         ).strip().casefold()
         if intro_animation not in INTRO_ANIMATIONS:
             intro_animation = "fade_rise"
+        intro_layout = str(self.intro_layout or "standard").strip().casefold()
+        if intro_layout not in {"standard", "cover_split", "cover_split_noir"}:
+            intro_layout = "standard"
         word_display_mode = str(self.word_display_mode or "").strip().casefold()
         if word_display_mode not in {"off", "cumulative", "single"}:
             word_display_mode = "cumulative" if self.word_sync_enabled else "off"
@@ -276,7 +285,7 @@ class AssStyleConfig:
             ),
             intro_border_width=_clamp_int(self.intro_border_width, 0, 12),
             intro_shadow_opacity=_clamp_float(self.intro_shadow_opacity, 0.0, 0.8),
-            intro_width_percent=_clamp_float(self.intro_width_percent, 40.0, 82.0),
+            intro_width_percent=_clamp_float(self.intro_width_percent, 40.0, 86.0),
             intro_position_x_percent=_clamp_float(
                 self.intro_position_x_percent, 20.0, 80.0
             ),
@@ -287,6 +296,7 @@ class AssStyleConfig:
             intro_radius=_clamp_int(self.intro_radius, 0, 72),
             intro_text_alignment=_safe_alignment(self.intro_text_alignment),
             intro_max_lines=_clamp_int(self.intro_max_lines, 2, 8),
+            intro_layout=intro_layout,
             intro_animation=intro_animation,
             outro_title_font_size=_clamp_int(self.outro_title_font_size, 28, 96),
             outro_font_name=_safe_font_name(self.outro_font_name),
@@ -319,7 +329,9 @@ _CHAPTER_RE = re.compile(
     r"(?:\s*[:\-–—].*)?|第\s*[一二三四五六七八九十百千零〇\d]+\s*[章节部])\s*$",
     re.IGNORECASE,
 )
-_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?。！？])\s+")
+_SENTENCE_BOUNDARY_RE = re.compile(
+    r"(?<=[.!?。！？])\s+|(?<=[。！？])(?=\S)"
+)
 _SEMANTIC_CONJUNCTIONS = frozenset(
     {
         "although",
@@ -1407,6 +1419,24 @@ def _template_style_line(config: AssStyleConfig, name: str) -> str:
             0.0,
             _alignment_number(config.intro_text_alignment, vertical="middle"),
         ),
+        "IntroTagline": (
+            max(round(18 * layout_scale), round(config.intro_label_font_size * 0.72)),
+            config.intro_label_color,
+            config.intro_background_color,
+            0,
+            0.0,
+            0.0,
+            7,
+        ),
+        "IntroCode": (
+            max(round(22 * layout_scale), round(config.intro_label_font_size * 0.86)),
+            config.card_text_color,
+            config.card_background_color,
+            -1,
+            0.0,
+            0.0,
+            5,
+        ),
         "IntroSummary": (
             max(round(config.intro_body_font_size * layout_scale), round(config.subtitle_font_size * 0.58)),
             config.intro_body_color,
@@ -1528,6 +1558,34 @@ def _card_text_width(text: str) -> int:
     return sum(_card_character_width(character) for character in text)
 
 
+def _code_character_em_width(character: str) -> float:
+    """Return a conservative bold Arial width for one search-code glyph."""
+
+    if not character or unicodedata.combining(character):
+        return 0.0
+    if unicodedata.east_asian_width(character) in {"W", "F"}:
+        return 1.05
+    if character in "WMwm@#%&":
+        return 1.05
+    if character.isupper():
+        return 0.82
+    if character.isdigit():
+        return 0.66
+    if character in "ilI|!.,:;'`\"()[]{}":
+        return 0.38
+    if character.isspace():
+        return 0.34
+    if character in "-_+/\\":
+        return 0.56
+    if character.islower():
+        return 0.68
+    return 0.78
+
+
+def _code_text_em_width(text: str) -> float:
+    return sum(_code_character_em_width(character) for character in str(text or ""))
+
+
 def _wrap_card_copy(text: str, *, width: int) -> list[str]:
     """Wrap prose at words and East-Asian character boundaries.
 
@@ -1583,6 +1641,600 @@ def _fit_card_lines(text: str, *, width: int, max_lines: int) -> str:
         final = final[:-1].rstrip()
     fitted[-1] = (final or fitted[-1][:1]) + "…"
     return r"\N".join(fitted)
+
+
+def _split_intro_card_copy(text: str) -> tuple[str, str]:
+    """Split one synopsis into two cover-side reading blocks.
+
+    The split is deterministic and sentence-aware.  A single long sentence is
+    divided near the first forty percent at a word boundary, so both regions
+    remain useful without repeating or dropping any source copy.
+    """
+
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return "", ""
+    sentences = [part.strip() for part in _SENTENCE_BOUNDARY_RE.split(normalized) if part.strip()]
+    target = max(28, round(_card_text_width(normalized) * 0.40))
+    if len(sentences) > 1:
+        lead: list[str] = []
+        used = 0
+        for sentence in sentences[:-1]:
+            sentence_width = _card_text_width(sentence)
+            if lead and used + 1 + sentence_width > target:
+                break
+            lead.append(sentence)
+            used += sentence_width + (1 if used else 0)
+        if not lead:
+            lead.append(sentences[0])
+        boundaries = list(_SENTENCE_BOUNDARY_RE.finditer(normalized))
+        boundary_index = len(lead) - 1
+        if boundary_index < len(boundaries):
+            boundary = boundaries[boundary_index]
+            upper = normalized[: boundary.start()].strip()
+            lower = normalized[boundary.end() :].strip()
+        else:
+            upper = normalized
+            lower = ""
+        if lower:
+            return upper, lower
+
+    desired = max(1, min(len(normalized) - 1, round(len(normalized) * 0.40)))
+    candidates = [index for index, char in enumerate(normalized) if char.isspace()]
+    if candidates:
+        split_at = min(candidates, key=lambda index: abs(index - desired))
+    else:
+        split_at = desired
+    upper = normalized[:split_at].strip()
+    lower = normalized[split_at:].strip()
+    return (upper or normalized, lower)
+
+
+def _intro_card_copy_size(text: str) -> str:
+    """Classify synopsis length using the same three tiers as the live preview."""
+
+    normalized = " ".join(str(text or "").split())
+    compact_script = bool(
+        re.search(r"[\u2e80-\u9fff\u3040-\u30ff\uac00-\ud7af]", normalized)
+    )
+    units = len(normalized) if compact_script else len(normalized.split())
+    if units <= (22 if compact_script else 9):
+        return "short"
+    if units <= (36 if compact_script else 15):
+        return "medium"
+    return "long"
+
+
+@dataclass(frozen=True)
+class CoverSplitGeometry:
+    """Final, clamped cover-card geometry shared by ASS and FFmpeg overlays."""
+
+    play_res_x: int
+    play_res_y: int
+    safe_left: int
+    safe_top: int
+    safe_bottom: int
+    panel_x: int
+    panel_y: int
+    panel_width: int
+    panel_height: int
+    padding: int
+    header_height: int
+    content_gap: int
+    header_y: int
+    platform_x: int
+    tagline_y: int
+    platform_logo_x_percent: float
+    platform_logo_y_percent: float
+    code_chip_x: int
+    code_chip_y: int
+    code_chip_width: int
+    code_chip_height: int
+    code_font_size: int
+    upper_x: int
+    upper_y: int
+    upper_text_x: int
+    upper_text_width: int
+    upper_text_height: int
+    upper_height: int
+    lower_text_x: int
+    lower_text_width: int
+    lower_text_height: int
+    lower_y: int
+    content_height: int
+    accent_width: int
+    accent_height: int
+    cover_center_x: float
+    cover_center_y: float
+    cover_width: int
+    cover_height: int
+    cover_rotation_degrees: float
+    cover_footprint_left: float
+    cover_footprint_top: float
+    cover_footprint_right: float
+    cover_footprint_bottom: float
+    fitted_upper: str
+    fitted_lower: str
+
+    @property
+    def cover_center_x_percent(self) -> float:
+        return self.cover_center_x * 100.0 / self.play_res_x
+
+    @property
+    def cover_center_y_percent(self) -> float:
+        return self.cover_center_y * 100.0 / self.play_res_y
+
+    @property
+    def cover_width_percent(self) -> float:
+        return self.cover_width * 100.0 / self.play_res_x
+
+    @property
+    def cover_height_percent(self) -> float:
+        return self.cover_height * 100.0 / self.play_res_y
+
+
+def resolve_cover_split_geometry(
+    config: AssStyleConfig,
+    intro_card_text: str,
+    *,
+    code: str = "",
+    cover_present: bool = True,
+) -> CoverSplitGeometry:
+    """Resolve the one cover-split layout contract used by every renderer.
+
+    The requested editor position is applied first and then clamped to the
+    TikTok-safe canvas.  All derived media positions come from that final panel
+    rectangle, so long copy and extreme editor values cannot make the ASS card,
+    platform logo and real cover image drift apart.
+    """
+
+    style = config.safe()
+    scale_x = style.play_res_x / _STORY_REFERENCE_WIDTH
+    scale_y = style.play_res_y / _STORY_REFERENCE_HEIGHT
+    layout_scale = min(scale_x, scale_y)
+    safe_left = round(_COVER_SPLIT_SAFE_HORIZONTAL * scale_x)
+    safe_bottom = round(_STORY_SAFE_BOTTOM * scale_y)
+    safe_top = round(_STORY_SAFE_TOP * scale_y)
+    safe_width = style.play_res_x - 2 * safe_left
+    panel_width = min(
+        safe_width,
+        round(style.play_res_x * style.intro_width_percent / 100.0),
+    )
+    panel_x = _safe_panel_x(
+        style.play_res_x,
+        panel_width,
+        style.intro_position_x_percent,
+        safe_left,
+    )
+
+    requested_padding = max(10, round(style.intro_padding * layout_scale))
+    padding = min(
+        requested_padding,
+        max(10, round(panel_width * 0.14)),
+        max(10, round(72 * layout_scale)),
+    )
+    header_height = max(
+        round(86 * scale_y),
+        round(style.intro_label_font_size * 2.1 * layout_scale),
+    )
+    content_gap = max(10, round(22 * layout_scale))
+    noir_layout = style.intro_layout == "cover_split_noir"
+    cover_rotation = -5.0 if noir_layout and cover_present else 0.0
+    rotation = math.radians(abs(cover_rotation))
+    footprint_width_factor = math.cos(rotation) + 1.38 * math.sin(rotation)
+    footprint_height_factor = math.sin(rotation) + 1.38 * math.cos(rotation)
+    minimum_text_width = max(
+        round(120 * scale_x),
+        round(panel_width * 0.30),
+    )
+    maximum_footprint_width = max(
+        2,
+        panel_width - 2 * padding - content_gap - minimum_text_width,
+    )
+    copy_size = _intro_card_copy_size(intro_card_text)
+    cover_scale = {"short": 0.72, "medium": 0.86, "long": 1.0}[copy_size]
+    desired_cover_width = round(
+        max(
+            round((176 if noir_layout else 190) * scale_x),
+            round(panel_width * (0.35 if noir_layout else 0.36)),
+        )
+        * cover_scale
+    )
+    cover_width = (
+        max(
+            2,
+            min(
+                desired_cover_width,
+                math.floor(maximum_footprint_width / footprint_width_factor),
+            ),
+        )
+        if cover_present
+        else 0
+    )
+    cover_height = max(2, round(cover_width * 1.38)) if cover_present else 0
+    cover_footprint_width = (
+        cover_width * math.cos(rotation) + cover_height * math.sin(rotation)
+    )
+    cover_footprint_height = (
+        cover_width * math.sin(rotation) + cover_height * math.cos(rotation)
+    )
+
+    accent_width = max(3, round(7 * scale_x))
+    summary_indent = accent_width + max(8, round(18 * scale_x))
+    cover_gap = content_gap if cover_present else 0
+    text_column_width_px = max(
+        1,
+        math.floor(
+            panel_width
+            - 2 * padding
+            - cover_gap
+            - cover_footprint_width
+            - summary_indent
+        ),
+    )
+    lower_text_width_px = text_column_width_px
+    summary_font_size = max(
+        round(style.intro_body_font_size * layout_scale),
+        round(style.subtitle_font_size * 0.58),
+    )
+    upper_copy, lower_copy = _split_intro_card_copy(intro_card_text)
+    upper_width = max(
+        8,
+        round(text_column_width_px / max(1.0, summary_font_size * 0.53)),
+    )
+    lower_width = max(
+        8,
+        round(lower_text_width_px / max(1.0, summary_font_size * 0.53)),
+    )
+    upper_lines_limit = max(2, min(4, style.intro_max_lines // 2 + 1))
+    lower_lines_limit = max(1, style.intro_max_lines - upper_lines_limit)
+    line_height = max(round(39 * scale_y), round(summary_font_size * 1.28))
+    maximum_panel_height = min(
+        round(1050 * scale_y),
+        style.play_res_y - safe_top - safe_bottom,
+    )
+
+    def fit_copy(
+        upper_limit: int,
+        lower_limit: int,
+    ) -> tuple[str, str, int, int, int, int]:
+        fitted_upper = _fit_card_lines(
+            upper_copy,
+            width=upper_width,
+            max_lines=upper_limit,
+        )
+        fitted_lower = _fit_card_lines(
+            lower_copy,
+            width=lower_width,
+            max_lines=lower_limit,
+        )
+        upper_line_count = (
+            max(1, fitted_upper.count(r"\N") + 1) if fitted_upper else 0
+        )
+        lower_line_count = (
+            max(1, fitted_lower.count(r"\N") + 1) if fitted_lower else 0
+        )
+        upper_text_height = upper_line_count * line_height
+        lower_height = lower_line_count * line_height
+        text_stack_height = (
+            upper_text_height
+            + (content_gap if fitted_lower else 0)
+            + lower_height
+        )
+        content_height = max(
+            math.ceil(cover_footprint_height),
+            text_stack_height,
+        )
+        required_height = (
+            2 * padding
+            + header_height
+            + content_gap
+            + content_height
+        )
+        return (
+            fitted_upper,
+            fitted_lower,
+            upper_text_height,
+            lower_height,
+            content_height,
+            required_height,
+        )
+
+    (
+        fitted_upper,
+        fitted_lower,
+        upper_text_height,
+        lower_text_height,
+        content_height,
+        required_height,
+    ) = fit_copy(upper_lines_limit, lower_lines_limit)
+    while required_height > maximum_panel_height and (
+        lower_lines_limit > 1 or upper_lines_limit > 2
+    ):
+        if lower_lines_limit > 1:
+            lower_lines_limit -= 1
+        else:
+            upper_lines_limit -= 1
+        (
+            fitted_upper,
+            fitted_lower,
+            upper_text_height,
+            lower_text_height,
+            content_height,
+            required_height,
+        ) = fit_copy(upper_lines_limit, lower_lines_limit)
+
+    panel_height = max(
+        round(430 * scale_y),
+        min(maximum_panel_height, required_height),
+    )
+    requested_y = round(style.play_res_y * style.intro_position_y_percent / 100.0)
+    maximum_panel_y = max(
+        safe_top,
+        style.play_res_y - safe_bottom - panel_height,
+    )
+    panel_y = max(safe_top, min(maximum_panel_y, requested_y))
+
+    upper_x = panel_x + padding
+    upper_y = panel_y + padding + header_height + content_gap
+    upper_text_x = upper_x + summary_indent
+    lower_text_x = upper_text_x
+    cover_footprint_right = panel_x + panel_width - padding
+    cover_footprint_left = cover_footprint_right - cover_footprint_width
+    cover_footprint_top = float(
+        upper_y + max(0, (content_height - cover_footprint_height) / 2.0)
+    )
+    cover_footprint_bottom = cover_footprint_top + cover_footprint_height
+    cover_center_x = (cover_footprint_left + cover_footprint_right) / 2.0
+    cover_center_y = (cover_footprint_top + cover_footprint_bottom) / 2.0
+    lower_y = upper_y + upper_text_height + (content_gap if fitted_lower else 0)
+    accent_height = max(
+        round(54 * scale_y),
+        min(max(upper_text_height, round(54 * scale_y)), round(118 * scale_y)),
+    )
+
+    code_copy = f'Search "{str(code or "").strip()}"'
+    code_copy_em_width = max(0.1, _code_text_em_width(code_copy))
+    base_code_font_size = max(
+        round(22 * layout_scale),
+        round(style.intro_label_font_size * 0.86 * layout_scale),
+    )
+    code_chip_horizontal_padding = max(8, round(10 * scale_x))
+    code_chip_measurement_safety = max(4, round(12 * scale_x))
+    maximum_code_chip_width = max(
+        1,
+        min(
+            panel_width - 2 * padding,
+            round(panel_width * 0.60),
+        ),
+    )
+    desired_code_chip_width = max(
+        round(224 * scale_x),
+        round(
+            code_copy_em_width * base_code_font_size
+            + 2 * code_chip_horizontal_padding
+            + code_chip_measurement_safety
+        ),
+    )
+    code_chip_width = min(maximum_code_chip_width, desired_code_chip_width)
+    available_code_text_width = max(
+        1,
+        code_chip_width - 2 * code_chip_horizontal_padding,
+    )
+    code_font_size = max(
+        round(6 * layout_scale),
+        min(
+            base_code_font_size,
+            math.floor(available_code_text_width / code_copy_em_width),
+        ),
+    )
+    code_chip_height = max(
+        round(54 * scale_y),
+        round(style.intro_label_font_size * 1.6 * layout_scale),
+    )
+    code_chip_x = panel_x + panel_width - padding - code_chip_width
+    code_chip_y = panel_y + padding
+
+    logo_box = max(24, round(style.play_res_x * (64 / _STORY_REFERENCE_WIDTH)))
+    desired_logo_left = panel_x + padding
+    desired_logo_center = desired_logo_left + logo_box / 2.0
+    desired_header_y = panel_y + padding + round(header_height * 0.28)
+    desired_logo_top = desired_header_y - logo_box / 2.0
+    logo_x_percent = _clamp_float(
+        desired_logo_center * 100.0 / style.play_res_x,
+        10.0,
+        90.0,
+    )
+    logo_y_percent = _clamp_float(
+        desired_logo_top * 100.0 / style.play_res_y,
+        5.0,
+        60.0,
+    )
+    requested_logo_center = round(style.play_res_x * logo_x_percent / 100.0)
+    logo_safe_margin = round(_STORY_SAFE_HORIZONTAL * scale_x)
+    logo_left = max(
+        logo_safe_margin,
+        min(
+            style.play_res_x - logo_safe_margin - logo_box,
+            requested_logo_center - round(logo_box / 2),
+        ),
+    )
+    logo_top = max(
+        safe_top,
+        min(
+            style.play_res_y - safe_bottom - logo_box,
+            round(style.play_res_y * logo_y_percent / 100.0),
+        ),
+    )
+    header_y = logo_top + round(logo_box / 2)
+    platform_x = logo_left + logo_box
+    tagline_y = header_y + round(34 * scale_y)
+
+    return CoverSplitGeometry(
+        play_res_x=style.play_res_x,
+        play_res_y=style.play_res_y,
+        safe_left=safe_left,
+        safe_top=safe_top,
+        safe_bottom=safe_bottom,
+        panel_x=panel_x,
+        panel_y=panel_y,
+        panel_width=panel_width,
+        panel_height=panel_height,
+        padding=padding,
+        header_height=header_height,
+        content_gap=content_gap,
+        header_y=header_y,
+        platform_x=platform_x,
+        tagline_y=tagline_y,
+        platform_logo_x_percent=logo_x_percent,
+        platform_logo_y_percent=logo_y_percent,
+        code_chip_x=code_chip_x,
+        code_chip_y=code_chip_y,
+        code_chip_width=code_chip_width,
+        code_chip_height=code_chip_height,
+        code_font_size=code_font_size,
+        upper_x=upper_x,
+        upper_y=upper_y,
+        upper_text_x=upper_text_x,
+        upper_text_width=text_column_width_px,
+        upper_text_height=upper_text_height,
+        upper_height=content_height,
+        lower_text_x=lower_text_x,
+        lower_text_width=lower_text_width_px,
+        lower_text_height=lower_text_height,
+        lower_y=lower_y,
+        content_height=content_height,
+        accent_width=accent_width,
+        accent_height=accent_height,
+        cover_center_x=cover_center_x,
+        cover_center_y=cover_center_y,
+        cover_width=cover_width,
+        cover_height=cover_height,
+        cover_rotation_degrees=cover_rotation,
+        cover_footprint_left=cover_footprint_left,
+        cover_footprint_top=cover_footprint_top,
+        cover_footprint_right=cover_footprint_right,
+        cover_footprint_bottom=cover_footprint_bottom,
+        fitted_upper=fitted_upper,
+        fitted_lower=fitted_lower,
+    )
+
+
+def _cover_split_intro_events(
+    style: AssStyleConfig,
+    *,
+    platform: str,
+    code: str,
+    intro_card_text: str,
+    intro_duration: float,
+    platform_logo_present: bool,
+    cover_present: bool,
+    brand_colour: str,
+) -> list[str]:
+    """Render the approved dark synopsis card while reserving a real cover slot."""
+
+    geometry = resolve_cover_split_geometry(
+        style,
+        intro_card_text,
+        code=code,
+        cover_present=cover_present,
+    )
+    scale_x = style.play_res_x / _STORY_REFERENCE_WIDTH
+    scale_y = style.play_res_y / _STORY_REFERENCE_HEIGHT
+    layout_scale = min(scale_x, scale_y)
+    panel_width = geometry.panel_width
+    panel_height = geometry.panel_height
+    panel_x = geometry.panel_x
+    panel_y = geometry.panel_y
+    padding = geometry.padding
+    radius = round(style.intro_radius * layout_scale)
+    panel_path = _rounded_rect_path(panel_width, panel_height, radius)
+    shadow_path = _rounded_rect_path(panel_width, panel_height, radius)
+    intro_end = seconds_to_ass_time(intro_duration)
+    panel_colour = colour_to_ass(
+        style.intro_background_color,
+        opacity=style.intro_background_opacity,
+    )
+    shadow_colour = colour_to_ass("#05070D", opacity=style.intro_shadow_opacity)
+
+    header_y = geometry.header_y
+    platform_x = geometry.platform_x
+    tagline_y = geometry.tagline_y
+    code_chip_width = geometry.code_chip_width
+    code_chip_height = geometry.code_chip_height
+    code_chip_x = geometry.code_chip_x
+    code_chip_y = geometry.code_chip_y
+    code_chip_path = _rounded_rect_path(
+        code_chip_width,
+        code_chip_height,
+        min(round(style.card_radius * layout_scale), code_chip_height // 2),
+    )
+    upper_x = geometry.upper_x
+    upper_y = geometry.upper_y
+    lower_y = geometry.lower_y
+    accent_width = geometry.accent_width
+    accent_height = geometry.accent_height
+    accent_path = _rounded_rect_path(accent_width, accent_height, accent_width // 2)
+
+    summary_upper = _escape_ass_text(geometry.fitted_upper).replace(r"\\N", r"\N")
+    summary_lower = _escape_ass_text(geometry.fitted_lower).replace(r"\\N", r"\N")
+    platform_copy = _escape_ass_text(platform)
+    tagline_copy = _escape_ass_text("Stories that stay with you")
+    code_copy = _escape_ass_text(f'Search "{str(code or "").strip()}"')
+    events = [
+        "Dialogue: 0,0:00:00.00,"
+        f"{intro_end},TemplateShadow,,0,0,0,,"
+        f"{{\\an7\\pos({panel_x + round(8 * scale_x)},{panel_y + round(12 * scale_y)})"
+        f"\\p1\\1c{shadow_colour}\\bord0\\shad0}}{shadow_path}{{\\p0}}",
+        "Dialogue: 1,0:00:00.00,"
+        f"{intro_end},TemplatePanel,,0,0,0,,"
+        f"{{\\an7\\pos({panel_x},{panel_y})\\p1\\1c{panel_colour}"
+        f"\\3c{colour_to_ass(style.intro_border_color)}\\bord{style.intro_border_width}\\shad0}}"
+        f"{panel_path}{{\\p0}}",
+        "Dialogue: 2,0:00:00.00,"
+        f"{intro_end},TemplateAccent,,0,0,0,,"
+        f"{{\\an7\\pos({upper_x},{upper_y})\\p1\\1c{colour_to_ass(style.intro_label_color)}"
+        f"\\bord0\\shad0}}{accent_path}{{\\p0}}",
+        "Dialogue: 2,0:00:00.00,"
+        f"{intro_end},TemplatePanel,,0,0,0,,"
+        f"{{\\an7\\pos({code_chip_x},{code_chip_y})\\p1"
+        f"\\1c{colour_to_ass(style.card_background_color, opacity=style.card_background_opacity)}"
+        f"\\3c{colour_to_ass(style.card_outline_color)}\\bord{style.card_outline_width}\\shad0}}"
+        f"{code_chip_path}{{\\p0}}",
+        "Dialogue: 4,0:00:00.00,"
+        f"{intro_end},IntroPlatform,,0,0,0,,"
+        f"{{\\an4\\pos({platform_x},{header_y})\\q2}}{platform_copy}",
+        "Dialogue: 4,0:00:00.00,"
+        f"{intro_end},IntroTagline,,0,0,0,,"
+        f"{{\\an7\\pos({platform_x},{tagline_y})\\q2}}{tagline_copy}",
+        "Dialogue: 5,0:00:00.00,"
+        f"{intro_end},IntroCode,,0,0,0,,"
+        f"{{\\an5\\pos({code_chip_x + code_chip_width // 2},{code_chip_y + code_chip_height // 2})"
+        f"\\fs{geometry.code_font_size}\\q2}}"
+        f"{code_copy}",
+    ]
+    if not platform_logo_present:
+        badge_center_x = panel_x + padding + round(24 * scale_x)
+        events.append(
+            "Dialogue: 4,0:00:00.00,"
+            f"{intro_end},IntroBadge,,0,0,0,,"
+            f"{{\\an5\\pos({badge_center_x},{header_y})\\3c{brand_colour}\\4c{brand_colour}}}"
+            f"{_escape_ass_text(platform[:1].upper())}"
+        )
+    if summary_upper:
+        events.append(
+            "Dialogue: 4,0:00:00.00,"
+            f"{intro_end},IntroSummary,,0,0,0,,"
+            f"{{\\an7\\pos({geometry.upper_text_x},{upper_y})\\q2}}"
+            f"{summary_upper}"
+        )
+    if summary_lower:
+        events.append(
+            "Dialogue: 4,0:00:00.00,"
+            f"{intro_end},IntroSummary,,0,0,0,,"
+            f"{{\\an7\\pos({geometry.lower_text_x},{lower_y})\\q2}}{summary_lower}"
+        )
+    return events
 
 
 def _word_tokens(text: str) -> tuple[tuple[str, bool], ...]:
@@ -1720,6 +2372,7 @@ def generate_ass(
     intro_card_duration: float = 5.5,
     final_label: str = "",
     platform_logo_present: bool = False,
+    intro_card_cover_present: bool = True,
     platform_brand_color: str = "",
     config: AssStyleConfig | None = None,
 ) -> str:
@@ -1780,6 +2433,8 @@ def generate_ass(
             "IntroHeadline",
             "IntroBadge",
             "IntroPlatform",
+            "IntroTagline",
+            "IntroCode",
             "IntroSummary",
             "IntroFooter",
         )
@@ -1899,8 +2554,8 @@ def generate_ass(
         events.append(
             "Dialogue: 7,"
             f"{search_times},SearchCard,,0,0,0,,"
-            f"{{\\an{_alignment_number(style.card_alignment, vertical='top')}"
-            f"\\pos({search_text_x},{search_panel_y})"
+            f"{{\\an{_alignment_number(style.card_alignment, vertical='middle')}"
+            f"\\pos({search_text_x},{search_panel_y + search_panel_height // 2})"
             f"\\q2\\fscx{search_scale}\\fscy{search_scale}\\shad0}}"
             f"{rendered_search}"
         )
@@ -1946,7 +2601,23 @@ def generate_ass(
             f"{{\\an8{classic_effect}\\q2}}"
             f"{classic_headline}"
         )
-    if template == "platform_story_card":
+    if template == "platform_story_card" and style.intro_layout in {
+        "cover_split",
+        "cover_split_noir",
+    }:
+        events.extend(
+            _cover_split_intro_events(
+                style,
+                platform=platform,
+                code=code,
+                intro_card_text=intro_card_text,
+                intro_duration=intro_duration,
+                platform_logo_present=platform_logo_present,
+                cover_present=intro_card_cover_present,
+                brand_colour=brand_colour,
+            )
+        )
+    elif template == "platform_story_card":
         panel_width = min(
             safe_width,
             round(style.play_res_x * style.intro_width_percent / 100.0),
@@ -2416,6 +3087,7 @@ def write_ass(
     intro_card_duration: float = 5.5,
     final_label: str = "",
     platform_logo_present: bool = False,
+    intro_card_cover_present: bool = True,
     platform_brand_color: str = "",
     config: AssStyleConfig | None = None,
 ) -> Path:
@@ -2438,6 +3110,7 @@ def write_ass(
         intro_card_duration=intro_card_duration,
         final_label=final_label,
         platform_logo_present=platform_logo_present,
+        intro_card_cover_present=intro_card_cover_present,
         platform_brand_color=platform_brand_color,
         config=config,
     )

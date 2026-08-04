@@ -394,6 +394,18 @@ class CancellableProcessTests(unittest.TestCase):
 
 
 class JobQueueHardCancellationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Hard-cancellation behavior is independent from the workstation's
+        # live disk/memory admission policy.  Keep this suite deterministic on
+        # low-space developer machines while resource gating is tested in its
+        # dedicated governance suite.
+        admission_patch = mock.patch(
+            "storyforge.worker.default_heavy_job_admission",
+            return_value={"allowed": True, "reason": "", "message": ""},
+        )
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+
     def test_shutdown_waits_for_worker_and_rejects_late_work(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -193,7 +193,7 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('id="preview-outro" lang="en-US" hidden aria-hidden="true"', html)
         self.assertIn("function setProductionPreviewScene(scene)", javascript)
         self.assertIn("function productionPreviewSceneForControl(control)", javascript)
-        self.assertIn("function applyProductionCardStyles(root, settings)", javascript)
+        self.assertIn("function applyProductionCardStyles(root, settings,", javascript)
         self.assertIn("function paintOutroCover(container, novel", javascript)
         for control_id in (
             "production-intro-card-enabled",
@@ -209,6 +209,7 @@ class StyleSettingsContractTests(unittest.TestCase):
             self.assertIn(control_id, javascript)
         for preset in (
             "editorial_white",
+            "cover_story_dark",
             "cinematic_dark",
             "romance_soft",
             "minimal_clean",
@@ -222,7 +223,6 @@ class StyleSettingsContractTests(unittest.TestCase):
             "bold_drama",
             "reader_focus",
             "soft_box",
-            "word_pop_sync",
             "brand_focus",
         ):
             self.assertIn(f"preset-{preset}", css)
@@ -1106,7 +1106,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         )
         self.assertIn('id="preview-story-search"', html)
         self.assertNotIn('class="story-ticket-kicker">SEARCH</span>', html)
-        self.assertIn('Platform · Search “123456”', html)
+        self.assertIn('id="preview-story-platform-name">Platform', html)
+        self.assertIn('id="preview-story-search">Search “123456”', html)
         self.assertIn('.video-preview.production-preview > .preview-subtitle', css)
         self.assertIn('.video-preview.style-preview > .preview-subtitle', css)
         self.assertIn("function normalizedSubtitlePreviewLayout", javascript)
@@ -1135,7 +1136,7 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("function normalizedIntroPreviewGeometry", javascript)
         self.assertIn("function applyIntroPreviewGeometry", javascript)
         self.assertGreaterEqual(javascript.count("applyIntroPreviewGeometry("), 3)
-        self.assertIn("centerPercent: 50", javascript)
+        self.assertIn("finitePreviewNumber(intro.position_x_percent, 50)", javascript)
         self.assertIn("introPreviewSafeArea.widthPercent", javascript)
         self.assertIn("transform: translateX(-50%) translateY(18px)", css)
         self.assertIn("-webkit-line-clamp: 2", css)
@@ -1483,6 +1484,7 @@ class StyleSettingsContractTests(unittest.TestCase):
             self.assertIn(f'id="{control_id}"', html)
         for preset in (
             "editorial_white",
+            "cover_story_dark",
             "cinematic_dark",
             "romance_soft",
             "minimal_clean",
@@ -1545,12 +1547,12 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("body.web-runtime .preview-settings { top: 56px", css)
         self.assertIn("align-self: start; max-height: calc(100vh - 36px)", css)
 
-    def test_word_synced_caption_diy_and_batch_override_are_available_to_employees(self) -> None:
+    def test_single_word_caption_diy_and_batch_override_are_available_to_employees(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 
-        self.assertIn('<option value="word_pop_sync">逐词弹出</option>', html)
+        self.assertIn('value="single">单词逐个出现', javascript)
         for control_id in (
             "subtitle-word-sync",
             "subtitle-unread-color",
@@ -1580,6 +1582,144 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('id="production-intro-card-preset"', javascript)
         self.assertIn('id="production-code-card-preset"', javascript)
         self.assertIn('id="production-outro-card-preset"', javascript)
+
+    def test_cover_story_dark_preview_uses_real_cover_brand_code_and_two_copy_regions(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('value="cover_story_dark"', html + javascript)
+        self.assertIn('data-style-preset-value="cover_story_dark"', html)
+        self.assertIn("cover_story_dark:", javascript)
+        self.assertIn("preset-cover_story_dark", css)
+
+        for element_id in (
+            "preview-story-platform-mark",
+            "preview-story-search",
+            "preview-story-cover",
+            "preview-story-copy-primary",
+            "preview-story-copy-secondary",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn('class="story-card-cover"', html)
+        cover_start = html.index('id="preview-story-cover"')
+        cover_end = html.index("</", cover_start)
+        self.assertIn("<img", html[cover_start:cover_end])
+        self.assertLess(
+            html.index('id="preview-story-platform-mark"'),
+            html.index('id="preview-story-copy-primary"'),
+        )
+        self.assertLess(
+            html.index('id="preview-story-search"'),
+            html.index('id="preview-story-copy-primary"'),
+        )
+        self.assertLess(
+            html.index('id="preview-story-copy-primary"'),
+            html.index('id="preview-story-cover"'),
+        )
+        self.assertLess(
+            html.index('id="preview-story-cover"'),
+            html.index('id="preview-story-copy-secondary"'),
+        )
+        self.assertIn("function paintIntroCardCover(", javascript)
+        self.assertIn('applyStylePreset(styleCategoryForControl(control.id), control.value)', javascript)
+        self.assertIn('paintIntroCardCover($("#preview-story-cover"), novel, introCardEnabled)', javascript)
+        self.assertIn("function splitIntroPreviewCopy(", javascript)
+        self.assertIn("function previewCardSentenceBoundaries(", javascript)
+        self.assertIn("compact.slice(0, boundary.start)", javascript)
+        self.assertIn("compact.slice(boundary.end)", javascript)
+        self.assertIn('$("#preview-story-copy-primary")', javascript)
+        self.assertIn('$("#preview-story-copy-secondary")', javascript)
+        self.assertIn("root.dataset.introCopySize =", javascript)
+        for copy_size in ("short", "medium", "long"):
+            self.assertIn(f'[data-intro-copy-size="{copy_size}"]', css)
+        self.assertIn(".story-card-cover > img", css)
+        self.assertIn("object-fit: contain", css)
+        self.assertIn("aspect-ratio:", css)
+        self.assertIn("overflow-wrap: anywhere", css)
+        self.assertIn(".story-card-cover { display: none", css)
+        self.assertIn('[data-intro-preset="cover_story_dark"] .story-card-cover', css)
+        self.assertIn('[data-intro-preset="cover_story_noir"] .story-card-cover', css)
+
+        # Preview geometry follows the renderer's 1080x1920 safe-area
+        # contract. Both approved cards reserve one right-hand real-cover
+        # column across both left-hand synopsis regions.
+        for contract_fragment in (
+            "referenceWidth: 1080",
+            "referenceHeight: 1920",
+            "safeHorizontal: 76",
+            "safeTop: 150",
+            "safeBottom: 360",
+            "coverAspect: 1.38",
+            "Math.round(previewCardTextWidth(compact) * 0.40)",
+            "const coverScale = { short: 0.72, medium: 0.86, long: 1 }[splitCopy.size]",
+            "const coverWidth = coverPresent",
+            "const coverGap = coverPresent ? contentGap : 0",
+            "function resolveCoverSplitPreviewGeometry(",
+            '"--cover-primary-left"',
+            '"--cover-secondary-left"',
+            '"--cover-image-height"',
+            '"--cover-code-left"',
+        ):
+            self.assertIn(contract_fragment, javascript)
+        self.assertIn("const coverFootprintTop = upperY + Math.max(0", javascript)
+        self.assertIn("const codeChipX = panelX + panelWidth - padding - codeChipWidth", javascript)
+        self.assertIn("const codeCopy = coverSplitCodeCopy(code.preview_value)", javascript)
+        self.assertIn('"--cover-code-font-size"', javascript)
+        self.assertIn('"--cover-code-padding"', javascript)
+        self.assertIn("font-size: var(--cover-code-font-size", css)
+        self.assertIn("padding: 0 var(--cover-code-padding", css)
+        self.assertIn("const rotationDegrees = noirLayout ? -5 : 0", javascript)
+        self.assertIn("left: var(--cover-secondary-left)", css)
+        self.assertIn("height: var(--cover-image-height)", css)
+        self.assertIn("transform: rotate(var(--cover-image-rotation))", css)
+        self.assertIn('[data-intro-preset="cover_story_dark"] .story-card-cover { transform: rotate(0deg)', css)
+        self.assertNotIn("grid-area: 2 / 1 / 3 / 3", css)
+        self.assertNotIn('[data-intro-preset="cover_story_dark"][data-intro-copy-size=', css)
+        self.assertNotIn('[data-intro-preset="cover_story_noir"][data-intro-copy-size=', css)
+        self.assertNotIn(".story-summary-card:not(.has-story-cover)::after", css)
+
+        self.assertIn("root.dataset.introCardEnabled = String(introCardEnabled)", javascript)
+        self.assertIn('[data-intro-card-enabled="false"] .story-card-cover', css)
+        self.assertIn('[data-intro-card-enabled="false"] .story-template-intro', css)
+
+        # The selected layout remains fully editable rather than hard-coding a
+        # single colour treatment into the preset implementation.
+        for control_id in (
+            "intro-headline-color",
+            "intro-body-color",
+            "intro-label-color",
+            "intro-background",
+            "intro-border",
+        ):
+            self.assertIn(f'id="{control_id}"', html)
+
+    def test_retired_subtitle_presets_are_migration_only(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+        models = (ROOT / "storyforge" / "models.py").read_text(encoding="utf-8")
+
+        for retired_id in ("word_pop_sync", "minimal_bottom"):
+            self.assertNotIn(f'value="{retired_id}"', html)
+            self.assertNotIn(f'data-style-preset-value="{retired_id}"', html)
+            self.assertNotIn(f"preset-{retired_id}", css)
+            self.assertNotIn(retired_id, javascript)
+
+        migration_start = models.index("RETIRED_SUBTITLE_PRESET_MIGRATIONS")
+        migration_end = models.index(
+            "# Presets are complete style patches", migration_start
+        )
+        migration_block = models[migration_start:migration_end]
+        active_models = models[:migration_start] + models[migration_end:]
+        for retired_id in ("word_pop_sync", "minimal_bottom"):
+            self.assertIn(retired_id, migration_block)
+            self.assertNotIn(retired_id, active_models)
+
+        self.assertIn("normalize_retired_subtitle_settings", migration_block)
+        self.assertIn('if (key === retiredBottomEffect) return "clear_outline"', javascript)
+        self.assertIn('value="single">单词逐个出现', javascript)
+        self.assertIn('wordMode === "single"', javascript)
 
     def test_lan_update_center_supports_host_publish_and_safe_client_apply(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")

@@ -25,6 +25,8 @@ from storyforge.pipeline import (
     _clear_media_decode_cache,
     _decode_media_sample,
     _fit_preview_tts_to_duration,
+    _intro_card_media_options,
+    _preview_subtitle_style,
     _copy_file_atomic,
     _completed_failure_code,
     _cover_outro_enabled,
@@ -40,6 +42,7 @@ from storyforge.pipeline import (
     _should_retry_with_cpu,
     _story_card_final_label,
     _story_card_platform_logo,
+    _subtitle_style,
     assemble_narration_wav,
     group_narration_units,
     job_workspace_directory,
@@ -56,8 +59,10 @@ from storyforge.services.media import (
     MediaError,
     MusicPlan,
     VideoSegment,
+    build_ffmpeg_plan,
 )
 from storyforge.services.quality import QualityReport
+from storyforge.services.subtitles import resolve_cover_split_geometry
 
 
 def _write_wav(
@@ -86,6 +91,136 @@ def _speech_segment(index: int, text: str, path: Path, duration: float) -> Speec
         voice="af_bella",
         provider="fake-tts",
     )
+
+
+class IntroCardMediaGeometryTests(unittest.TestCase):
+    def test_bundled_cover_story_presets_are_large_and_height_adaptive(self) -> None:
+        summaries = (
+            "A hidden photograph changes everything.",
+            (
+                "She finds a hidden photograph and learns her husband has another "
+                "secret life."
+            ),
+            (
+                "On her wedding anniversary she finds a hidden photo album and learns "
+                "her husband has been meeting the same woman in secret for years while "
+                "someone close helped conceal the truth."
+            ),
+        )
+        for preset in ("cover_story_dark", "cover_story_noir"):
+            with self.subTest(preset=preset):
+                settings = AppSettings.from_dict(
+                    {
+                        "video_template": "platform_story_card",
+                        "intro_card_preset": preset,
+                    }
+                )
+                self.assertGreaterEqual(settings.intro_card.width_percent, 82.0)
+                self.assertLessEqual(settings.intro_card.width_percent, 86.0)
+                self.assertEqual(settings.intro_card.body_font_size, 44)
+                self.assertEqual(settings.intro_card.position_y_percent, 27.0)
+                self.assertEqual(settings.intro_card.max_lines, 8)
+                geometries = tuple(
+                    resolve_cover_split_geometry(
+                        _subtitle_style(settings),
+                        summary,
+                        code="B56826",
+                    )
+                    for summary in summaries
+                )
+                widths = tuple(
+                    geometry.panel_width * 100.0 / geometry.play_res_x
+                    for geometry in geometries
+                )
+                self.assertTrue(all(82.0 <= width <= 86.0 for width in widths))
+                heights = tuple(geometry.panel_height for geometry in geometries)
+                self.assertLess(heights[0], heights[1])
+                self.assertLess(heights[1], heights[2])
+                for geometry in geometries:
+                    self.assertGreaterEqual(geometry.panel_y, geometry.safe_top)
+                    self.assertLessEqual(
+                        geometry.panel_y + geometry.panel_height,
+                        geometry.play_res_y - geometry.safe_bottom,
+                    )
+
+        editorial = AppSettings.from_dict({"intro_card_preset": "editorial_white"})
+        self.assertEqual(editorial.intro_card.width_percent, 65.2)
+
+    def test_extreme_cover_split_geometry_is_accepted_by_ffmpeg_plan(self) -> None:
+        settings = AppSettings(video_template="platform_story_card")
+        settings.intro_card.layout = "cover_split"
+        settings.intro_card.width_percent = 82.0
+        settings.intro_card.position_x_percent = 20.0
+        settings.intro_card.position_y_percent = 58.0
+        summary = (
+            "On her wedding anniversary, she finds a hidden photo album. "
+            "Her husband has been meeting the same woman in secret for years. "
+            "The final photograph exposes who helped him hide the truth."
+        )
+        options = _intro_card_media_options(
+            settings,
+            Path("C:/StoryForge/cover.jpg"),
+            intro_card_text=summary,
+        )
+
+        plan = build_ffmpeg_plan(
+            [VideoSegment(Path("C:/StoryForge/video.mp4"), 10.0, 10.0)],
+            Path("C:/StoryForge/voice.wav"),
+            None,
+            Path("C:/StoryForge/captions.ass"),
+            Path("C:/StoryForge/output.mp4"),
+            10.0,
+            platform_logo_path=Path("C:/StoryForge/logo.png"),
+            platform_logo_duration=5.5,
+            **options,
+        )
+
+        self.assertIn("[platform_logo]", plan.filter_complex)
+        self.assertIn("[intro_card_cover]", plan.filter_complex)
+        self.assertGreaterEqual(options["platform_logo_x_percent"], 10.0)
+        self.assertLessEqual(options["platform_logo_y_percent"], 60.0)
+        self.assertEqual(options["intro_card_cover_rotation_degrees"], 0.0)
+
+    def test_preview_and_export_use_the_same_normalized_media_geometry(self) -> None:
+        settings = AppSettings(video_template="platform_story_card")
+        settings.intro_card.layout = "cover_split_noir"
+        settings.intro_card.width_percent = 72.0
+        settings.intro_card.position_x_percent = 80.0
+        settings.intro_card.position_y_percent = 58.0
+        summary = (
+            "She finds proof of his second life. The final photograph exposes "
+            "the person who protected him, and the truth changes everything."
+        )
+        full = _intro_card_media_options(
+            settings,
+            Path("C:/StoryForge/cover.jpg"),
+            intro_card_text=summary,
+            code="B56826",
+            style=_subtitle_style(settings),
+            intro_duration=5.5,
+        )
+        preview = _intro_card_media_options(
+            settings,
+            Path("C:/StoryForge/cover.jpg"),
+            intro_card_text=summary,
+            code="B56826",
+            style=_preview_subtitle_style(settings),
+            intro_duration=4.0,
+        )
+
+        for key in (
+            "platform_logo_x_percent",
+            "platform_logo_y_percent",
+            "intro_card_cover_x_percent",
+            "intro_card_cover_y_percent",
+            "intro_card_cover_width_percent",
+            "intro_card_cover_height_percent",
+        ):
+            self.assertAlmostEqual(full[key], preview[key], delta=0.35)
+        self.assertEqual(full["intro_card_cover_rotation_degrees"], -5.0)
+        self.assertEqual(preview["intro_card_cover_rotation_degrees"], -5.0)
+        self.assertEqual(full["intro_card_cover_duration"], 5.5)
+        self.assertEqual(preview["intro_card_cover_duration"], 4.0)
 
 
 class HeavyResourceSerializationTests(unittest.TestCase):
@@ -2415,6 +2550,61 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(commit_music.call_args.args[1].path, music_path)
             self.assertEqual(progress[0][0], JobStatus.PREFLIGHT)
             self.assertEqual(progress[-1][1], 0.98)
+
+            # The legacy rendered-preview path must follow the same intro-card
+            # switch as a full production.  With the intro card disabled, the
+            # story starts at zero instead of reserving silent/cover time.
+            settings.video_template = "classic"
+            classic_preview_job = replace(
+                job,
+                id="classic-preview-job",
+                batch_id="classic-preview-batch",
+                job_kind="preview",
+                narration_audio_file="",
+            )
+            with (
+                mock.patch(
+                    "storyforge.pipeline.plan_video_segments",
+                    side_effect=planned_segments,
+                ),
+                mock.patch(
+                    "storyforge.pipeline.select_music_asset",
+                    side_effect=planned_music,
+                ),
+                mock.patch(
+                    "storyforge.pipeline.available_encoders",
+                    return_value=["libx264"],
+                ),
+            ):
+                runner(classic_preview_job, platform, lambda *_args: None)
+
+            classic_job_dir = job_workspace_directory(
+                classic_preview_job,
+                root / "render-work",
+            )
+            classic_manifest = json.loads(
+                (
+                    classic_job_dir / ".previews" / "preview-manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                classic_manifest["review_timeline"]["opening_card"]["end_seconds"],
+                0.0,
+            )
+            self.assertEqual(
+                classic_manifest["review_timeline"]["story_body"]["start_seconds"],
+                0.0,
+            )
+            classic_subtitles = (
+                classic_job_dir / ".work" / "preview-subtitles.ass"
+            ).read_text(encoding="utf-8-sig")
+            first_story_cue = next(
+                line
+                for line in classic_subtitles.splitlines()
+                if line.startswith("Dialogue:") and ",Subtitle," in line
+            )
+            self.assertIn("Dialogue: 0,0:00:00.00,", first_story_cue)
+            settings.video_template = "platform_story_card"
 
             failed_pair = replace(
                 job,

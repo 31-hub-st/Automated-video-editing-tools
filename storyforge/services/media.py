@@ -1577,6 +1577,14 @@ def build_ffmpeg_plan(
     platform_logo_duration: float = 5.5,
     platform_logo_x_percent: float = 50.0,
     platform_logo_y_percent: float = 28.645833,
+    intro_card_cover_path: PathLike | None = None,
+    intro_card_cover_start: float = 0.0,
+    intro_card_cover_duration: float = 5.5,
+    intro_card_cover_x_percent: float = 74.0,
+    intro_card_cover_y_percent: float = 35.0,
+    intro_card_cover_width_percent: float = 30.0,
+    intro_card_cover_height_percent: float = 32.0,
+    intro_card_cover_rotation_degrees: float = -4.0,
     video_transition: str = "cut",
 ) -> FFmpegPlan:
     """Build the complete 9:16 narration render command without running it.
@@ -1627,6 +1635,36 @@ def build_ffmpeg_plan(
             raise ValueError("platform_logo_x_percent must be between 10 and 90")
         if not math.isfinite(platform_logo_y_percent) or not 5 <= platform_logo_y_percent <= 60:
             raise ValueError("platform_logo_y_percent must be between 5 and 60")
+    if intro_card_cover_path is not None:
+        if not math.isfinite(intro_card_cover_start) or intro_card_cover_start < 0:
+            raise ValueError("intro_card_cover_start must be non-negative and finite")
+        if not math.isfinite(intro_card_cover_duration) or intro_card_cover_duration <= 0:
+            raise ValueError(
+                "intro_card_cover_duration must be a positive finite number"
+            )
+        if intro_card_cover_start + intro_card_cover_duration > target_duration + 1e-9:
+            raise ValueError(
+                "intro card cover display window cannot exceed target_duration"
+            )
+        for name, value in (
+            ("intro_card_cover_x_percent", intro_card_cover_x_percent),
+            ("intro_card_cover_y_percent", intro_card_cover_y_percent),
+        ):
+            if not math.isfinite(value) or not 0 <= value <= 100:
+                raise ValueError(f"{name} must be between 0 and 100")
+        for name, value in (
+            ("intro_card_cover_width_percent", intro_card_cover_width_percent),
+            ("intro_card_cover_height_percent", intro_card_cover_height_percent),
+        ):
+            if not math.isfinite(value) or not 1 <= value <= 100:
+                raise ValueError(f"{name} must be between 1 and 100")
+        if (
+            not math.isfinite(intro_card_cover_rotation_degrees)
+            or not -15 <= intro_card_cover_rotation_degrees <= 15
+        ):
+            raise ValueError(
+                "intro_card_cover_rotation_degrees must be between -15 and 15"
+            )
 
     effective_cover_path = (
         cover_path
@@ -1732,6 +1770,23 @@ def build_ffmpeg_plan(
                 str(fps),
                 "-i",
                 str(Path(effective_cover_path)),
+            ]
+        )
+    intro_card_cover_index: int | None = None
+    if intro_card_cover_path is not None:
+        intro_card_cover_index = next_input_index
+        next_input_index += 1
+        # This is deliberately independent from ``cover_index``.  The latter
+        # remains the full-screen intro/outro image, while this input is a
+        # small, contain-fitted image inside the opening story card.
+        command.extend(
+            [
+                "-loop",
+                "1",
+                "-framerate",
+                str(fps),
+                "-i",
+                str(Path(intro_card_cover_path)),
             ]
         )
     platform_logo_index: int | None = None
@@ -1845,7 +1900,40 @@ def build_ffmpeg_plan(
             f"[{current_label}]trim=duration={_ffmpeg_number(target_duration)},"
             "setpts=PTS-STARTPTS[joined]"
         )
-    ass_output_label = "subtitled" if platform_logo_index is not None else "vout"
+    has_post_ass_overlay = (
+        intro_card_cover_index is not None or platform_logo_index is not None
+    )
+    ass_output_label = "subtitled" if has_post_ass_overlay else "vout"
+    if intro_card_cover_index is not None:
+        # Keep the complete portrait visible inside a transparent box.  The
+        # box scales with preview/output resolution, and rotation expands the
+        # alpha canvas instead of clipping or stretching the artwork.
+        card_cover_width = max(
+            2,
+            round(width * intro_card_cover_width_percent / 200.0) * 2,
+        )
+        card_cover_height = max(
+            2,
+            round(height * intro_card_cover_height_percent / 200.0) * 2,
+        )
+        card_cover_center_x = round(width * intro_card_cover_x_percent / 100.0)
+        card_cover_center_y = round(height * intro_card_cover_y_percent / 100.0)
+        card_cover_rotation = _ffmpeg_number(
+            math.radians(intro_card_cover_rotation_degrees)
+        )
+        card_cover_start = _ffmpeg_number(intro_card_cover_start)
+        card_cover_end = _ffmpeg_number(
+            intro_card_cover_start + intro_card_cover_duration
+        )
+        graph.append(
+            f"[{intro_card_cover_index}:v:0]fps={fps},"
+            f"scale={card_cover_width}:{card_cover_height}:"
+            "force_original_aspect_ratio=decrease,format=rgba,"
+            f"pad={card_cover_width}:{card_cover_height}:"
+            "(ow-iw)/2:(oh-ih)/2:color=black@0,"
+            f"rotate={card_cover_rotation}:ow=rotw(iw):oh=roth(ih):c=none"
+            "[intro_card_cover]"
+        )
     if platform_logo_index is not None:
         # The brand mark is the visual anchor of the centred story card.  Keep
         # its own box centred on the physical frame (rather than on an
@@ -2168,9 +2256,22 @@ def build_ffmpeg_plan(
             f"[{ass_output_label}]"
         )
 
+    post_ass_label = ass_output_label
+    if intro_card_cover_index is not None:
+        card_cover_output_label = (
+            "intro_card_covered" if platform_logo_index is not None else "vout"
+        )
+        graph.append(
+            f"[{post_ass_label}][intro_card_cover]overlay="
+            f"x='max(0,min(W-w,{card_cover_center_x}-w/2))':"
+            f"y='max(0,min(H-h,{card_cover_center_y}-h/2))':"
+            f"enable='between(t,{card_cover_start},{card_cover_end})':"
+            f"eof_action=pass[{card_cover_output_label}]"
+        )
+        post_ass_label = card_cover_output_label
     if platform_logo_index is not None:
         graph.append(
-            f"[subtitled][platform_logo]overlay={logo_x}:{logo_y}:"
+            f"[{post_ass_label}][platform_logo]overlay={logo_x}:{logo_y}:"
             f"enable='between(t,0,{logo_end})':eof_action=pass[vout]"
         )
 

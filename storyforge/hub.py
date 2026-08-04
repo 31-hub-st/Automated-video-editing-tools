@@ -4112,7 +4112,48 @@ class HubCatalogProxy:
             bound = signature.bind(None, *args, **kwargs)
             parameters = dict(bound.arguments)
             parameters.pop("self", None)
-            return self.client.call(name, parameters)
+            try:
+                return self.client.call(name, parameters)
+            except HubRemoteError as error:
+                # 0.4.7 Hubs validate voice candidates before writing and do
+                # not know the 0.4.8-only stable selection key.  A producer did
+                # not change anything when this field appeared: the new client
+                # generated it.  Retry only that exact, mutation-free schema
+                # rejection with the optional field removed so rolling LAN
+                # upgrades remain usable in either order.
+                if not (
+                    name == "save_novel_voice_state"
+                    and error.status == HTTPStatus.BAD_REQUEST
+                    and error.code == "validation_error"
+                    and "unsupported fields" in error.message
+                    and "selection_key" in error.message
+                ):
+                    raise
+                voice_state = parameters.get("voice_state")
+                if not isinstance(voice_state, Mapping):
+                    raise
+                candidates = voice_state.get("voice_candidates")
+                if not isinstance(candidates, list):
+                    raise
+                legacy_candidates: list[Any] = []
+                removed = False
+                for candidate in candidates:
+                    if not isinstance(candidate, Mapping):
+                        legacy_candidates.append(candidate)
+                        continue
+                    compatible = dict(candidate)
+                    if "selection_key" in compatible:
+                        compatible.pop("selection_key", None)
+                        removed = True
+                    legacy_candidates.append(compatible)
+                if not removed:
+                    raise
+                compatible_parameters = dict(parameters)
+                compatible_parameters["voice_state"] = {
+                    **dict(voice_state),
+                    "voice_candidates": legacy_candidates,
+                }
+                return self.client.call(name, compatible_parameters)
 
         invoke.__name__ = name
         invoke.__qualname__ = f"{type(self).__name__}.{name}"

@@ -1,5 +1,23 @@
 # StoryForge Studio
 
+## 新电脑一键部署
+
+更换 Codex 账号、主电脑或网络后，不需要从旧电脑手工拼装程序。先给 GitHub CLI 授权私有仓库，再让 Codex 读取 [AGENTS.md](AGENTS.md) 和 [新电脑恢复说明](docs/NEW_MACHINE_RECOVERY.md)。
+
+```powershell
+gh auth login --hostname github.com
+gh repo clone 31-hub-st/Automated-video-editing-tools D:\StoryForgeSource
+Set-Location D:\StoryForgeSource
+
+# 新 Hub 主机：管理员 PowerShell
+.\scripts\bootstrap_storyforge.ps1 -Role Hub -RestoreHubData -ReplaceExistingData
+
+# 员工制作电脑：只安装程序
+.\scripts\bootstrap_storyforge.ps1 -Role Employee -InstallRoot D:\StoryForge
+```
+
+正式程序来自 GitHub 最新稳定 Release；Hub 小说库、平台绑定、全部口令、成员和记录来自私有预发布 `hub-state-latest`。两者均进行 SHA-256、大小和 manifest 校验。Hub 快照每次覆盖同名资产，不累计重复文件。API Key 因 Windows 加密机制需要在新主机重新填写；员工素材、成品与缓存不上传 GitHub。
+
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
 当前正式版本：`v1.0.1`

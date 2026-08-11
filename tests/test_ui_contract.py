@@ -16,6 +16,12 @@ class StaticUiAssetContractTests(unittest.TestCase):
         self.assertTrue(theme.is_file())
         self.assertGreater(theme.stat().st_size, 0)
 
+    def test_offline_update_status_does_not_embed_a_stale_release(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('current_version: ""', javascript)
+        self.assertNotIn('current_version: "0.4.0-rc3"', javascript)
+
 
 class StyleSettingsContractTests(unittest.TestCase):
     def test_output_fps_defaults_to_60_and_remains_selectable_per_batch(self) -> None:

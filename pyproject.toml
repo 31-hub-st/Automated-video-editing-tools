@@ -1,3 +1,4 @@
+# StoryForge v1.x source metadata; the application version is read dynamically.
 [build-system]
 requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"

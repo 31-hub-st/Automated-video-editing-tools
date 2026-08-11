@@ -1,3 +1,5 @@
+"""Stable StoryForge v1.x frozen-entry launcher."""
+
 from __future__ import annotations
 
 import ctypes

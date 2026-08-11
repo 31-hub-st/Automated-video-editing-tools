@@ -1,3 +1,4 @@
+# StoryForge v1.x runtime dependencies used by both source and frozen builds.
 imageio-ffmpeg>=0.6,<1
 # Freeze the Windows desktop bridge as one tested set. A newer transitive
 # pythonnet/clr-loader combination must not silently enter an employee build.

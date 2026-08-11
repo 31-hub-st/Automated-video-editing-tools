@@ -1,3 +1,4 @@
+# StoryForge v1.x optional local/multilingual voice runtime.
 -r requirements.txt
 kokoro==0.9.4
 misaki[en,zh]==0.9.4

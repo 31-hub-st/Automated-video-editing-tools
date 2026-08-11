@@ -1,3 +1,4 @@
+# Fast source and contract gate for the current StoryForge v1.x line.
 name: fast-pr
 
 on:
@@ -49,6 +50,23 @@ jobs:
           node --check ui/app.js 2>&1 |
             Tee-Object -FilePath 'test-results/fast-pr/javascript-syntax.log'
           if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed.' }
+          $powerShellFiles = @(
+            'scripts/bootstrap_storyforge.ps1',
+            'scripts/publish_hub_snapshot.ps1',
+            'scripts/verify_storyforge_deployment.ps1'
+          )
+          foreach ($file in $powerShellFiles) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "PowerShell syntax check failed for $file`: $($errors -join '; ')"
+            }
+          }
           git diff --check 2>&1 |
             Tee-Object -FilePath 'test-results/fast-pr/whitespace.log'
           if ($LASTEXITCODE -ne 0) { throw 'Git whitespace check failed.' }
@@ -61,6 +79,7 @@ jobs:
           --output-dir test-results/fast-pr
           -- tests.test_release_gate tests.test_stability_acceptance
           tests.test_production_workflow tests.test_ui_contract
+          tests.test_bootstrap_contract tests.test_startup
 
       - name: Upload fast-gate summary
         if: always()

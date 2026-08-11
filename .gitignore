@@ -39,3 +39,9 @@ render-work/
 *.zip
 *.msi
 *.exe
+
+# Private Hub transfer snapshots are Release assets, never source files.
+*.sfbak
+StoryForge-Hub-Latest.manifest.json
+.bootstrap-*/
+.hub-publish-*/

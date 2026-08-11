@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import run
+from storyforge import __version__
 from storyforge import main as storyforge_main
 from storyforge import system as storyforge_system
 
@@ -812,6 +814,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
             "disable_storyforge_worker.cmd",
             "restore_hub_backup.ps1",
             "restore_hub_backup.cmd",
+            "publish_hub_snapshot.ps1",
+            "verify_storyforge_deployment.ps1",
             "EMPLOYEE_QUICK_START.md",
         ):
             self.assertIn(name, build)
@@ -832,6 +836,8 @@ class StartupDiagnosticsTests(unittest.TestCase):
             "disable_storyforge_worker.cmd",
             "restore_hub_backup.ps1",
             "restore_hub_backup.cmd",
+            "publish_hub_snapshot.ps1",
+            "verify_storyforge_deployment.ps1",
             "run_dev.ps1",
         ):
             content = (project / "scripts" / name).read_bytes()
@@ -870,6 +876,126 @@ class StartupDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result, 0)
         manager.restore_snapshot.assert_called_once_with("verified-backup.sfbak")
         self.assertTrue(json.loads(output.getvalue())["restored"])
+
+    def test_offline_backup_command_uses_external_directory_and_json_output(self) -> None:
+        manager = unittest.mock.Mock()
+        manager.create_snapshot.return_value = {
+            "valid": True,
+            "path": "transfer/snapshot.sfbak",
+        }
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "data"
+            backup_dir = root / "transfer"
+            with (
+                patch(
+                    "storyforge.backup.HubBackupManager",
+                    return_value=manager,
+                ) as factory,
+                patch("storyforge.config.default_data_dir", return_value=data_dir),
+                redirect_stdout(output),
+            ):
+                result = storyforge_main.main(
+                    ["--create-hub-backup", str(backup_dir)]
+                )
+
+        self.assertEqual(result, 0)
+        factory.assert_called_once_with(
+            data_dir.resolve(),
+            backup_dir=backup_dir.resolve(),
+        )
+        manager.create_snapshot.assert_called_once_with(
+            "github_transfer",
+            cleanup=False,
+            deduplicate=False,
+            metadata={
+                "app_version": __version__,
+                "purpose": "github_private_recovery",
+            },
+        )
+        self.assertTrue(json.loads(output.getvalue())["valid"])
+
+    def test_offline_backup_command_does_not_write_to_source_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "authoritative-data"
+            backup_dir = root / "transfer"
+            data_dir.mkdir()
+            database = data_dir / "storyforge-catalog.sqlite3"
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    """
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_migrations VALUES (10, '2026-08-12T00:00:00Z');
+                    CREATE TABLE novels (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+                    INSERT INTO novels(title) VALUES ('Transfer test');
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            settings = data_dir / "settings.json"
+            settings.write_text(
+                json.dumps({"schema_version": 19, "settings": {}}),
+                encoding="utf-8",
+            )
+            original_files = sorted(path.name for path in data_dir.iterdir())
+            original_database = database.read_bytes()
+            original_settings = settings.read_bytes()
+
+            output = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {"STORYFORGE_DATA_DIR": str(data_dir)},
+                ),
+                redirect_stdout(output),
+            ):
+                result = storyforge_main.main(
+                    ["--create-hub-backup", str(backup_dir)]
+                )
+
+            self.assertEqual(result, 0)
+            self.assertTrue(json.loads(output.getvalue())["valid"])
+            self.assertEqual(
+                sorted(path.name for path in data_dir.iterdir()),
+                original_files,
+            )
+            self.assertEqual(database.read_bytes(), original_database)
+            self.assertEqual(settings.read_bytes(), original_settings)
+            self.assertEqual(len(list(backup_dir.glob("*.sfbak"))), 1)
+
+    def test_offline_backup_rejects_source_directory_and_conflicting_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary) / "data"
+            error = io.StringIO()
+            with (
+                patch("storyforge.config.default_data_dir", return_value=data_dir),
+                redirect_stderr(error),
+            ):
+                result = storyforge_main.main(
+                    ["--create-hub-backup", str(data_dir / "hub-backups")]
+                )
+            self.assertEqual(result, 1)
+            self.assertFalse(json.loads(error.getvalue())["ok"])
+
+        with (
+            self.assertRaises(SystemExit),
+            redirect_stderr(io.StringIO()),
+        ):
+            storyforge_main.build_parser().parse_args(
+                [
+                    "--create-hub-backup",
+                    "transfer",
+                    "--restore-hub-backup",
+                    "snapshot.sfbak",
+                ]
+            )
 
     def test_offline_restore_picker_prefers_storyforge_backup_extension(self) -> None:
         project = Path(__file__).resolve().parents[1]

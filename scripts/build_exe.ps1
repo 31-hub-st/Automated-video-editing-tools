@@ -320,6 +320,10 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\enable_storyforge_worker
     -Destination (Join-Path $adminToolsTarget 'enable_storyforge_worker.cmd') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\disable_storyforge_worker.cmd') `
     -Destination (Join-Path $adminToolsTarget 'disable_storyforge_worker.cmd') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\publish_hub_snapshot.ps1') `
+    -Destination (Join-Path $adminToolsTarget 'publish_hub_snapshot.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\verify_storyforge_deployment.ps1') `
+    -Destination (Join-Path $adminToolsTarget 'verify_storyforge_deployment.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\EMPLOYEE_QUICK_START.md') `
     -Destination (Join-Path $bundleRoot 'QUICK_START.md') -Force
 

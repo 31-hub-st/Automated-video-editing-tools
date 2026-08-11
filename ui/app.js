@@ -565,7 +565,9 @@
       output_folder: "D:\\StoryForgeProjects\\output",
     },
     update_status: {
-      current_version: "0.4.0-rc3",
+      // The live runtime always supplies the installed version. Keep the
+      // offline/demo state neutral so a stale release number is never shown.
+      current_version: "",
       available_version: "",
       state: "up_to_date",
       message: "当前已经是主机提供的最新版本。",

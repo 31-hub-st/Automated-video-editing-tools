@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Authoritative PyInstaller specification for StoryForge v1.x releases.
 
 import os
 from pathlib import Path

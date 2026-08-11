@@ -34,12 +34,21 @@ def build_parser() -> argparse.ArgumentParser:
             "localhost worker; write a JSON result and exit"
         ),
     )
-    parser.add_argument(
+    backup = parser.add_mutually_exclusive_group()
+    backup.add_argument(
         "--restore-hub-backup",
         metavar="SNAPSHOT_FILE",
         help=(
             "Replace the offline Hub library/settings with one verified backup "
             "snapshot, create a pre-restore safety snapshot, and exit"
+        ),
+    )
+    backup.add_argument(
+        "--create-hub-backup",
+        metavar="OUTPUT_DIRECTORY",
+        help=(
+            "Create one verified Hub migration snapshot in an external output "
+            "directory and exit"
         ),
     )
     runtime = parser.add_mutually_exclusive_group()
@@ -225,6 +234,50 @@ def _open_existing_worker_window(endpoint: object, *, debug: bool = False) -> in
 def main(argv: list[str] | None = None) -> int:
     global _PROCESS_WORKER_MUTEX
     args = build_parser().parse_args(argv)
+    if args.create_hub_backup:
+        from . import __version__
+        from .backup import HubBackupManager
+        from .config import default_data_dir
+
+        try:
+            data_dir = default_data_dir().resolve()
+            backup_dir = Path(args.create_hub_backup).expanduser().resolve()
+            try:
+                backup_dir.relative_to(data_dir)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "Hub migration backup output must be outside STORYFORGE_DATA_DIR"
+                )
+            result = HubBackupManager(
+                data_dir,
+                backup_dir=backup_dir,
+            ).create_snapshot(
+                "github_transfer",
+                cleanup=False,
+                deduplicate=False,
+                metadata={
+                    "app_version": __version__,
+                    "purpose": "github_private_recovery",
+                },
+            )
+        except Exception as error:  # CLI boundary: report a machine-readable failure.
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error_type": type(error).__name__,
+                        "error": str(error) or type(error).__name__,
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        return 0
     if args.restore_hub_backup:
         from .backup import HubBackupManager
         from .config import default_data_dir

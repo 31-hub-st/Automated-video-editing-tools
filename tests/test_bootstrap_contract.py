@@ -126,6 +126,8 @@ class BootstrapContractTests(unittest.TestCase):
     def test_publisher_keeps_one_private_latest_snapshot_pair(self) -> None:
         self.assertIn("--create-hub-backup", self.publish)
         self.assertIn("Refusing to publish Hub business data to a public repository", self.publish)
+        self.assertIn("$previousErrorActionPreference = $ErrorActionPreference", self.publish)
+        self.assertIn("$existingExitCode = $LASTEXITCODE", self.publish)
         self.assertIn("'release', 'upload', $Tag, '--repo', $Repo, '--clobber'", self.publish)
         self.assertIn("$assets.Count -ne 2", self.publish)
         self.assertIn("repos/$Repo/releases/assets/$($asset.id)", self.publish)

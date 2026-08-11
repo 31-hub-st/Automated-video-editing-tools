@@ -234,12 +234,26 @@ try {
     )
 
     $release = $null
-    $existingText = & $script:GhPath api "repos/$Repo/releases/tags/$Tag" 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # A first publication legitimately returns HTTP 404. Windows PowerShell
+    # can promote native stderr to a terminating NativeCommandError while the
+    # script-wide preference is Stop, so capture this one probe explicitly.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $existingText = & $script:GhPath api "repos/$Repo/releases/tags/$Tag" 2>$null
+        $existingExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($existingExitCode -eq 0) {
         $release = (($existingText | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) | ConvertFrom-Json
         if (-not [bool]$release.prerelease -or [bool]$release.draft) {
             throw "$Tag exists but is not a published prerelease."
         }
+    }
+    elseif ($existingExitCode -ne 1) {
+        throw "Unable to check the existing $Tag release (exit $existingExitCode)."
     }
     else {
         Invoke-Gh -Arguments @(

@@ -160,6 +160,7 @@ class WebApplicationTests(unittest.TestCase):
         (self.ui / "index.html").write_text("<!doctype html><title>Web UI</title>", "utf-8")
         (self.ui / "app.js").write_text("window.webUi = true;", "utf-8")
         (self.ui / "styles.css").write_text("body{color:#123}", "utf-8")
+        (self.ui / "studio-theme.css").write_text("body{accent-color:#456}", "utf-8")
         self.media = self.root / "proof.mp4"
         self.media.write_bytes(b"0123456789abcdef")
         self.catalog = CatalogRepository(
@@ -345,11 +346,13 @@ class WebApplicationTests(unittest.TestCase):
             "/": "<!doctype html><title>Web UI</title>",
             "/app.js": "window.webUi = true;",
             "/styles.css": "body{color:#123}",
+            "/studio-theme.css": "body{accent-color:#456}",
         }
         replacement = {
             "/": "<!doctype html><title>Updated UI</title>",
             "/app.js": "window.webUi = 'updated';",
             "/styles.css": "body{color:#456}",
+            "/studio-theme.css": "body{accent-color:#789}",
         }
 
         for request_path, expected in original.items():
@@ -360,6 +363,7 @@ class WebApplicationTests(unittest.TestCase):
             ("index.html", replacement["/"]),
             ("app.js", replacement["/app.js"]),
             ("styles.css", replacement["/styles.css"]),
+            ("studio-theme.css", replacement["/studio-theme.css"]),
         ):
             (self.ui / filename).write_text(content, encoding="utf-8")
 

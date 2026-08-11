@@ -931,6 +931,7 @@ class LocalWorkerGatewayTests(unittest.TestCase):
             ("index.html", "<!doctype html>"),
             ("app.js", ""),
             ("styles.css", ""),
+            ("studio-theme.css", ""),
         ):
             (ui / name).write_text(body, encoding="utf-8")
         server = ClientLocalWebServer(
@@ -1002,6 +1003,7 @@ class LocalWorkerGatewayTests(unittest.TestCase):
             ("index.html", "<!doctype html>"),
             ("app.js", ""),
             ("styles.css", ""),
+            ("studio-theme.css", ""),
         ):
             (ui / name).write_text(body, encoding="utf-8")
         port = _free_port()
@@ -1043,6 +1045,7 @@ class HostLocalWorkerIntegrationTests(unittest.TestCase):
                     ("index.html", "<!doctype html>"),
                     ("app.js", ""),
                     ("styles.css", ""),
+                    ("studio-theme.css", ""),
                 ):
                     (ui / name).write_text(body, encoding="utf-8")
                 web = api._enable_web_access(ui)

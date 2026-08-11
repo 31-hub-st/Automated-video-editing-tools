@@ -90,6 +90,19 @@ class PackageSmokeTests(unittest.TestCase):
         )
         return entrypoint, ui_root
 
+    def test_packaged_ui_contract_requires_studio_theme(self) -> None:
+        self.assertIn("studio-theme.css", package_smoke.UI_FILES)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ui_root = root / "_internal" / "ui"
+            ui_root.mkdir(parents=True)
+            for name in package_smoke.UI_FILES:
+                if name != "studio-theme.css":
+                    (ui_root / name).write_text(f"asset:{name}", encoding="utf-8")
+
+            with self.assertRaises(package_smoke.PackageSmokeError):
+                package_smoke._find_ui_root(root)
+
     def test_metadata_smoke_records_explicit_runtime_and_ffmpeg_skip_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

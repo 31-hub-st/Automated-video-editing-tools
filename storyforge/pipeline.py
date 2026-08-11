@@ -1570,6 +1570,112 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+_PIPELINE_CHECKPOINT_SCHEMA_VERSION = 1
+_PIPELINE_CHECKPOINT_HISTORY_LIMIT = 32
+_PIPELINE_CHECKPOINT_STAGES = {
+    "text",
+    "tts",
+    "subtitles",
+    "asset_preflight",
+    "render",
+    "qa",
+    "publish",
+}
+_PIPELINE_CHECKPOINT_STATES = {
+    "started",
+    "completed",
+    "committed",
+    "failed",
+    "cancelled",
+}
+
+
+def _write_pipeline_checkpoint(
+    job_dir: Path,
+    job: RenderJob,
+    *,
+    stage: str,
+    state: str,
+    facts: dict[str, int | float | bool] | None = None,
+) -> None:
+    """Best-effort, diagnostic-only pipeline checkpoint.
+
+    The file is deliberately never consumed to skip production work.  It only
+    records which serial boundary was last reached so a failed employee task
+    can be diagnosed without parsing translated progress labels.  Any read or
+    write failure is ignored and therefore cannot change a render outcome.
+    """
+
+    try:
+        if stage not in _PIPELINE_CHECKPOINT_STAGES:
+            return
+        if state not in _PIPELINE_CHECKPOINT_STATES:
+            return
+        checkpoint_path = job_dir / "checkpoint.json"
+        history: list[dict[str, Any]] = []
+        existing_stage = ""
+        try:
+            existing = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(existing, dict)
+                and existing.get("job_id") == job.id
+                and isinstance(existing.get("history"), list)
+            ):
+                candidate_stage = str(existing.get("current_stage") or "")
+                if candidate_stage in _PIPELINE_CHECKPOINT_STAGES:
+                    existing_stage = candidate_stage
+                history = [
+                    item for item in existing["history"] if isinstance(item, dict)
+                ][-_PIPELINE_CHECKPOINT_HISTORY_LIMIT :]
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            history = []
+
+        # JobQueue's public progress mapping intentionally remains unchanged,
+        # so it may still report the previous broad stage while a more precise
+        # diagnostic boundary is already active.  Terminal checkpoints keep
+        # that latest explicit boundary instead of regressing to the coarser
+        # queue label.
+        if state in {"failed", "cancelled"} and existing_stage:
+            stage = existing_stage
+
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        entry: dict[str, Any] = {
+            "stage": stage,
+            "state": state,
+            "recorded_at": recorded_at,
+        }
+        if facts:
+            entry["facts"] = {
+                str(key)[:64]: value
+                for key, value in facts.items()
+                if isinstance(value, (bool, int, float))
+                and (not isinstance(value, float) or math.isfinite(value))
+            }
+        if not history or any(
+            history[-1].get(key) != entry.get(key) for key in ("stage", "state")
+        ):
+            history.append(entry)
+        else:
+            history[-1] = entry
+        payload = {
+            "schema_version": _PIPELINE_CHECKPOINT_SCHEMA_VERSION,
+            "job_id": job.id,
+            "batch_id": job.batch_id,
+            "job_kind": job.job_kind,
+            "recipe_hash": job.recipe_hash,
+            "content_fingerprint": job.content_fingerprint,
+            "current_stage": stage,
+            "state": state,
+            "updated_at": recorded_at,
+            "history": history[-_PIPELINE_CHECKPOINT_HISTORY_LIMIT :],
+        }
+        _write_json_atomic(checkpoint_path, payload)
+    except Exception:
+        # Diagnostics are subordinate to the product.  A read-only/full system
+        # disk must be reported by the normal preflight, not introduced here.
+        return
+
+
 def _publish_signature(path: Path) -> dict[str, int]:
     """Return a rename-stable, cheap identity for one already-rendered artifact."""
 
@@ -3089,7 +3195,31 @@ class PipelineRunner:
         resource_scope = self.heavy_resource_lock or nullcontext()
         with resource_scope:
             try:
-                return self._run_job(job, platform, progress)
+                _write_pipeline_checkpoint(
+                    job_dir, job, stage="text", state="started"
+                )
+                try:
+                    return self._run_job(job, platform, progress)
+                except JobCancelledError:
+                    current_stage = (
+                        job.pipeline_stage
+                        if job.pipeline_stage in _PIPELINE_CHECKPOINT_STAGES
+                        else "text"
+                    )
+                    _write_pipeline_checkpoint(
+                        job_dir, job, stage=current_stage, state="cancelled"
+                    )
+                    raise
+                except Exception:
+                    current_stage = (
+                        job.pipeline_stage
+                        if job.pipeline_stage in _PIPELINE_CHECKPOINT_STAGES
+                        else "text"
+                    )
+                    _write_pipeline_checkpoint(
+                        job_dir, job, stage=current_stage, state="failed"
+                    )
+                    raise
             finally:
                 # In-process Kokoro retains model tensors between calls.  Keeping
                 # those allocations alive while FFmpeg starts its 1080x1920 graph
@@ -3266,6 +3396,10 @@ class PipelineRunner:
                 if reuse_metadata is not None
                 else "已复用此前准备的润色文稿。"
             )
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="text", state="completed"
+        )
+        _write_pipeline_checkpoint(job_dir, job, stage="tts", state="started")
         selected_mood = str(job.story_mood or text_result.mood)
         try:
             mood = canonical_mood(selected_mood)
@@ -3333,6 +3467,16 @@ class PipelineRunner:
         # media decoder or FFmpeg encoder is opened.  The wrapper repeats this
         # best-effort cleanup for failures occurring earlier in the job.
         release_embedded_kokoro_runtime()
+        _write_pipeline_checkpoint(
+            job_dir,
+            job,
+            stage="tts",
+            state="completed",
+            facts={
+                "duration_seconds": float(narration.duration_seconds),
+                "cue_count": len(narration.cues),
+            },
+        )
         final_stem = publish_media_stem(job, platform)
         if output_mode == "audio_only":
             _preflight_output_directory(
@@ -3347,6 +3491,9 @@ class PipelineRunner:
                 / safe_component(job.id, fallback="job")
             )
             staged_audio_path = publish_staging_dir / f"{final_stem}.partial.mp3"
+            _write_pipeline_checkpoint(
+                job_dir, job, stage="publish", state="started"
+            )
             journal_path, publish_transaction = self._begin_publish_transaction(
                 job_id=job.id,
                 mode=output_mode,
@@ -3378,6 +3525,9 @@ class PipelineRunner:
                     promo_code=effective_code,
                     text_result=text_result,
                     narration=narration,
+                )
+                _write_pipeline_checkpoint(
+                    job_dir, job, stage="publish", state="committed"
                 )
             except JobCancelledError:
                 self._abort_publish_transaction(journal_path, publish_transaction)
@@ -3468,6 +3618,9 @@ class PipelineRunner:
                 encoding="utf-8",
                 newline="\n",
             )
+            _write_pipeline_checkpoint(
+                job_dir, job, stage="publish", state="completed"
+            )
             try:
                 shutil.rmtree(audio_dir)
             except OSError:
@@ -3515,6 +3668,9 @@ class PipelineRunner:
             warnings=warnings,
         )
         effective_cover = requested_cover
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="subtitles", state="started"
+        )
         write_ass(
             subtitle_path,
             narration.cues,
@@ -3531,6 +3687,15 @@ class PipelineRunner:
             intro_card_cover_present=bool(effective_cover),
             platform_brand_color=platform.brand_color,
             config=full_subtitle_style,
+        )
+        _write_pipeline_checkpoint(
+            job_dir,
+            job,
+            stage="subtitles",
+            state="completed",
+        )
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="asset_preflight", state="started"
         )
         resolver = lambda path: probe_duration_with_ffmpeg(self.ffmpeg_path, path)
         variant_seed: int | str | bytes | None = (
@@ -3601,6 +3766,19 @@ class PipelineRunner:
             output_mode=output_mode,
             serial_staging=len(segments) > 1,
             export_narration_audio=publish_narration_audio,
+        )
+        _write_pipeline_checkpoint(
+            job_dir,
+            job,
+            stage="asset_preflight",
+            state="completed",
+            facts={
+                "video_segment_count": len(segments),
+                "music_enabled": music is not None,
+            },
+        )
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="render", state="started"
         )
         final_path = publish_dir / f"{final_stem}.mp4"
         # os.replace is atomic only on the same filesystem. Keep the private
@@ -4185,6 +4363,14 @@ class PipelineRunner:
                 error_log=render_error_log,
                 failure_diagnostics=failure_diagnostics,
             )
+        _write_pipeline_checkpoint(
+            job_dir,
+            job,
+            stage="render",
+            state="completed",
+            facts={"attempt_count": len(render_attempts)},
+        )
+        _write_pipeline_checkpoint(job_dir, job, stage="qa", state="started")
         render_progress(JobStatus.RENDERING, 0.94, "快速检查成片")
         try:
             subtitle_text = subtitle_path.read_text(encoding="utf-8-sig")
@@ -4246,6 +4432,10 @@ class PipelineRunner:
         # durable media ledgers so a cancelled task never consumes a usage
         # count merely because its checker returned a passing result.
         raise_if_cancelled()
+        _write_pipeline_checkpoint(job_dir, job, stage="qa", state="completed")
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="publish", state="started"
+        )
         progress(
             JobStatus.RENDERING,
             0.96,
@@ -4280,6 +4470,9 @@ class PipelineRunner:
                 promo_code=effective_code,
                 text_result=text_result,
                 narration=narration,
+            )
+            _write_pipeline_checkpoint(
+                job_dir, job, stage="publish", state="committed"
             )
         except JobCancelledError:
             self._abort_publish_transaction(journal_path, publish_transaction)
@@ -4372,6 +4565,9 @@ class PipelineRunner:
             "quality_log": str(quality_log),
         }
         persist_manifest()
+        _write_pipeline_checkpoint(
+            job_dir, job, stage="publish", state="completed"
+        )
         # Segment-level WAVs are needed only while assembling the merged
         # narration.  Keeping dozens of them per successful video wastes disk
         # space and makes later diagnostics harder to scan.
@@ -4446,11 +4642,7 @@ class PipelineRunner:
             "promo_code_snapshot": job.promo_code_snapshot or job.code,
             "text": text_result.to_dict(),
         }
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        _write_json_atomic(path, payload)
 
     @staticmethod
     def _preview_units(

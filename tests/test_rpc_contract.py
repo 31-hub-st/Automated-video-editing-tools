@@ -6,7 +6,9 @@ from storyforge.api import StoryForgeApi
 from storyforge.rpc_contract import (
     CATALOG_RPC_METHODS,
     CLIENT_LOCAL_MEDIA_METHODS,
+    DEVICE_CAPABILITY_FIELDS,
     HUB_RPC_PERMISSION_ANY,
+    LEGACY_DEVICE_CAPABILITY_FIELDS,
     LOCAL_WORKER_PRIVATE_METHODS,
     LOCAL_WORKER_RPC_PERMISSIONS,
     WEB_DESKTOP_ONLY_MEDIA_METHODS,
@@ -41,6 +43,20 @@ class RpcContractTests(unittest.TestCase):
     def test_client_local_methods_remain_inside_desktop_surface(self) -> None:
         self.assertTrue(
             CLIENT_LOCAL_MEDIA_METHODS <= WEB_DESKTOP_ONLY_MEDIA_METHODS
+        )
+
+    def test_device_capability_contract_preserves_legacy_projection(self) -> None:
+        self.assertEqual(
+            LEGACY_DEVICE_CAPABILITY_FIELDS,
+            {
+                "device_config_sync",
+                "local_render",
+                "local_tts",
+                "local_subtitles",
+            },
+        )
+        self.assertTrue(
+            LEGACY_DEVICE_CAPABILITY_FIELDS <= DEVICE_CAPABILITY_FIELDS
         )
 
 

@@ -245,7 +245,12 @@ class StoryForgeWebApplication:
         # backend for the remainder of that process lifetime.
         self._static_assets = {
             filename: (self.ui_root / filename).read_bytes()
-            for filename in ("index.html", "app.js", "styles.css")
+            for filename in (
+                "index.html",
+                "app.js",
+                "styles.css",
+                "studio-theme.css",
+            )
         }
         self.upload_root = Path(upload_root).resolve()
         self.upload_root.mkdir(parents=True, exist_ok=True)
@@ -590,6 +595,7 @@ class StoryForgeWebApplication:
             "/index.html",
             "/app.js",
             "/styles.css",
+            "/studio-theme.css",
             "/web/api/health",
             "/web/api/session",
             "/web/api/session/login",
@@ -2514,7 +2520,7 @@ class StoryForgeWebApplication:
         if path in {"/", "/index.html"}:
             self._send_static(handler, "index.html")
             return True
-        if path in {"/app.js", "/styles.css"}:
+        if path in {"/app.js", "/styles.css", "/studio-theme.css"}:
             self._send_static(handler, path.lstrip("/"))
             return True
         if path == "/web/api/health":

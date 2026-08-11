@@ -196,7 +196,12 @@ def run_startup_self_test(
                 from .pipeline import PipelineRunner
 
                 ui = Path(ui_root).resolve(strict=True)
-                for name in ("index.html", "app.js", "styles.css"):
+                for name in (
+                    "index.html",
+                    "app.js",
+                    "styles.css",
+                    "studio-theme.css",
+                ):
                     asset = ui / name
                     if not asset.is_file() or asset.stat().st_size <= 0:
                         raise FileNotFoundError(f"packaged UI asset is missing: {asset}")

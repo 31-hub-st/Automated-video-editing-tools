@@ -53,11 +53,14 @@ from .rpc_contract import (
     CATALOG_READ_METHODS,
     CATALOG_RPC_METHODS,
     CATALOG_WRITE_METHODS,
+    DEVICE_CAPABILITY_FIELDS,
     DEVICE_ADMIN_RPC_METHODS,
     DEVICE_CLIENT_RPC_METHODS,
     DEVICE_SERVICE_RPC_METHODS,
     HUB_RPC_PERMISSION_ANY,
+    LEGACY_DEVICE_CAPABILITY_FIELDS,
     LOCAL_WORKER_TICKET_RPC_METHOD,
+    RPC_CONTRACT_VERSION,
     TEXT_POLISH_RPC_METHOD,
 )
 from .updater import (
@@ -82,17 +85,6 @@ _RENDER_CLIENT_VERSION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LOCAL_WORKER_TICKET_TTL_SECONDS = 90
-DEVICE_CAPABILITY_FIELDS = frozenset(
-    {
-        "device_config_sync",
-        "local_render",
-        "local_tts",
-        "local_subtitles",
-        "worker_state",
-        "worker_reason",
-        "worker_message",
-    }
-)
 MAX_TEXT_POLISH_CHARACTERS = 200_000
 MAX_TEXT_POLISH_CONCURRENCY = 2
 MAX_DEVICE_ENROLL_BYTES = 32 * 1024
@@ -2066,6 +2058,13 @@ class HubServer:
             "app_version": __version__,
             "protocol_version": HUB_PROTOCOL_VERSION,
             "minimum_client_protocol_version": HUB_MINIMUM_CLIENT_PROTOCOL_VERSION,
+            "rpc_contract_version": RPC_CONTRACT_VERSION,
+            "rpc_methods": sorted(
+                self.rpc_methods
+                | DEVICE_SERVICE_RPC_METHODS
+                | {TEXT_POLISH_RPC_METHOD}
+            ),
+            "device_capability_fields": sorted(DEVICE_CAPABILITY_FIELDS),
             "schema_version": summary["schema_version"],
             "site": summary["site"],
             "time": _utc_now(),
@@ -3192,6 +3191,72 @@ class HubClient:
         if self.max_json_response_bytes < 1024:
             raise ValueError("max_json_response_bytes must be at least 1024")
         self.authentication_failure_callback = authentication_failure_callback
+        self._server_device_capability_fields = LEGACY_DEVICE_CAPABILITY_FIELDS
+        self._server_capability_manifest_known = False
+        self._server_rpc_contract_version: int | None = None
+        self._server_rpc_methods: frozenset[str] | None = None
+
+    def _remember_server_contract(self, health: Mapping[str, Any]) -> None:
+        """Cache optional capability metadata without making it mandatory.
+
+        Hubs released before the capability manifest omit all three fields.
+        Those servers receive only the four legacy device capability fields.
+        Unknown fields advertised by a future or untrusted endpoint are never
+        echoed back by this client.
+        """
+
+        self._server_rpc_contract_version = None
+        self._server_rpc_methods = None
+
+        raw_contract_version = health.get("rpc_contract_version")
+        if not isinstance(raw_contract_version, bool):
+            try:
+                parsed_contract_version = int(raw_contract_version)
+            except (TypeError, ValueError):
+                parsed_contract_version = 0
+            if parsed_contract_version > 0:
+                self._server_rpc_contract_version = parsed_contract_version
+
+        raw_methods = health.get("rpc_methods")
+        if isinstance(raw_methods, Sequence) and not isinstance(
+            raw_methods, (str, bytes, bytearray)
+        ):
+            self._server_rpc_methods = frozenset(
+                str(item).strip()
+                for item in raw_methods
+                if isinstance(item, str) and str(item).strip()
+            )
+
+        raw_capability_fields = health.get("device_capability_fields")
+        if isinstance(raw_capability_fields, Sequence) and not isinstance(
+            raw_capability_fields, (str, bytes, bytearray)
+        ):
+            self._server_device_capability_fields = frozenset(
+                str(item)
+                for item in raw_capability_fields
+                if isinstance(item, str) and item in DEVICE_CAPABILITY_FIELDS
+            )
+            self._server_capability_manifest_known = True
+        else:
+            self._server_device_capability_fields = (
+                LEGACY_DEVICE_CAPABILITY_FIELDS
+            )
+            self._server_capability_manifest_known = True
+
+    def _project_device_capabilities(
+        self, capabilities: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        clean_capabilities = _device_capabilities(capabilities)
+        if not self._server_capability_manifest_known:
+            health = self.health()
+            # ``health`` normally caches this itself.  Keeping the explicit
+            # call makes test doubles and custom transports equally safe.
+            self._remember_server_contract(health)
+        return {
+            name: clean_capabilities[name]
+            for name in sorted(self._server_device_capability_fields)
+            if name in clean_capabilities
+        }
 
     def _request(
         self,
@@ -3292,6 +3357,7 @@ class HubClient:
         payload = self._read_json_response(self._request("/health"))
         if not payload.get("ok"):
             raise HubConnectionError("Hub health response was not successful")
+        self._remember_server_contract(payload)
         return payload
 
     @classmethod
@@ -3323,7 +3389,7 @@ class HubClient:
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError("installation_id must be a UUID") from error
-        clean_capabilities = _device_capabilities(
+        requested_capabilities = _device_capabilities(
             capabilities
             or {
                 "device_config_sync": 1,
@@ -3336,6 +3402,12 @@ class HubClient:
             base_url,
             "device-enrollment-transport",
             timeout_seconds=timeout_seconds,
+        )
+        health = transport.health()
+        if str(health.get("service") or "") != "storyforge-hub":
+            raise HubConnectionError("endpoint is not a StoryForge Hub")
+        clean_capabilities = transport._project_device_capabilities(
+            requested_capabilities
         )
         body = json.dumps(
             {
@@ -3373,6 +3445,7 @@ class HubClient:
         """Validate protocol compatibility before activating authenticated RPC."""
 
         health = self.health()
+        self._remember_server_contract(health)
         if str(health.get("service") or "") != "storyforge-hub":
             raise HubConnectionError("endpoint is not a StoryForge Hub")
         try:
@@ -3392,7 +3465,7 @@ class HubClient:
                 "this StoryForge workstation is too old for the Hub; update it before connecting"
             )
         identity = self.call("bootstrap_summary")
-        identity["hub_compatibility"] = {
+        compatibility: dict[str, Any] = {
             "server_protocol_version": server_protocol,
             "minimum_client_protocol_version": minimum_client,
             "negotiated_protocol_version": min(
@@ -3400,6 +3473,17 @@ class HubClient:
             ),
             "server_app_version": str(health.get("app_version") or ""),
         }
+        if self._server_rpc_contract_version is not None:
+            compatibility["rpc_contract_version"] = (
+                self._server_rpc_contract_version
+            )
+        if self._server_rpc_methods is not None:
+            compatibility["rpc_methods"] = sorted(self._server_rpc_methods)
+        if "device_capability_fields" in health:
+            compatibility["device_capability_fields"] = sorted(
+                self._server_device_capability_fields
+            )
+        identity["hub_compatibility"] = compatibility
         return identity
 
     def get_device_session(self) -> dict[str, Any]:
@@ -3455,7 +3539,9 @@ class HubClient:
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"app_version": str(app_version or "")}
         if capabilities is not None:
-            params["capabilities"] = dict(capabilities)
+            params["capabilities"] = self._project_device_capabilities(
+                capabilities
+            )
         return self.call("device_heartbeat", params)
 
     def get_desired_device_config(

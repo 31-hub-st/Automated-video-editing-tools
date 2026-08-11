@@ -24,7 +24,7 @@ from scripts.build_update_package import (  # noqa: E402
 from storyforge import __version__  # noqa: E402
 
 
-UI_FILES = ("index.html", "app.js", "styles.css")
+UI_FILES = ("index.html", "app.js", "styles.css", "studio-theme.css")
 STABLE_ACCEPTANCE_REPORT = "BUILD_STABILITY_ACCEPTANCE.json"
 
 

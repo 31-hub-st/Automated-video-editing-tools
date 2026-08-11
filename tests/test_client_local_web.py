@@ -35,6 +35,7 @@ class ClientLocalWebTests(unittest.TestCase):
         )
         (self.ui / "app.js").write_text("window.ready=true;", encoding="utf-8")
         (self.ui / "styles.css").write_text("body{}", encoding="utf-8")
+        (self.ui / "studio-theme.css").write_text("body{}", encoding="utf-8")
 
         host_repository = SettingsRepository(self.root / "host")
         host_settings = AppSettings()

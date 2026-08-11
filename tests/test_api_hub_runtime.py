@@ -1285,7 +1285,7 @@ class ApiHubRuntimeTests(unittest.TestCase):
                     "excerpt": "Last night the telephone rang.",
                     "language": language,
                     "voice_name": "Heart",
-                    "selection_key": "stable-voice-key",
+                    "selection_key": "local_kokoro:af_heart:240",
                 }
             ]
 
@@ -1297,10 +1297,14 @@ class ApiHubRuntimeTests(unittest.TestCase):
         self.assertEqual(generated["data"]["candidates"][0]["voice_id"], "af_heart")
         self.assertEqual(
             generated["data"]["candidates"][0]["selection_key"],
-            "stable-voice-key",
+            "local_kokoro:af_heart:240",
         )
         remote = self.host_api._catalog.get_novel(novel["id"])
         remote_candidate = remote["metadata"]["voice_candidates"][0]
+        self.assertEqual(
+            remote_candidate["selection_key"],
+            "local_kokoro:af_heart:240",
+        )
         self.assertTrue(
             remote_candidate["audio_path"].startswith(
                 "hub://attachments/voice-previews/"

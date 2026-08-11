@@ -33,6 +33,11 @@ from storyforge.library_service import LibraryService
 from storyforge.models import AppSettings
 from storyforge.providers.base import ProviderConfig, ProviderError
 from storyforge.providers.text import TextRequest, TextResult
+from storyforge.rpc_contract import (
+    DEVICE_CAPABILITY_FIELDS,
+    LEGACY_DEVICE_CAPABILITY_FIELDS,
+    RPC_CONTRACT_VERSION,
+)
 
 
 TOKEN = "correct-hub-token"
@@ -208,6 +213,13 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
         self.assertEqual(health["service"], "storyforge-hub")
         self.assertEqual(health["protocol_version"], 1)
         self.assertEqual(health["minimum_client_protocol_version"], 1)
+        self.assertEqual(health["rpc_contract_version"], RPC_CONTRACT_VERSION)
+        self.assertEqual(
+            set(health["device_capability_fields"]), DEVICE_CAPABILITY_FIELDS
+        )
+        self.assertIn("bootstrap_summary", health["rpc_methods"])
+        self.assertIn("device_heartbeat", health["rpc_methods"])
+        self.assertIn("text_polish", health["rpc_methods"])
         self.assertTrue(health["app_version"])
         self.assertEqual(health["site"]["id"], "hub-test-site")
         with urlopen(self.server.base_url + "/health", timeout=3) as response:
@@ -218,6 +230,74 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
         self.assertEqual(caught.exception.status, 401)
         self.assertEqual(caught.exception.code, "unauthorized")
         self.assertFalse(self.server.authenticate("Bearer 中文无效令牌").authenticated)
+
+    def test_identity_handshake_exposes_optional_rpc_capabilities(self) -> None:
+        identity = self.client.verify_identity()
+        compatibility = identity["hub_compatibility"]
+
+        self.assertEqual(
+            compatibility["rpc_contract_version"], RPC_CONTRACT_VERSION
+        )
+        self.assertEqual(
+            set(compatibility["device_capability_fields"]),
+            DEVICE_CAPABILITY_FIELDS,
+        )
+        self.assertIn("bootstrap_summary", compatibility["rpc_methods"])
+
+    def test_old_hub_without_capability_manifest_receives_legacy_fields(self) -> None:
+        client = HubClient("http://127.0.0.1:1", TOKEN)
+        old_health = {
+            "ok": True,
+            "service": "storyforge-hub",
+            "protocol_version": 1,
+            "minimum_client_protocol_version": 1,
+        }
+        with (
+            patch.object(client, "health", return_value=old_health),
+            patch.object(client, "call", return_value={"ok": True}) as call,
+        ):
+            client.heartbeat_device(
+                app_version="1.0.0",
+                capabilities={
+                    "device_config_sync": 2,
+                    "local_render": True,
+                    "local_tts": False,
+                    "local_subtitles": True,
+                    "worker_state": "busy",
+                    "worker_reason": "rendering",
+                    "worker_message": "Rendering one video",
+                },
+            )
+
+        sent = call.call_args.args[1]["capabilities"]
+        self.assertEqual(set(sent), LEGACY_DEVICE_CAPABILITY_FIELDS)
+        self.assertNotIn("worker_state", sent)
+
+    def test_client_projects_capabilities_to_server_manifest(self) -> None:
+        client = HubClient("http://127.0.0.1:1", TOKEN)
+        health = {
+            "ok": True,
+            "service": "storyforge-hub",
+            "protocol_version": 1,
+            "minimum_client_protocol_version": 1,
+            "device_capability_fields": [
+                "local_render",
+                "worker_state",
+                "future_server_field",
+            ],
+        }
+        with (
+            patch.object(client, "health", return_value=health),
+            patch.object(client, "call", return_value={"ok": True}) as call,
+        ):
+            client.heartbeat_device(
+                capabilities={"local_render": False, "worker_state": "ready"}
+            )
+
+        self.assertEqual(
+            call.call_args.args[1]["capabilities"],
+            {"local_render": False, "worker_state": "ready"},
+        )
 
     def test_identity_handshake_rejects_incompatible_hub_or_workstation(self) -> None:
         client = HubClient("http://127.0.0.1:1", TOKEN)
@@ -459,6 +539,82 @@ class DeviceEnrollmentTests(HubTestCase):
         self.catalog.revoke_hub_access_token(enrolled["token_id"])
         with self.assertRaises(HubAuthenticationError):
             enrolled_client.verify_identity()
+
+    def test_enrollment_projects_new_fields_for_an_old_hub(self) -> None:
+        member = self._save_member("legacy-capability-hub")
+        old_health = {
+            "ok": True,
+            "service": "storyforge-hub",
+            "protocol_version": 1,
+            "minimum_client_protocol_version": 1,
+        }
+
+        with patch.object(HubClient, "health", return_value=old_health):
+            enrolled = HubClient.enroll_device(
+                self.server.base_url,
+                member["username"],
+                self.PASSWORD,
+                "Rolling Update PC",
+                capabilities={
+                    "device_config_sync": 1,
+                    "local_render": True,
+                    "local_tts": True,
+                    "local_subtitles": True,
+                    "worker_state": "ready",
+                    "worker_reason": "",
+                    "worker_message": "Ready",
+                },
+                timeout_seconds=5,
+            )
+
+        stored = enrolled["device"]["capabilities"]
+        self.assertEqual(set(stored), LEGACY_DEVICE_CAPABILITY_FIELDS)
+
+    def test_current_hub_persists_extended_capabilities_across_heartbeat(self) -> None:
+        member = self._save_member("current-capability-hub")
+        enrolled = HubClient.enroll_device(
+            self.server.base_url,
+            member["username"],
+            self.PASSWORD,
+            "Current Worker PC",
+            capabilities={
+                "device_config_sync": 1,
+                "local_render": True,
+                "local_tts": True,
+                "local_subtitles": True,
+                "worker_state": "ready",
+                "worker_reason": "",
+                "worker_message": "Ready for production",
+            },
+            timeout_seconds=5,
+        )
+        self.assertEqual(
+            enrolled["device"]["capabilities"]["worker_state"],
+            "ready",
+        )
+
+        client = HubClient(
+            self.server.base_url,
+            enrolled["token"],
+            timeout_seconds=5,
+        )
+        heartbeat = client.heartbeat_device(
+            app_version="1.0.1",
+            capabilities={
+                "device_config_sync": 1,
+                "local_render": True,
+                "local_tts": True,
+                "local_subtitles": True,
+                "worker_state": "busy",
+                "worker_reason": "rendering",
+                "worker_message": "Rendering one video",
+            },
+        )
+
+        stored = heartbeat["device"]["capabilities"]
+        self.assertEqual(stored["worker_state"], "busy")
+        self.assertEqual(stored["worker_reason"], "rendering")
+        self.assertEqual(stored["worker_message"], "Rendering one video")
 
     def test_browser_worker_ticket_is_device_bound_short_lived_and_one_use(self) -> None:
         member = self._save_member("browser-renderer")

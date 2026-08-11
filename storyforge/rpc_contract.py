@@ -21,6 +21,27 @@ ACCOUNT_PASSWORD_VERIFY_RPC_METHOD = "account_password_verify"
 LOCAL_WORKER_TICKET_RPC_METHOD = "local_worker_ticket_redeem"
 
 
+# Device capability payloads are intentionally versioned by field name rather
+# than by the transport protocol.  A rolling update can therefore advertise
+# new optional fields while older Hubs continue to receive the four fields
+# they have always understood.
+LEGACY_DEVICE_CAPABILITY_FIELDS = frozenset(
+    {
+        "device_config_sync",
+        "local_render",
+        "local_tts",
+        "local_subtitles",
+    }
+)
+DEVICE_CAPABILITY_FIELDS = LEGACY_DEVICE_CAPABILITY_FIELDS | frozenset(
+    {
+        "worker_state",
+        "worker_reason",
+        "worker_message",
+    }
+)
+
+
 DEVICE_ADMIN_RPC_METHODS = frozenset(
     {
         "devices_list",
@@ -422,6 +443,7 @@ __all__ = [
     "CATALOG_RPC_METHODS",
     "CATALOG_WRITE_METHODS",
     "CLIENT_LOCAL_MEDIA_METHODS",
+    "DEVICE_CAPABILITY_FIELDS",
     "DEVICE_ADMIN_RPC_METHODS",
     "DEVICE_CLIENT_RPC_METHODS",
     "DEVICE_SERVICE_RPC_METHODS",
@@ -429,6 +451,7 @@ __all__ = [
     "LOCAL_WORKER_RPC_PERMISSIONS",
     "LOCAL_WORKER_PRIVATE_METHODS",
     "LOCAL_WORKER_TICKET_RPC_METHOD",
+    "LEGACY_DEVICE_CAPABILITY_FIELDS",
     "RPC_CONTRACT_VERSION",
     "TEXT_POLISH_RPC_METHOD",
     "WEB_DESKTOP_ONLY_MEDIA_METHODS",

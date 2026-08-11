@@ -7,6 +7,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class StaticUiAssetContractTests(unittest.TestCase):
+    def test_studio_theme_is_referenced_and_non_empty(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        theme = ROOT / "ui" / "studio-theme.css"
+
+        self.assertIn("studio-theme.css", html)
+        self.assertTrue(theme.is_file())
+        self.assertGreater(theme.stat().st_size, 0)
+
+
 class StyleSettingsContractTests(unittest.TestCase):
     def test_output_fps_defaults_to_60_and_remains_selectable_per_batch(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")

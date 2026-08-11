@@ -1348,7 +1348,7 @@ Three."""
             "excerpt": "The phone rang at midnight.",
             "language": "en",
             "voice_name": "Heart",
-            "selection_key": "stable-voice-key",
+            "selection_key": "stable-voice-selection-key",
         }
 
         with_candidates = self.catalog.save_novel_voice_state(
@@ -1371,7 +1371,7 @@ Three."""
         )
         self.assertEqual(
             with_candidates["metadata"]["voice_candidates"][0]["selection_key"],
-            "stable-voice-key",
+            "stable-voice-selection-key",
         )
         self.assertEqual(locked["metadata"]["locked_voice_id"], "af_heart")
         self.assertEqual(locked["metadata"]["editorial_note"], "must survive")

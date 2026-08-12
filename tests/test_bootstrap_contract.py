@@ -387,7 +387,7 @@ finally {
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             install_root = root / "FreshHub"
             data_root = install_root / "Data"
             install_root.mkdir()
@@ -715,8 +715,9 @@ foreach ($mode in @('task', 'listener', 'process')) {
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            release_root = Path(temporary) / "LegacyRelease"
-            data_root = Path(temporary) / "ExistingData"
+            root = Path(temporary).resolve(strict=True)
+            release_root = root / "LegacyRelease"
+            data_root = root / "ExistingData"
             release_root.mkdir()
             data_root.mkdir()
             executable = release_root / "StoryForge Studio.exe"
@@ -940,7 +941,8 @@ if (
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            hub_root = Path(temporary) / "ManagedHub"
+            root = Path(temporary).resolve(strict=True)
+            hub_root = root / "ManagedHub"
             data_root = hub_root / "Data"
             previous_app = hub_root / "App-1.0.0"
             target_app = hub_root / "App-1.0.2"
@@ -1073,7 +1075,8 @@ if (
             "tampered_target",
         ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                hub_root = Path(temporary) / "ManagedHub"
+                root = Path(temporary).resolve(strict=True)
+                hub_root = root / "ManagedHub"
                 data_root = hub_root / "Data"
                 previous_app = hub_root / "App-1.0.0"
                 target_app = hub_root / "App-1.0.2"
@@ -1165,7 +1168,8 @@ if (-not $caught -or $global:StoryForgeSetCount -ne 0) {
 
     def test_legacy_ops_task_migration_rolls_back_files_and_action(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            hub_root = Path(temporary) / "ManagedHub"
+            root = Path(temporary).resolve(strict=True)
+            hub_root = root / "ManagedHub"
             data_root = hub_root / "Data"
             previous_app = hub_root / "App-1.0.0"
             target_app = hub_root / "App-1.0.2"
@@ -1293,7 +1297,8 @@ if (
 
     def test_existing_hub_repair_switches_a_verified_previous_wrapper_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            hub_root = Path(temporary) / "ManagedHub"
+            root = Path(temporary).resolve(strict=True)
+            hub_root = root / "ManagedHub"
             data_root = hub_root / "Data"
             previous_app = hub_root / "App-1.0.1"
             current_app = hub_root / "App-1.0.2"

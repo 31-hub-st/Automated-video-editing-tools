@@ -14,7 +14,7 @@
 
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
-当前正式版本：`v1.0.2`
+当前正式版本：`v1.0.3`
 
 ## 先看这三份文档
 
@@ -22,7 +22,7 @@ StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制�
 - [Windows 部署与多电脑协同](docs/DEPLOYMENT_WINDOWS.md)：主机、员工制作电脑、数据目录、登录和故障处理。
 - [员工快速使用说明](docs/EMPLOYEE_QUICK_START.md)：最短生产流程。
 
-发布证据、包体哈希和验收结果见 [v1.0.2 正式版交付报告](docs/V1.0.2_RELEASE.md)。
+发布证据、包体哈希和验收结果见 [v1.0.3 正式版交付报告](docs/V1.0.3_RELEASE.md)。
 
 ## 产品能力
 
@@ -113,8 +113,8 @@ git diff --check
   -RequireStableAcceptance `
   -WithLocalAI `
   -StableStressSeconds 600 `
-  -OutputDirectory 'D:\StoryForgeRelease\1.0.2\dist' `
-  -WorkDirectory 'D:\StoryForgeRelease\1.0.2\work' `
+  -OutputDirectory 'D:\StoryForgeRelease\1.0.3\dist' `
+  -WorkDirectory 'D:\StoryForgeRelease\1.0.3\work' `
   -HubEndpoint 'http://<Hub-IP>:8765'
 ```
 

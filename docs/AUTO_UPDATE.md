@@ -31,7 +31,7 @@ Hub 固定资料备份与软件更新回滚不是同一类文件。Hub 备份位
 
 ### 既有 Hub 启动器修复与旧 ops-task 迁移
 
-`v1.0.2` 要求冻结程序只有在受管 Hub 启动器同时声明固定 DataRoot 和 Hub 部署角色时才可监听。部分较新的 `v1.0.1` 布局已有 `current.json`、`Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd`，但旧包装器没有角色声明，桌面入口也会透传任意参数。完成受支持的完整程序升级、且 `D:\StoryForgeHub\current.json` 已指向新 `App-<version>` 后，在源码仓库运行：
+`v1.0.2` 要求冻结程序只有在受管 Hub 启动器同时声明固定 DataRoot 和 Hub 部署角色时才可监听。部分较新的 `v1.0.1` 布局已有 `current.json`、`Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd`，但旧包装器没有角色声明，桌面入口也会透传任意参数。若 `current.json` 已经指向应使用的当前版本，只需修复这两个旧启动器，在源码仓库运行：
 
 ```powershell
 .\scripts\repair_storyforge_hub_launcher.ps1 `
@@ -39,7 +39,18 @@ Hub 固定资料备份与软件更新回滚不是同一类文件。Hub 备份位
   -DataRoot 'D:\StoryForgeHub\Data'
 ```
 
-完整发布目录也在 `admin-tools` 内携带同名脚本。现代受管布局会逐项核对 `current.json`、当前与前一 `App-<version>` 的包内 manifest 和精确 EXE、固定 DataRoot 的 host 设置、非空 catalog 文件，以及计划任务的 PowerShell、参数、工作目录、Windows 用户和权限级别；任一身份不一致即拒绝。此路径不会改 `current.json`、DataRoot 或计划任务；只将 `Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd` 分别原子切换到已验证的当前入口。
+完整发布目录也在 `admin-tools` 内携带同名脚本。不传 `-TargetAppDirectory` 时保留这条历史修复路径：核对 `current.json`、当前与启动器中的前一 `App-<version>`、固定 DataRoot 的 host 设置、非空 catalog 文件和计划任务精确身份；通过后只修复两个启动器，不改 `current.json`、DataRoot 或计划任务。
+
+现代受管 Hub 升级到已通过正式 Release 校验链安装的更高版本时，保持 `current.json` 先指向正在使用的旧 App，并显式传入新目录：
+
+```powershell
+.\scripts\repair_storyforge_hub_launcher.ps1 `
+  -HubRoot 'D:\StoryForgeHub' `
+  -DataRoot 'D:\StoryForgeHub\Data' `
+  -TargetAppDirectory 'D:\StoryForgeHub\App-1.0.6'
+```
+
+该路径对 `current.json` 所指当前 App 与目标 App 分别重算 `BUILD_RELEASE_VALIDATION.json` 的完整文件树，要求目标版本严格高于当前版本，并核对 host 设置、非空普通 catalog、两个当前启动器和计划任务精确身份。脚本先写入三个临时文件，然后立即重做全部 TOCTOU 校验，最后按 `current.json` → `Start-StoryForge.cmd` → `Start-StoryForge-Hub.ps1` 的顺序原子替换，计划任务定义保持不变。任意一步失败都以反向顺序逐字节回滚三个文件。它不读取 SQLite，不启动或停止 Hub，不修改 DataRoot。
 
 更早的真实 ops-task 布局可能只有 `Start-StoryForgeHub.ps1`，计划任务 action 以 `-InstallPath App-<old> -DataPath <DataRoot> -Port 8765` 参数化调用它，且没有 `current.json`、`Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd`。这种状态必须先用正式 Release 链完成 GitHub asset digest、sidecar、archive、内部 manifest 和完整目录验证，将新程序安装为新的 `App-<version>`；不得手工拼包或仅复制 EXE。然后显式指定该目录：
 
@@ -50,7 +61,7 @@ Hub 固定资料备份与软件更新回滚不是同一类文件。Hub 备份位
   -TargetAppDirectory 'D:\StoryForgeHub\App-1.0.6'
 ```
 
-旧 ops-task 迁移只在三个现代文件全部不存在时启用；任何半迁移状态都会拒绝。它逐字验证历史 wrapper、唯一根计划任务、精确旧 App/Data/Port 参数、当前用户 `Interactive/Limited` 身份，并重算新 App 的 `BUILD_RELEASE_VALIDATION.json` 完整目录摘要。全部通过后才原子生成两个现代启动器和 `current.json`，并只更新计划任务 action；失败会回滚 action 与本次生成文件。它不会读取或修改 SQLite，不会改 DataRoot，也不会启动、停止或替换正在运行的 Hub。两种路径完成后都只能在已批准的维护窗口手动重启原计划任务。
+旧 ops-task 迁移只在三个现代文件全部不存在时启用；任何半迁移状态都会拒绝。它逐字验证历史 wrapper、唯一根计划任务、精确旧 App/Data/Port 参数、当前用户 `Interactive/Limited` 身份，并重算新 App 的 `BUILD_RELEASE_VALIDATION.json` 完整目录摘要。全部通过后才原子生成两个现代启动器和 `current.json`，并只更新计划任务 action；失败会回滚 action 与本次生成文件。它不会读取或修改 SQLite，不会改 DataRoot，也不会启动、停止或替换正在运行的 Hub。三种路径完成后都只能在已批准的维护窗口手动重启原计划任务。
 
 这个入口不是安装器或恢复器。全新电脑仍使用 `bootstrap_storyforge.ps1 -Role Hub -RestoreHubData -ReplaceExistingData`；现有 Hub 绝不能通过新机入口覆盖或合并资料。
 旧的 `enable_storyforge_hub.ps1` 也只用于首次启用且会拒绝已有任务/监听端口；既有 Hub 不能用它覆盖启动合同。

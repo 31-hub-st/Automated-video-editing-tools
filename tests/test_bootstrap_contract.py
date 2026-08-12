@@ -267,6 +267,186 @@ finally {
 """.replace("\n", "\r\n").encode("ascii")
         )
 
+    def _write_fixed_modern_hub_layout(
+        self,
+        hub_root: Path,
+        *,
+        current_version: str = "1.0.5",
+        target_version: str | None = "1.0.6",
+    ) -> dict[str, Path]:
+        data_root = hub_root / "Data"
+        data_root.mkdir(parents=True)
+        current_app = hub_root / f"App-{current_version}"
+        current_exe = self._write_verified_target_app(
+            current_app, current_version
+        )
+        target_app = hub_root / f"App-{target_version}" if target_version else None
+        target_exe = (
+            self._write_verified_target_app(target_app, target_version)
+            if target_app is not None and target_version is not None
+            else None
+        )
+        (data_root / "settings.json").write_text(
+            json.dumps({"settings": {"hub": {"mode": "host"}}}) + "\n",
+            encoding="utf-8",
+        )
+        (data_root / "storyforge-catalog.sqlite3").write_bytes(
+            b"opaque-catalog-sentinel"
+        )
+
+        pointer_path = hub_root / "current.json"
+        pointer_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "version": current_version,
+                    "app_directory": str(current_app),
+                    "entrypoint": str(current_exe),
+                    "installed_at_utc": "2026-08-13T00:00:00.0000000Z",
+                    "source_release": f"v{current_version}",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        launcher_path = hub_root / "Start-StoryForge-Hub.ps1"
+        launcher_path.write_bytes(
+            "\r\n".join(
+                (
+                    "$ErrorActionPreference = 'Stop'",
+                    "$env:STORYFORGE_DEPLOYMENT_ROLE = 'Hub'",
+                    f"$env:STORYFORGE_DATA_DIR = '{data_root}'",
+                    "Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue",
+                    "Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue",
+                    f"& '{current_exe}' --web --web-host 0.0.0.0 --web-port 8765",
+                    "exit $LASTEXITCODE",
+                    "",
+                )
+            ).encode("ascii")
+        )
+        desktop_path = hub_root / "Start-StoryForge.cmd"
+        desktop_path.write_bytes(
+            (
+                "@echo off\r\n"
+                "set \"STORYFORGE_DEPLOYMENT_ROLE=Hub\"\r\n"
+                f"set \"STORYFORGE_DATA_DIR={data_root}\"\r\n"
+                "set \"STORYFORGE_FROZEN_HUB_DATA_ROOT=\"\r\n"
+                "set \"STORYFORGE_PORTABLE_MODE=\"\r\n"
+                f'start "" "{current_exe}"\r\n'
+            ).encode("ascii")
+        )
+        result = {
+            "hub_root": hub_root,
+            "data_root": data_root,
+            "current_app": current_app,
+            "current_exe": current_exe,
+            "pointer": pointer_path,
+            "launcher": launcher_path,
+            "desktop": desktop_path,
+        }
+        if target_app is not None and target_exe is not None:
+            result["target_app"] = target_app
+            result["target_exe"] = target_exe
+        return result
+
+    def _run_fixed_modern_hub_repair(
+        self,
+        layout: dict[str, Path],
+        *,
+        use_target: bool = True,
+        task_case: str = "exact",
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment_updates = {
+            "STORYFORGE_REPAIR_SCRIPT": str(
+                self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
+            ),
+            "STORYFORGE_TEST_HUB_ROOT": str(layout["hub_root"]),
+            "STORYFORGE_TEST_DATA_ROOT": str(layout["data_root"]),
+            "STORYFORGE_TEST_LAUNCHER": str(layout["launcher"]),
+            "STORYFORGE_TEST_TARGET_APP": str(layout.get("target_app", "")),
+            "STORYFORGE_TEST_USE_TARGET": "1" if use_target else "0",
+            "STORYFORGE_TEST_TASK_CASE": task_case,
+        }
+        harness = r"""
+$ErrorActionPreference = 'Stop'
+$powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:STORYFORGE_TEST_LAUNCHER`""
+if ($env:STORYFORGE_TEST_TASK_CASE -eq 'wrong_arguments') {
+    $arguments += ' -Unexpected'
+}
+$global:StoryForgeSetCount = 0
+$global:StoryForgeGetCount = 0
+$global:StoryForgeFakeTask = [PSCustomObject]@{
+    Actions = @([PSCustomObject]@{
+        Execute = $powerShell
+        Arguments = $arguments
+        WorkingDirectory = $env:STORYFORGE_TEST_HUB_ROOT
+    })
+    Principal = [PSCustomObject]@{
+        UserId = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        LogonType = 'Interactive'
+        RunLevel = 'Limited'
+    }
+}
+function Get-ScheduledTask {
+    param(
+        [string]$TaskName,
+        [string]$TaskPath,
+        [System.Management.Automation.ActionPreference]$ErrorAction
+    )
+    $global:StoryForgeGetCount += 1
+    if (
+        $env:STORYFORGE_TEST_TASK_CASE -eq 'changes_after_first_read' -and
+        $global:StoryForgeGetCount -ge 2
+    ) {
+        return [PSCustomObject]@{
+            Actions = @([PSCustomObject]@{
+                Execute = $powerShell
+                Arguments = ($arguments + ' -ConcurrentChange')
+                WorkingDirectory = $env:STORYFORGE_TEST_HUB_ROOT
+            })
+            Principal = $global:StoryForgeFakeTask.Principal
+        }
+    }
+    return $global:StoryForgeFakeTask
+}
+function Set-ScheduledTask {
+    param(
+        [string]$TaskName,
+        [string]$TaskPath,
+        [object[]]$Action,
+        [System.Management.Automation.ActionPreference]$ErrorAction
+    )
+    $global:StoryForgeSetCount += 1
+    throw 'Modern upgrade must not mutate the scheduled task definition.'
+}
+try {
+    if ($env:STORYFORGE_TEST_USE_TARGET -eq '1') {
+        & $env:STORYFORGE_REPAIR_SCRIPT `
+            -HubRoot $env:STORYFORGE_TEST_HUB_ROOT `
+            -DataRoot $env:STORYFORGE_TEST_DATA_ROOT `
+            -TargetAppDirectory $env:STORYFORGE_TEST_TARGET_APP
+    }
+    else {
+        & $env:STORYFORGE_REPAIR_SCRIPT `
+            -HubRoot $env:STORYFORGE_TEST_HUB_ROOT `
+            -DataRoot $env:STORYFORGE_TEST_DATA_ROOT
+    }
+    if ($global:StoryForgeSetCount -ne 0) {
+        throw 'Modern upgrade changed the scheduled task definition.'
+    }
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 23
+}
+"""
+        return self._run_windows_powershell(
+            "-Command",
+            harness,
+            environment_updates=environment_updates,
+        )
+
     def test_scripts_are_powershell_51_safe_ascii(self) -> None:
         for name in (
             "bootstrap_storyforge.ps1",
@@ -615,6 +795,197 @@ foreach ($mode in @('task', 'listener', 'process')) {
             "@($hubHealth.device_capability_fields) -contains 'device_config_sync'",
             self.verify,
         )
+
+    def test_deployment_verifier_firewall_fallback_is_read_only(self) -> None:
+        start = self.verify.index("function Get-StoryForgeFirewallRuleCheck")
+        end = self.verify.index("$checks = ", start)
+        firewall_function = self.verify[start:end]
+        self.assertIn("HNetCfg.FwPolicy2", firewall_function)
+        self.assertIn("$policy.Rules.Item($RuleName)", firewall_function)
+        for mutation in (
+            "New-NetFirewallRule",
+            "Set-NetFirewallRule",
+            "Set-NetFirewallPortFilter",
+            "Remove-NetFirewallRule",
+        ):
+            self.assertNotIn(mutation, firewall_function)
+
+    def test_deployment_verifier_firewall_fallback_contract_ps51(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="StoryForgeFirewallCheck-") as temporary:
+            root = Path(temporary).resolve(strict=True)
+            start = self.verify.index("function Get-StoryForgeFirewallRuleCheck")
+            end = self.verify.index("$checks = ", start)
+            function_file = root / "firewall-function.ps1"
+            function_file.write_text(self.verify[start:end], encoding="ascii")
+            harness = root / "firewall-harness.ps1"
+            harness.write_text(
+                r"""
+$ErrorActionPreference = 'Stop'
+. $env:STORYFORGE_FIREWALL_FUNCTION
+
+$global:StoryForgeFirewallMode = ''
+$global:StoryForgeFirewallComCalls = 0
+
+function Get-NetFirewallRule {
+    param(
+        [string]$DisplayName,
+        [System.Management.Automation.ActionPreference]$ErrorAction
+    )
+    switch ($global:StoryForgeFirewallMode) {
+        'net_success' {
+            return [PSCustomObject]@{
+                Enabled = $true
+                Direction = 'Inbound'
+                Action = 'Allow'
+                Profile = 'Private'
+            }
+        }
+        'net_outbound' {
+            return [PSCustomObject]@{
+                Enabled = $true
+                Direction = 'Outbound'
+                Action = 'Allow'
+                Profile = 'Private'
+            }
+        }
+        'net_block' {
+            return [PSCustomObject]@{
+                Enabled = $true
+                Direction = 'Inbound'
+                Action = 'Block'
+                Profile = 'Private'
+            }
+        }
+        'net_invalid' {
+            return [PSCustomObject]@{
+                Enabled = $true
+                Direction = 'Inbound'
+                Action = 'Allow'
+                Profile = 'Public'
+            }
+        }
+        'empty' { return @() }
+        default { throw [System.UnauthorizedAccessException]::new('Access denied') }
+    }
+}
+
+function Get-NetFirewallPortFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process {
+        return [PSCustomObject]@{ Protocol = 'TCP'; LocalPort = '8765' }
+    }
+}
+
+function Get-NetFirewallAddressFilter {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process {
+        return [PSCustomObject]@{ RemoteAddress = @('LocalSubnet') }
+    }
+}
+
+function New-TestFirewallPolicy {
+    $rule = [PSCustomObject]@{
+        Enabled = $true
+        Direction = 1
+        Action = 1
+        Profiles = 2
+        Protocol = 6
+        LocalPorts = '8765'
+        RemoteAddresses = 'LocalSubnet,10.0.0.0/24'
+    }
+    switch ($global:StoryForgeFirewallMode) {
+        'com_disabled' { $rule.Enabled = $false }
+        'com_outbound' { $rule.Direction = 2 }
+        'com_block' { $rule.Action = 0 }
+        'com_public' { $rule.Profiles = 1 }
+        'com_profile_mix' { $rule.Profiles = 3 }
+        'com_udp' { $rule.Protocol = 17 }
+        'com_ports' { $rule.LocalPorts = '8765,8766' }
+        'com_remote' { $rule.RemoteAddresses = '10.0.0.0/24' }
+    }
+    $rules = [PSCustomObject]@{ Rule = $rule }
+    $rules | Add-Member -MemberType ScriptMethod -Name Item -Value {
+        param([string]$Name)
+        if ($global:StoryForgeFirewallMode -eq 'missing') {
+            throw [System.IO.FileNotFoundException]::new('Rule not found')
+        }
+        return $this.Rule
+    }
+    return [PSCustomObject]@{ Rules = $rules }
+}
+
+function New-Object {
+    param(
+        [string]$ComObject,
+        [System.Management.Automation.ActionPreference]$ErrorAction
+    )
+    $global:StoryForgeFirewallComCalls += 1
+    if ($ComObject -ne 'HNetCfg.FwPolicy2') {
+        throw "Unexpected COM object: $ComObject"
+    }
+    return New-TestFirewallPolicy
+}
+
+function Assert-Check {
+    param([string]$Mode, [bool]$ExpectedOk, [bool]$ExpectedCom)
+    $global:StoryForgeFirewallMode = $Mode
+    $global:StoryForgeFirewallComCalls = 0
+    $result = Get-StoryForgeFirewallRuleCheck `
+        -RuleName 'StoryForge Hub 8765 (Private LAN)' `
+        -Port 8765
+    if ([bool]$result.ok -ne $ExpectedOk) {
+        throw "Mode $Mode expected ok=$ExpectedOk; got $($result | ConvertTo-Json -Compress)"
+    }
+    $usedCom = $global:StoryForgeFirewallComCalls -gt 0
+    if ($usedCom -ne $ExpectedCom) {
+        throw "Mode $Mode expected COM=$ExpectedCom; calls=$global:StoryForgeFirewallComCalls"
+    }
+    if (
+        $Mode.StartsWith('net_') -and
+        (
+            [string]$result.detail -notmatch '(?:^|;) direction=' -or
+            [string]$result.detail -notmatch '(?:^|;) action='
+        )
+    ) {
+        throw "Mode $Mode did not report direction and action: $($result.detail)"
+    }
+}
+
+Assert-Check -Mode 'net_success' -ExpectedOk $true -ExpectedCom $false
+Assert-Check -Mode 'net_outbound' -ExpectedOk $false -ExpectedCom $false
+Assert-Check -Mode 'net_block' -ExpectedOk $false -ExpectedCom $false
+Assert-Check -Mode 'net_invalid' -ExpectedOk $false -ExpectedCom $false
+Assert-Check -Mode 'access_denied' -ExpectedOk $true -ExpectedCom $true
+Assert-Check -Mode 'empty' -ExpectedOk $true -ExpectedCom $true
+Assert-Check -Mode 'com_profile_mix' -ExpectedOk $true -ExpectedCom $true
+foreach ($mode in @(
+    'missing',
+    'com_disabled',
+    'com_outbound',
+    'com_block',
+    'com_public',
+    'com_udp',
+    'com_ports',
+    'com_remote'
+)) {
+    Assert-Check -Mode $mode -ExpectedOk $false -ExpectedCom $true
+}
+""".strip()
+                + "\n",
+                encoding="ascii",
+            )
+            result = self._run_windows_powershell(
+                "-File",
+                str(harness),
+                environment_updates={
+                    "STORYFORGE_FIREWALL_FUNCTION": str(function_file),
+                },
+            )
+
+        output = (result.stdout + result.stderr).decode(
+            "utf-8", errors="replace"
+        )
+        self.assertEqual(result.returncode, 0, output)
 
     def test_deployment_verifier_ps51_serializes_failed_checks_as_json(self) -> None:
         with tempfile.TemporaryDirectory(prefix="StoryForgeVerifyMissing-") as temporary:
@@ -1582,6 +1953,204 @@ if (
             }
             self.assertEqual(after, before)
 
+    def test_modern_hub_explicit_target_atomically_switches_verified_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(hub_root)
+            protected = {
+                path: path.read_bytes()
+                for root in (
+                    layout["data_root"],
+                    layout["current_app"],
+                    layout["target_app"],
+                )
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+
+            result = self._run_fixed_modern_hub_repair(layout)
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertEqual(result.returncode, 0, output)
+
+            pointer = json.loads(layout["pointer"].read_text("utf-8"))
+            self.assertEqual(pointer["version"], "1.0.6")
+            self.assertEqual(pointer["app_directory"], str(layout["target_app"]))
+            self.assertEqual(pointer["entrypoint"], str(layout["target_exe"]))
+            self.assertEqual(pointer["source_release"], "v1.0.6")
+            for launcher in (layout["launcher"], layout["desktop"]):
+                launcher_text = launcher.read_text(encoding="ascii")
+                self.assertIn(str(layout["target_exe"]), launcher_text)
+                self.assertNotIn(str(layout["current_exe"]), launcher_text)
+            for path, before in protected.items():
+                with self.subTest(path=path):
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_modern_hub_explicit_target_rejects_non_newer_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(
+                hub_root,
+                current_version="1.0.5",
+                target_version="1.0.4",
+            )
+            before = {
+                path: path.read_bytes()
+                for path in hub_root.rglob("*")
+                if path.is_file()
+            }
+
+            result = self._run_fixed_modern_hub_repair(layout)
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn("newer verified release", output)
+            after = {
+                path: path.read_bytes()
+                for path in hub_root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
+    def test_modern_hub_explicit_target_rejects_tampered_release_tree(self) -> None:
+        for tampered_release in ("current_app", "target_app"):
+            with self.subTest(tampered_release=tampered_release):
+                with tempfile.TemporaryDirectory() as temporary:
+                    hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+                    layout = self._write_fixed_modern_hub_layout(hub_root)
+                    tampered_asset = layout[tampered_release] / "assets" / "Static.bin"
+                    tampered_asset.write_bytes(b"tampered-after-release-validation")
+                    managed_before = {
+                        path: path.read_bytes()
+                        for path in (
+                            layout["pointer"],
+                            layout["launcher"],
+                            layout["desktop"],
+                        )
+                    }
+
+                    result = self._run_fixed_modern_hub_repair(layout)
+                    output = (result.stdout + result.stderr).decode(
+                        "utf-8", errors="replace"
+                    )
+                    self.assertNotEqual(result.returncode, 0, output)
+                    self.assertIn("release validation", output)
+                    for path, before in managed_before.items():
+                        self.assertEqual(path.read_bytes(), before)
+
+    def test_modern_hub_explicit_target_rejects_wrong_task_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(hub_root)
+            before = {
+                path: path.read_bytes()
+                for path in (
+                    layout["pointer"],
+                    layout["launcher"],
+                    layout["desktop"],
+                )
+            }
+
+            result = self._run_fixed_modern_hub_repair(
+                layout, task_case="wrong_arguments"
+            )
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn("exact modern Hub identity", output)
+            for path, payload in before.items():
+                self.assertEqual(path.read_bytes(), payload)
+
+    def test_modern_hub_explicit_target_rechecks_identity_after_temp_prewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(hub_root)
+            managed_before = {
+                path: path.read_bytes()
+                for path in (
+                    layout["pointer"],
+                    layout["launcher"],
+                    layout["desktop"],
+                )
+            }
+
+            result = self._run_fixed_modern_hub_repair(
+                layout, task_case="changes_after_first_read"
+            )
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn("exact modern Hub identity", output)
+            for path, payload in managed_before.items():
+                self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(list(hub_root.glob(".modern-upgrade-*")), [])
+
+    def test_modern_hub_explicit_target_rolls_back_every_replaced_byte(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(hub_root)
+            managed_before = {
+                path: path.read_bytes()
+                for path in (
+                    layout["pointer"],
+                    layout["launcher"],
+                    layout["desktop"],
+                )
+            }
+
+            # Windows' CRT handle permits reads but denies the delete sharing
+            # required by File.Replace. The scheduled launcher is replaced last,
+            # after current.json and the desktop launcher, so this exercises the
+            # reverse-order byte-for-byte rollback rather than a preflight error.
+            with layout["launcher"].open("rb"):
+                result = self._run_fixed_modern_hub_repair(layout)
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertNotEqual(result.returncode, 0, output)
+            self.assertIn("atomic upgrade failed during file replacement", output)
+            for path, payload in managed_before.items():
+                self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(list(hub_root.glob(".modern-upgrade-*")), [])
+
+    def test_modern_hub_without_explicit_target_remains_a_noop_when_fixed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hub_root = Path(temporary).resolve(strict=True) / "ManagedHub"
+            layout = self._write_fixed_modern_hub_layout(
+                hub_root, target_version=None
+            )
+            before = {
+                path: path.read_bytes()
+                for path in hub_root.rglob("*")
+                if path.is_file()
+            }
+
+            result = self._run_fixed_modern_hub_repair(
+                layout, use_target=False
+            )
+            output = (result.stdout + result.stderr).decode(
+                "utf-8", errors="replace"
+            )
+            self.assertEqual(result.returncode, 0, output)
+            after = {
+                path: path.read_bytes()
+                for path in hub_root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
     def test_existing_hub_upgrade_docs_use_the_read_only_launcher_repair(self) -> None:
         deployment = (
             self.project / "docs" / "DEPLOYMENT_WINDOWS.md"
@@ -1598,6 +2167,14 @@ if (
             self.assertIn("Start-StoryForgeHub.ps1", document)
             self.assertIn("-TargetAppDirectory", document)
             self.assertIn("BUILD_RELEASE_VALIDATION.json", document)
+            self.assertIn("严格高于", document)
+            self.assertIn(
+                "current.json` → `Start-StoryForge.cmd` → `Start-StoryForge-Hub.ps1",
+                document,
+            )
+            self.assertIn("TOCTOU", document)
+            self.assertIn("逐字节回滚", document)
+            self.assertIn("计划任务定义保持不变", document)
             self.assertIn("enable_storyforge_hub.ps1", document)
             self.assertIn("首次启用", document)
         recovery = (
@@ -1608,6 +2185,9 @@ if (
         self.assertIn("-TargetAppDirectory", recovery)
         self.assertIn("绝不能对它运行一键恢复或 bootstrap", recovery)
         self.assertIn("不读取或修改 SQLite", recovery)
+        self.assertIn("严格高于", recovery)
+        self.assertIn("逐字节回滚", recovery)
+        self.assertIn("计划任务定义保持不变", recovery)
 
     def test_existing_hub_repair_switches_a_verified_previous_wrapper_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

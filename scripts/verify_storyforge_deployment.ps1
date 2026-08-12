@@ -34,6 +34,74 @@ function Get-Win32ProcessById {
     return Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
 }
 
+function Get-StoryForgeFirewallRuleCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuleName,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+
+    $rule = $null
+    try {
+        $rule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction Stop
+    }
+    catch {
+        $rule = $null
+    }
+
+    if ($rule) {
+        $portFilter = $rule | Get-NetFirewallPortFilter
+        $addressFilter = $rule | Get-NetFirewallAddressFilter
+        $ok = [string]$rule.Enabled -eq 'True' -and [string]$rule.Direction -eq 'Inbound' -and [string]$rule.Action -eq 'Allow' -and [string]$rule.Profile -match 'Private' -and [string]$portFilter.Protocol -eq 'TCP' -and [string]$portFilter.LocalPort -eq [string]$Port -and (@($addressFilter.RemoteAddress) -contains 'LocalSubnet')
+        return [pscustomobject]@{
+            ok = [bool]$ok
+            detail = "enabled=$($rule.Enabled); direction=$($rule.Direction); action=$($rule.Action); profile=$($rule.Profile); port=$($portFilter.LocalPort); remote=$($addressFilter.RemoteAddress -join ',')"
+        }
+    }
+
+    try {
+        $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
+        $comRule = $policy.Rules.Item($RuleName)
+        if ($null -eq $comRule) {
+            throw "Firewall rule not found: $RuleName"
+        }
+        $remoteAddressText = [string]$comRule.RemoteAddresses
+        $remoteAddresses = @(
+            $remoteAddressText.Split(',') |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ }
+        )
+        $hasLocalSubnet = @(
+            $remoteAddresses | Where-Object {
+                [string]::Equals(
+                    [string]$_,
+                    'LocalSubnet',
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        ).Count -gt 0
+        $profiles = [int]$comRule.Profiles
+        $ok = (
+            [bool]$comRule.Enabled -and
+            [int]$comRule.Direction -eq 1 -and
+            [int]$comRule.Action -eq 1 -and
+            ($profiles -band 2) -eq 2 -and
+            [int]$comRule.Protocol -eq 6 -and
+            [string]$comRule.LocalPorts -eq [string]$Port -and
+            $hasLocalSubnet
+        )
+        return [pscustomobject]@{
+            ok = [bool]$ok
+            detail = "enabled=$($comRule.Enabled); direction=$($comRule.Direction); action=$($comRule.Action); profiles=$profiles; protocol=$($comRule.Protocol); port=$($comRule.LocalPorts); remote=$remoteAddressText"
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            ok = $false
+            detail = "missing; COM firewall lookup failed: $($_.Exception.Message)"
+        }
+    }
+}
+
 $checks = New-Object System.Collections.Generic.List[object]
 function Add-Check {
     param([string]$Name, [bool]$Ok, [string]$Detail)
@@ -95,16 +163,8 @@ if ($Role -eq 'Hub') {
     Add-Check -Name 'scheduled_task' -Ok $taskOk -Detail $(if ($task) { [string]$task.State } else { 'missing' })
 
     $ruleName = "StoryForge Hub $Port (Private LAN)"
-    $rule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-    $firewallOk = $false
-    $firewallDetail = 'missing'
-    if ($rule) {
-        $portFilter = $rule | Get-NetFirewallPortFilter
-        $addressFilter = $rule | Get-NetFirewallAddressFilter
-        $firewallOk = [string]$rule.Enabled -eq 'True' -and [string]$rule.Profile -match 'Private' -and [string]$portFilter.Protocol -eq 'TCP' -and [string]$portFilter.LocalPort -eq [string]$Port -and (@($addressFilter.RemoteAddress) -contains 'LocalSubnet')
-        $firewallDetail = "enabled=$($rule.Enabled); profile=$($rule.Profile); port=$($portFilter.LocalPort); remote=$($addressFilter.RemoteAddress -join ',')"
-    }
-    Add-Check -Name 'private_firewall' -Ok $firewallOk -Detail $firewallDetail
+    $firewall = Get-StoryForgeFirewallRuleCheck -RuleName $ruleName -Port $Port
+    Add-Check -Name 'private_firewall' -Ok ([bool]$firewall.ok) -Detail ([string]$firewall.detail)
 
     $webHealthUrl = "http://127.0.0.1:$Port/web/api/health"
     $healthOk = $false

@@ -53,14 +53,16 @@ StoryForge 发布目录\
      --output "<更新包输出路径>"
    ```
 
-3. 先备份并人工升级 Hub 主电脑。已有现代 `current.json` 布局时，确认它已精确指向新版 `App-<version>` 后，运行 `scripts\repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data`。只有旧参数化 ops-task 布局时，先经正式包校验链安装新 App，再在同一命令显式增加 `-TargetAppDirectory D:\StoryForgeHub\App-<version>`。最后只在批准的维护窗口重启原计划任务并确认 Hub 正常。主电脑不会自动安装自己发布的版本。
+3. 先备份 Hub 主电脑，再通过正式 Release 校验链把新完整程序安装到新的 `App-<version>`，但不手改 `current.json`。已有现代布局和旧参数化 ops-task 布局都显式运行 `scripts\repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data -TargetAppDirectory D:\StoryForgeHub\App-<version>`；脚本会按布局选择受支持的原子升级或旧任务迁移。最后只在批准的维护窗口重启原计划任务并确认 Hub 正常。主电脑不会自动安装自己发布的版本。
 4. 在主电脑“设置 → 软件更新”选择 ZIP，填写相同版本号和更新说明，点击发布；也可由管理员在 Hub 网页管理界面上传同一 ZIP 并发布。远程制作电脑不能通过设备 Hub RPC 发布软件。
 
 以上流程只发布**核心程序**。语言组件包使用独立后端：清单包含 `component_id`、版本、应用兼容范围及逐文件 SHA-256，Hub 或本地发布器还可校验整包 SHA-256；客户端安全解压到 `<StoryForgeData>\components`，通过不可变版本目录和原子状态文件切换，并保留上一版回退。组件包不得替换 EXE，核心程序 ZIP 也不得覆盖组件数据。
 
-旧 Hub 启动器修复只适用于已存在且身份完全匹配的受管部署。现代布局中，`repair_storyforge_hub_launcher.ps1` 会核对 `current.json` 当前入口、前一受管 `App-<version>`、两个版本的包内 manifest、固定 DataRoot、host 设置、catalog 文件和计划任务的精确动作/用户；通过后只将 `Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd` 分别原子切换到当前入口。
+旧 Hub 启动器修复只适用于已存在且身份完全匹配的受管部署。现代布局不传 `-TargetAppDirectory` 时，脚本保留历史修复合同：核对 `current.json`、旧启动器入口、固定 DataRoot、host 设置、catalog 文件和计划任务精确身份，只修复两个启动器到已有当前入口。
 
-若旧机只有参数化 `Start-StoryForgeHub.ps1` 计划任务，且三个现代文件全部不存在，必须先用正式 Release 的 GitHub digest、sidecar、archive、内部 manifest 和完整目录验证链安装新 `App-<version>`，再运行 `repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data -TargetAppDirectory D:\StoryForgeHub\App-<version>`。此路径会逐字核对旧 wrapper/task/App/Data/Port 身份，并重算新 App 的 `BUILD_RELEASE_VALIDATION.json` 完整目录摘要；仅在全部通过后生成两个现代启动器和 `current.json`、更新任务 action，失败即回滚。两种路径都不会读取或修改 SQLite，不会启动或停止服务，也不会修改 DataRoot。任何半迁移或身份不匹配状态都必须查明原因，不能用 bootstrap、新机一键恢复或 `-Force` 注册来覆盖现有正式 Hub。
+现代布局显式传入 `-TargetAppDirectory` 时，脚本会对当前与目标 App 都重算 `BUILD_RELEASE_VALIDATION.json` 完整文件树，且目标版本必须严格高于当前版本。在 host 设置、非空普通 catalog、当前两个启动器和计划任务精确身份全部通过后，先预写临时文件并重做 TOCTOU 校验，再按 `current.json` → `Start-StoryForge.cmd` → `Start-StoryForge-Hub.ps1` 的顺序原子替换；最后一个文件是计划任务实际调用的启动器，计划任务定义保持不变。替换或最终复验失败会按反向顺序逐字节回滚。
+
+若旧机只有参数化 `Start-StoryForgeHub.ps1` 计划任务，且三个现代文件全部不存在，必须先用正式 Release 的 GitHub digest、sidecar、archive、内部 manifest 和完整目录验证链安装新 `App-<version>`，再运行 `repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data -TargetAppDirectory D:\StoryForgeHub\App-<version>`。此路径会逐字核对旧 wrapper/task/App/Data/Port 身份，并重算新 App 的 `BUILD_RELEASE_VALIDATION.json` 完整目录摘要；仅在全部通过后生成两个现代启动器和 `current.json`、更新任务 action，失败即回滚。三种路径都不会读取或修改 SQLite，不会启动或停止服务，也不会修改 DataRoot。任何半迁移或身份不匹配状态都必须查明原因，不能用 bootstrap、新机一键恢复或 `-Force` 注册来覆盖现有正式 Hub。
 
 `enable_storyforge_hub.ps1` 仅是旧发布目录的首次启用兼容入口：已有同名计划任务或端口监听时必须拒绝，不会覆盖。既有受管 Hub 升级后只能用 `repair_storyforge_hub_launcher.ps1`，不能重跑 enable。
 

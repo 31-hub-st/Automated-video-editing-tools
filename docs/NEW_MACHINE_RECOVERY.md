@@ -48,7 +48,7 @@ Set-Location 'C:\path\to\Automated-video-editing-tools'
 
 脚本固定安装到 `D:\StoryForgeHub`，正式 DataRoot 为 `D:\StoryForgeHub\Data`，端口为 `8765`。只要安装根包含旧程序或其他文件、DataRoot 非空、`StoryForge Hub` 任务已存在、8765 已监听或 StoryForge 正式进程仍在运行，就会中文拒绝；不会合并或覆盖已有数据库。仅下载最新程序不能恢复业务数据；小说、账号、口令和制作记录来自私有 `hub-state-latest` 快照。成功后会显示局域网地址、原地址 `10.0.0.225` 的固定局域网 IP 建议与 DPAPI 提示并打开网页，失败时保留中文摘要和本地日志。
 
-现有 Hub 原地升级不属于换机恢复，绝不能对它运行一键恢复或 bootstrap。若旧机只有参数化 `Start-StoryForgeHub.ps1` 计划任务而没有 `current.json`，先通过正式 Release 摘要、sidecar、archive、内部 manifest 和完整目录校验链安装新 `App-<version>`，再按 [Windows 部署说明](DEPLOYMENT_WINDOWS.md) 使用 `repair_storyforge_hub_launcher.ps1 -TargetAppDirectory <新 App 目录>`。该入口不读取或修改 SQLite，不改 DataRoot，不启停服务。
+现有 Hub 原地升级不属于换机恢复，绝不能对它运行一键恢复或 bootstrap。无论旧机已有现代 `current.json` 布局，还是只有参数化 `Start-StoryForgeHub.ps1` 计划任务，都必须先通过正式 Release 摘要、sidecar、archive、内部 manifest 和完整目录校验链安装新 `App-<version>`，再按 [Windows 部署说明](DEPLOYMENT_WINDOWS.md) 使用 `repair_storyforge_hub_launcher.ps1 -TargetAppDirectory <新 App 目录>`。现代布局会要求目标版本严格高于 `current.json` 的当前版本，完整复验两个 App 及当前启动器/计划任务，并按 `current.json` → `Start-StoryForge.cmd` → `Start-StoryForge-Hub.ps1` 原子切换；失败会反向逐字节回滚，计划任务定义保持不变。该入口不读取或修改 SQLite，不改 DataRoot，不启停服务。
 
 最短操作与安全边界见 [StoryForge Hub 新电脑一键恢复](ONE_CLICK_HUB_RECOVERY.md)。需要自定义路径或人工操作时，继续使用下方手动流程。
 

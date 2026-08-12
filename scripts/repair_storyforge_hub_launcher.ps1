@@ -566,6 +566,388 @@ function Assert-ModernTaskIdentity {
     return $task
 }
 
+function Get-ManagedHubLauncherContents {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedDataRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint,
+        [Parameter(Mandatory = $true)][int]$ExpectedPort
+    )
+
+    $launcherLines = @(
+        '$ErrorActionPreference = ''Stop''',
+        '$env:STORYFORGE_DEPLOYMENT_ROLE = ''Hub''',
+        "`$env:STORYFORGE_DATA_DIR = '$ExpectedDataRoot'",
+        'Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue',
+        'Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue',
+        "& '$ExpectedEntrypoint' --web --web-host 0.0.0.0 --web-port $ExpectedPort",
+        'exit $LASTEXITCODE'
+    )
+    $scheduled = [string]::Join([Environment]::NewLine, $launcherLines) + [Environment]::NewLine
+    $desktop = (
+        "@echo off`r`n" +
+        "set `"STORYFORGE_DEPLOYMENT_ROLE=Hub`"`r`n" +
+        "set `"STORYFORGE_DATA_DIR=$ExpectedDataRoot`"`r`n" +
+        "set `"STORYFORGE_FROZEN_HUB_DATA_ROOT=`"`r`n" +
+        "set `"STORYFORGE_PORTABLE_MODE=`"`r`n" +
+        "start `"`" `"$ExpectedEntrypoint`"`r`n"
+    )
+    return [PSCustomObject]@{
+        Scheduled = $scheduled
+        Desktop = $desktop
+    }
+}
+
+function Get-ByteArraySha256 {
+    param([Parameter(Mandatory = $true)][byte[]]$Value)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($Value))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Test-ExactByteArray {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Left,
+        [Parameter(Mandatory = $true)][byte[]]$Right
+    )
+
+    if ($Left.Length -ne $Right.Length) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Left.Length; $index += 1) {
+        if ($Left[$index] -ne $Right[$index]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Read-VerifiedModernPointerIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedHubRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedDataRoot,
+        [Parameter(Mandatory = $true)][string]$PointerPath
+    )
+
+    [void](Assert-OrdinaryFileSystemItem -Path $PointerPath -Label 'Managed deployment pointer' -PathType Leaf)
+    $pointerBytes = [System.IO.File]::ReadAllBytes($PointerPath)
+    try {
+        $pointerText = [System.Text.Encoding]::UTF8.GetString($pointerBytes)
+        $pointer = $pointerText | ConvertFrom-Json
+    }
+    catch {
+        throw 'current.json is invalid; refusing managed Hub upgrade.'
+    }
+    if ([int]$pointer.schema_version -ne 1) {
+        throw 'current.json uses an unsupported schema.'
+    }
+    $pointerVersion = [string]$pointer.version
+    if ($pointerVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$') {
+        throw 'current.json contains an invalid version.'
+    }
+    $appDirectory = Get-SafeFixedPath -Value ([string]$pointer.app_directory) -Label 'app_directory'
+    if ($appDirectory -ne (Join-Path $ExpectedHubRoot "App-$pointerVersion")) {
+        throw 'current.json does not identify the exact managed App-version directory.'
+    }
+    $entrypoint = Get-SafeFixedPath -Value ([string]$pointer.entrypoint) -Label 'entrypoint'
+    if ($entrypoint -ne (Join-Path $appDirectory 'StoryForge Studio.exe')) {
+        throw 'current.json does not identify the exact managed StoryForge executable.'
+    }
+    $release = Assert-VerifiedTargetRelease `
+        -Target $appDirectory `
+        -ExpectedHubRoot $ExpectedHubRoot `
+        -ExpectedDataRoot $ExpectedDataRoot
+    if (
+        [string]$release.Version -ne $pointerVersion -or
+        [string]$release.AppDirectory -ne $appDirectory -or
+        [string]$release.Entrypoint -ne $entrypoint
+    ) {
+        throw 'current.json and the fully verified current release do not match.'
+    }
+    return [PSCustomObject]@{
+        Version = $pointerVersion
+        AppDirectory = $appDirectory
+        Entrypoint = $entrypoint
+        PointerBytes = $pointerBytes
+        PointerSha256 = Get-ByteArraySha256 -Value $pointerBytes
+    }
+}
+
+function Assert-ExactModernManagedState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedHubRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedDataRoot,
+        [Parameter(Mandatory = $true)][int]$ExpectedPort,
+        [Parameter(Mandatory = $true)][string]$ExpectedTaskName,
+        [Parameter(Mandatory = $true)][string]$PointerPath,
+        [Parameter(Mandatory = $true)][string]$ModernLauncherPath,
+        [Parameter(Mandatory = $true)][string]$DesktopLauncherPath,
+        [Parameter(Mandatory = $true)][string]$CanonicalPowerShell,
+        [string]$ExpectedPointerSha256 = '',
+        [string]$ExpectedCurrentVersion = ''
+    )
+
+    Assert-ExistingHubDataIdentity -Root $ExpectedDataRoot
+    $pointerIdentity = Read-VerifiedModernPointerIdentity `
+        -ExpectedHubRoot $ExpectedHubRoot `
+        -ExpectedDataRoot $ExpectedDataRoot `
+        -PointerPath $PointerPath
+    if (
+        -not [string]::IsNullOrWhiteSpace($ExpectedPointerSha256) -and
+        [string]$pointerIdentity.PointerSha256 -cne $ExpectedPointerSha256
+    ) {
+        throw 'current.json changed during managed Hub upgrade validation.'
+    }
+    if (
+        -not [string]::IsNullOrWhiteSpace($ExpectedCurrentVersion) -and
+        [string]$pointerIdentity.Version -cne $ExpectedCurrentVersion
+    ) {
+        throw 'The current managed release changed during Hub upgrade validation.'
+    }
+
+    [void](Assert-OrdinaryFileSystemItem -Path $ModernLauncherPath -Label 'Existing Hub launcher' -PathType Leaf)
+    [void](Assert-OrdinaryFileSystemItem -Path $DesktopLauncherPath -Label 'Existing Hub desktop launcher' -PathType Leaf)
+    $launcherBytes = [System.IO.File]::ReadAllBytes($ModernLauncherPath)
+    $desktopBytes = [System.IO.File]::ReadAllBytes($DesktopLauncherPath)
+    $expectedContents = Get-ManagedHubLauncherContents `
+        -ExpectedDataRoot $ExpectedDataRoot `
+        -ExpectedEntrypoint ([string]$pointerIdentity.Entrypoint) `
+        -ExpectedPort $ExpectedPort
+    $expectedLauncherBytes = [System.Text.Encoding]::ASCII.GetBytes([string]$expectedContents.Scheduled)
+    $expectedDesktopBytes = [System.Text.Encoding]::ASCII.GetBytes([string]$expectedContents.Desktop)
+    if (-not (Test-ExactByteArray -Left $launcherBytes -Right $expectedLauncherBytes)) {
+        throw 'The existing scheduled Hub launcher is not the exact managed current-release launcher.'
+    }
+    if (-not (Test-ExactByteArray -Left $desktopBytes -Right $expectedDesktopBytes)) {
+        throw 'The existing desktop Hub launcher is not the exact managed current-release launcher.'
+    }
+    [void](Assert-ModernTaskIdentity `
+        -ExpectedHubRoot $ExpectedHubRoot `
+        -ModernLauncherPath $ModernLauncherPath `
+        -ExpectedTaskName $ExpectedTaskName `
+        -CanonicalPowerShell $CanonicalPowerShell)
+
+    return [PSCustomObject]@{
+        Version = [string]$pointerIdentity.Version
+        AppDirectory = [string]$pointerIdentity.AppDirectory
+        Entrypoint = [string]$pointerIdentity.Entrypoint
+        PointerBytes = [byte[]]$pointerIdentity.PointerBytes
+        PointerSha256 = [string]$pointerIdentity.PointerSha256
+        LauncherBytes = $launcherBytes
+        DesktopBytes = $desktopBytes
+    }
+}
+
+function Invoke-ModernManagedUpgrade {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedHubRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedDataRoot,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][int]$ExpectedPort,
+        [Parameter(Mandatory = $true)][string]$ExpectedTaskName,
+        [Parameter(Mandatory = $true)][string]$PointerPath,
+        [Parameter(Mandatory = $true)][string]$ModernLauncherPath,
+        [Parameter(Mandatory = $true)][string]$DesktopLauncherPath
+    )
+
+    $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    [void](Assert-OrdinaryFileSystemItem -Path $powerShell -Label 'Windows PowerShell 5.1' -PathType Leaf)
+    $sourceState = Assert-ExactModernManagedState `
+        -ExpectedHubRoot $ExpectedHubRoot `
+        -ExpectedDataRoot $ExpectedDataRoot `
+        -ExpectedPort $ExpectedPort `
+        -ExpectedTaskName $ExpectedTaskName `
+        -PointerPath $PointerPath `
+        -ModernLauncherPath $ModernLauncherPath `
+        -DesktopLauncherPath $DesktopLauncherPath `
+        -CanonicalPowerShell $powerShell
+    $targetRelease = Assert-VerifiedTargetRelease `
+        -Target $Target `
+        -ExpectedHubRoot $ExpectedHubRoot `
+        -ExpectedDataRoot $ExpectedDataRoot
+    if ([string]$sourceState.AppDirectory -eq [string]$targetRelease.AppDirectory) {
+        throw 'TargetAppDirectory must be a different verified release from current.json.'
+    }
+    $currentCoreVersion = [version](([string]$sourceState.Version -split '[-+]', 2)[0])
+    $targetCoreVersion = [version](([string]$targetRelease.Version -split '[-+]', 2)[0])
+    if ($targetCoreVersion -le $currentCoreVersion) {
+        throw 'TargetAppDirectory must contain a newer verified release than the current managed release.'
+    }
+
+    $targetContents = Get-ManagedHubLauncherContents `
+        -ExpectedDataRoot $ExpectedDataRoot `
+        -ExpectedEntrypoint ([string]$targetRelease.Entrypoint) `
+        -ExpectedPort $ExpectedPort
+    $pointer = [ordered]@{
+        schema_version = 1
+        version = [string]$targetRelease.Version
+        app_directory = [string]$targetRelease.AppDirectory
+        entrypoint = [string]$targetRelease.Entrypoint
+        installed_at_utc = [DateTime]::UtcNow.ToString('o')
+        source_release = "v$($targetRelease.Version)"
+    }
+    $pointerContent = ($pointer | ConvertTo-Json) + [Environment]::NewLine
+    $pointerContentBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($pointerContent)
+    $launcherContentBytes = [System.Text.Encoding]::ASCII.GetBytes([string]$targetContents.Scheduled)
+    $desktopContentBytes = [System.Text.Encoding]::ASCII.GetBytes([string]$targetContents.Desktop)
+
+    $pointerTemporary = Join-Path $ExpectedHubRoot ('.modern-upgrade-current-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $desktopTemporary = Join-Path $ExpectedHubRoot ('.modern-upgrade-desktop-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $launcherTemporary = Join-Path $ExpectedHubRoot ('.modern-upgrade-scheduled-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $pointerBackup = Join-Path $ExpectedHubRoot ('.modern-upgrade-current-backup-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $desktopBackup = Join-Path $ExpectedHubRoot ('.modern-upgrade-desktop-backup-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $launcherBackup = Join-Path $ExpectedHubRoot ('.modern-upgrade-scheduled-backup-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $pointerDiscard = Join-Path $ExpectedHubRoot ('.modern-upgrade-current-discard-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $desktopDiscard = Join-Path $ExpectedHubRoot ('.modern-upgrade-desktop-discard-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $launcherDiscard = Join-Path $ExpectedHubRoot ('.modern-upgrade-scheduled-discard-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $pointerReplaced = $false
+    $desktopReplaced = $false
+    $launcherReplaced = $false
+    $mutationStarted = $false
+    $retainRecoveryFiles = $false
+    try {
+        [System.IO.File]::WriteAllBytes($pointerTemporary, $pointerContentBytes)
+        [System.IO.File]::WriteAllBytes($desktopTemporary, $desktopContentBytes)
+        [System.IO.File]::WriteAllBytes($launcherTemporary, $launcherContentBytes)
+        foreach ($temporary in @($pointerTemporary, $desktopTemporary, $launcherTemporary)) {
+            [void](Assert-OrdinaryFileSystemItem -Path $temporary -Label 'Prepared managed Hub upgrade file' -PathType Leaf)
+        }
+        if (
+            -not (Test-ExactByteArray -Left ([System.IO.File]::ReadAllBytes($pointerTemporary)) -Right $pointerContentBytes) -or
+            -not (Test-ExactByteArray -Left ([System.IO.File]::ReadAllBytes($desktopTemporary)) -Right $desktopContentBytes) -or
+            -not (Test-ExactByteArray -Left ([System.IO.File]::ReadAllBytes($launcherTemporary)) -Right $launcherContentBytes)
+        ) {
+            throw 'Prepared managed Hub upgrade files did not retain their exact intended bytes.'
+        }
+
+        # Re-run every mutable identity check after preparing files and
+        # immediately before the first atomic replacement (TOCTOU fail-closed).
+        $confirmedSource = Assert-ExactModernManagedState `
+            -ExpectedHubRoot $ExpectedHubRoot `
+            -ExpectedDataRoot $ExpectedDataRoot `
+            -ExpectedPort $ExpectedPort `
+            -ExpectedTaskName $ExpectedTaskName `
+            -PointerPath $PointerPath `
+            -ModernLauncherPath $ModernLauncherPath `
+            -DesktopLauncherPath $DesktopLauncherPath `
+            -CanonicalPowerShell $powerShell `
+            -ExpectedPointerSha256 ([string]$sourceState.PointerSha256) `
+            -ExpectedCurrentVersion ([string]$sourceState.Version)
+        $confirmedTarget = Assert-VerifiedTargetRelease `
+            -Target $Target `
+            -ExpectedHubRoot $ExpectedHubRoot `
+            -ExpectedDataRoot $ExpectedDataRoot
+        if (
+            [string]$confirmedSource.AppDirectory -ne [string]$sourceState.AppDirectory -or
+            [string]$confirmedSource.Entrypoint -ne [string]$sourceState.Entrypoint -or
+            [string]$confirmedTarget.Version -ne [string]$targetRelease.Version -or
+            [string]$confirmedTarget.AppDirectory -ne [string]$targetRelease.AppDirectory -or
+            [string]$confirmedTarget.Entrypoint -ne [string]$targetRelease.Entrypoint
+        ) {
+            throw 'A managed release identity changed during Hub upgrade validation.'
+        }
+
+        $mutationStarted = $true
+        [System.IO.File]::Replace($pointerTemporary, $PointerPath, $pointerBackup, $true)
+        $pointerReplaced = $true
+        [System.IO.File]::Replace($desktopTemporary, $DesktopLauncherPath, $desktopBackup, $true)
+        $desktopReplaced = $true
+        # Keep the scheduled launcher last so the unchanged task cannot select
+        # the new release until current.json and the desktop entry agree.
+        [System.IO.File]::Replace($launcherTemporary, $ModernLauncherPath, $launcherBackup, $true)
+        $launcherReplaced = $true
+
+        [void](Assert-ExactModernManagedState `
+            -ExpectedHubRoot $ExpectedHubRoot `
+            -ExpectedDataRoot $ExpectedDataRoot `
+            -ExpectedPort $ExpectedPort `
+            -ExpectedTaskName $ExpectedTaskName `
+            -PointerPath $PointerPath `
+            -ModernLauncherPath $ModernLauncherPath `
+            -DesktopLauncherPath $DesktopLauncherPath `
+            -CanonicalPowerShell $powerShell `
+            -ExpectedPointerSha256 (Get-ByteArraySha256 -Value $pointerContentBytes) `
+            -ExpectedCurrentVersion ([string]$targetRelease.Version))
+    }
+    catch {
+        $upgradeError = $_
+        if (-not $mutationStarted) {
+            throw $upgradeError
+        }
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        foreach ($rollback in @(
+            [PSCustomObject]@{ Replaced = $launcherReplaced; Backup = $launcherBackup; Destination = $ModernLauncherPath; Discard = $launcherDiscard; Label = 'scheduled launcher' },
+            [PSCustomObject]@{ Replaced = $desktopReplaced; Backup = $desktopBackup; Destination = $DesktopLauncherPath; Discard = $desktopDiscard; Label = 'desktop launcher' },
+            [PSCustomObject]@{ Replaced = $pointerReplaced; Backup = $pointerBackup; Destination = $PointerPath; Discard = $pointerDiscard; Label = 'current.json' }
+        )) {
+            if (-not [bool]$rollback.Replaced) {
+                continue
+            }
+            try {
+                [System.IO.File]::Replace(
+                    [string]$rollback.Backup,
+                    [string]$rollback.Destination,
+                    [string]$rollback.Discard,
+                    $true
+                )
+            }
+            catch {
+                $rollbackErrors.Add("$($rollback.Label): $($_.Exception.Message)") | Out-Null
+            }
+        }
+        foreach ($verification in @(
+            [PSCustomObject]@{ Path = $ModernLauncherPath; Bytes = [byte[]]$sourceState.LauncherBytes; Label = 'scheduled launcher' },
+            [PSCustomObject]@{ Path = $DesktopLauncherPath; Bytes = [byte[]]$sourceState.DesktopBytes; Label = 'desktop launcher' },
+            [PSCustomObject]@{ Path = $PointerPath; Bytes = [byte[]]$sourceState.PointerBytes; Label = 'current.json' }
+        )) {
+            try {
+                $actualBytes = [System.IO.File]::ReadAllBytes([string]$verification.Path)
+                if (-not (Test-ExactByteArray -Left $actualBytes -Right ([byte[]]$verification.Bytes))) {
+                    $rollbackErrors.Add("$($verification.Label): restored bytes differ from the exact original") | Out-Null
+                }
+            }
+            catch {
+                $rollbackErrors.Add("$($verification.Label): rollback verification failed: $($_.Exception.Message)") | Out-Null
+            }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            $retainRecoveryFiles = $true
+            throw (
+                'Modern Hub atomic upgrade failed and exact rollback did not complete. ' +
+                "Upgrade error: $($upgradeError.Exception.Message) " +
+                "Rollback errors: $([string]::Join('; ', $rollbackErrors.ToArray()))"
+            )
+        }
+        throw "Modern Hub atomic upgrade failed during file replacement or final validation; exact rollback completed: $($upgradeError.Exception.Message)"
+    }
+    finally {
+        $cleanupPaths = @(
+            $pointerTemporary,
+            $desktopTemporary,
+            $launcherTemporary,
+            $pointerDiscard,
+            $desktopDiscard,
+            $launcherDiscard
+        )
+        if (-not $retainRecoveryFiles) {
+            $cleanupPaths += @($pointerBackup, $desktopBackup, $launcherBackup)
+        }
+        foreach ($cleanupPath in $cleanupPaths) {
+            if (Test-Path -LiteralPath $cleanupPath -PathType Leaf) {
+                Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Write-Host 'StoryForge Hub current.json and launchers switched to the verified newer release.'
+    Write-Host 'The scheduled task definition was not changed or started, and DataRoot was not changed.'
+    Write-Host 'Restart the existing Hub only during an approved maintenance window.'
+}
+
 function Invoke-LegacyOpsMigration {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedHubRoot,
@@ -787,7 +1169,16 @@ if ($modernArtifactCount -eq 0) {
     exit 0
 }
 if (-not [string]::IsNullOrWhiteSpace($TargetAppDirectory)) {
-    throw '-TargetAppDirectory is only valid for the exact legacy ops-task migration path.'
+    Invoke-ModernManagedUpgrade `
+        -ExpectedHubRoot $HubRoot `
+        -ExpectedDataRoot $DataRoot `
+        -Target $TargetAppDirectory `
+        -ExpectedPort $Port `
+        -ExpectedTaskName $TaskName `
+        -PointerPath $pointerPath `
+        -ModernLauncherPath $launcherPath `
+        -DesktopLauncherPath $desktopLauncherPath
+    exit 0
 }
 
 [void](Assert-OrdinaryFileSystemItem -Path $pointerPath -Label 'Managed deployment pointer' -PathType Leaf)

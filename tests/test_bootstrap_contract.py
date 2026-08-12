@@ -926,9 +926,9 @@ if (
             "App-$pointerVersion",
             "$settings.settings.hub.mode",
             "$task.Actions",
-            "$task.Principal.UserId",
-            "$task.Principal.LogonType",
-            "$task.Principal.RunLevel",
+            "$Principal.UserId",
+            "$Principal.LogonType",
+            "$Principal.RunLevel",
             "$expectedTaskArguments",
             "$actionExecutableValue",
             "$actionWorkingDirectoryValue",
@@ -982,6 +982,23 @@ if (
         self.assertGreaterEqual(
             self.repair_hub.count("[System.IO.File]::Replace"),
             2,
+        )
+        self.assertIn("function Resolve-TaskPrincipalSid", self.repair_hub)
+        self.assertIn(
+            ".Translate([Security.Principal.SecurityIdentifier])",
+            self.repair_hub,
+        )
+        self.assertIn(
+            "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            self.repair_hub,
+        )
+        self.assertEqual(
+            self.repair_hub.count("Assert-CurrentUserTaskPrincipal `"),
+            3,
+        )
+        self.assertNotIn(
+            "[string]$task.Principal.UserId -ne $currentUser",
+            self.repair_hub,
         )
 
         self.assertIn(
@@ -1127,6 +1144,8 @@ if (
             "malformed_action",
             "partial_modern_state",
             "tampered_target",
+            "foreign_principal",
+            "unresolved_principal",
         ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve(strict=True)
@@ -1172,6 +1191,15 @@ if (
                     "STORYFORGE_TEST_EXTRA_ARGUMENT": (
                         " -Unexpected" if case == "malformed_action" else ""
                     ),
+                    "STORYFORGE_TEST_TASK_USER": (
+                        "S-1-5-18"
+                        if case == "foreign_principal"
+                        else (
+                            "StoryForge-Account-That-Does-Not-Exist"
+                            if case == "unresolved_principal"
+                            else os.environ["USERNAME"]
+                        )
+                    ),
                 }
                 harness = r"""
 $ErrorActionPreference = 'Stop'
@@ -1179,7 +1207,7 @@ $legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TES
 $global:StoryForgeSetCount = 0
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @([PSCustomObject]@{ Execute = 'powershell.exe'; Arguments = $legacyArguments; WorkingDirectory = '' })
-    Principal = [PSCustomObject]@{ UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name; LogonType = 'Interactive'; RunLevel = 'Limited' }
+    Principal = [PSCustomObject]@{ UserId = $env:STORYFORGE_TEST_TASK_USER; LogonType = 'Interactive'; RunLevel = 'Limited' }
 }
 function Get-ScheduledTask {
     param([string]$TaskName, [string]$TaskPath, [System.Management.Automation.ActionPreference]$ErrorAction)
@@ -1262,7 +1290,7 @@ $legacyAction = [PSCustomObject]@{ Execute = 'powershell.exe'; Arguments = $lega
 $global:StoryForgeSetCount = 0
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @($legacyAction)
-    Principal = [PSCustomObject]@{ UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name; LogonType = 'Interactive'; RunLevel = 'Limited' }
+    Principal = [PSCustomObject]@{ UserId = $env:USERNAME; LogonType = 'Interactive'; RunLevel = 'Limited' }
 }
 function Get-ScheduledTask {
     param([string]$TaskName, [string]$TaskPath, [System.Management.Automation.ActionPreference]$ErrorAction)
@@ -1429,7 +1457,7 @@ if (
 $ErrorActionPreference = 'Stop'
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:STORYFORGE_TEST_LAUNCHER`""
-$expectedUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$expectedUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @([PSCustomObject]@{
         Execute = $powerShell

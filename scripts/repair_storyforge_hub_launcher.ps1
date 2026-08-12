@@ -60,6 +60,41 @@ function ConvertTo-NormalizedText {
     return ($Value -replace "`r`n", "`n").TrimEnd("`r", "`n")
 }
 
+function Resolve-TaskPrincipalSid {
+    param([Parameter(Mandatory = $true)][string]$UserId)
+
+    if ([string]::IsNullOrWhiteSpace($UserId)) {
+        throw 'The scheduled task principal UserId is empty.'
+    }
+    try {
+        if ($UserId -match '^S-\d-(?:\d+-)+\d+$') {
+            return (New-Object Security.Principal.SecurityIdentifier($UserId)).Value
+        }
+        $account = New-Object Security.Principal.NTAccount($UserId)
+        return $account.Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw "The scheduled task principal UserId cannot be resolved to a SID: $UserId"
+    }
+}
+
+function Assert-CurrentUserTaskPrincipal {
+    param(
+        [Parameter(Mandatory = $true)][object]$Principal,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $taskSid = Resolve-TaskPrincipalSid -UserId ([string]$Principal.UserId)
+    if (
+        $taskSid -cne $currentSid -or
+        [string]$Principal.LogonType -ne 'Interactive' -or
+        [string]$Principal.RunLevel -ne 'Limited'
+    ) {
+        throw "$Label is not the exact current-user SID Interactive/Limited identity."
+    }
+}
+
 function Assert-ExistingHubDataIdentity {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -415,14 +450,9 @@ function Assert-LegacyOpsTaskIdentity {
     if (-not $executableMatches -or -not [string]::IsNullOrWhiteSpace([string]$action.WorkingDirectory)) {
         throw 'The legacy task executable or empty WorkingDirectory does not match the supported ops task.'
     }
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if (
-        [string]$task.Principal.UserId -ne $currentUser -or
-        [string]$task.Principal.LogonType -ne 'Interactive' -or
-        [string]$task.Principal.RunLevel -ne 'Limited'
-    ) {
-        throw 'The legacy task principal is not the exact current-user Interactive/Limited identity.'
-    }
+    Assert-CurrentUserTaskPrincipal `
+        -Principal $task.Principal `
+        -Label 'The legacy task principal'
 
     $arguments = [string]$action.Arguments
     $prefix = "-NoProfile -ExecutionPolicy Bypass -File $LegacyLauncherPath -InstallPath "
@@ -497,17 +527,16 @@ function Assert-ModernTaskIdentity {
         throw 'The migrated task action does not use absolute paths.'
     }
     $expectedArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ModernLauncherPath`""
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     if (
         [System.IO.Path]::GetFullPath($executeValue) -ne [System.IO.Path]::GetFullPath($CanonicalPowerShell) -or
         [string]$action.Arguments -cne $expectedArguments -or
-        [System.IO.Path]::GetFullPath($workingValue).TrimEnd('\') -ne $ExpectedHubRoot -or
-        [string]$task.Principal.UserId -ne $currentUser -or
-        [string]$task.Principal.LogonType -ne 'Interactive' -or
-        [string]$task.Principal.RunLevel -ne 'Limited'
+        [System.IO.Path]::GetFullPath($workingValue).TrimEnd('\') -ne $ExpectedHubRoot
     ) {
         throw 'The migrated scheduled task does not match the exact modern Hub identity.'
     }
+    Assert-CurrentUserTaskPrincipal `
+        -Principal $task.Principal `
+        -Label 'The migrated scheduled task principal'
     return $task
 }
 
@@ -806,17 +835,16 @@ if (
 }
 $actualTaskExecutable = [System.IO.Path]::GetFullPath($actionExecutableValue)
 $actualWorkingDirectory = [System.IO.Path]::GetFullPath($actionWorkingDirectoryValue).TrimEnd('\')
-$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if (
     $actualTaskExecutable -ne [System.IO.Path]::GetFullPath($powerShell) -or
     [string]$action.Arguments -ne $expectedTaskArguments -or
-    $actualWorkingDirectory -ne $HubRoot -or
-    [string]$task.Principal.UserId -ne $currentUser -or
-    [string]$task.Principal.LogonType -ne 'Interactive' -or
-    [string]$task.Principal.RunLevel -ne 'Limited'
+    $actualWorkingDirectory -ne $HubRoot
 ) {
     throw 'The existing scheduled task is not the exact managed StoryForge Hub identity.'
 }
+Assert-CurrentUserTaskPrincipal `
+    -Principal $task.Principal `
+    -Label 'The existing scheduled task principal'
 
 $newLauncherLines = @(
     '$ErrorActionPreference = ''Stop''',

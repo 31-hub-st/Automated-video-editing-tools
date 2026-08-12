@@ -616,6 +616,87 @@ foreach ($mode in @('task', 'listener', 'process')) {
             self.verify,
         )
 
+    def test_deployment_verifier_ps51_serializes_failed_checks_as_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="StoryForgeVerifyMissing-") as temporary:
+            missing_install_root = Path(temporary).resolve(strict=True) / "Missing"
+            result = self._run_windows_powershell(
+                "-File",
+                str(
+                    self.project
+                    / "scripts"
+                    / "verify_storyforge_deployment.ps1"
+                ),
+                "-Role",
+                "Employee",
+                "-InstallRoot",
+                str(missing_install_root),
+            )
+
+        stdout = result.stdout.decode("utf-8-sig", errors="strict")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(result.returncode, 1, stdout + stderr)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["role"], "Employee")
+        self.assertIsInstance(payload["checks"], list)
+        self.assertEqual(len(payload["checks"]), 1)
+        self.assertEqual(payload["checks"][0]["name"], "deployment_pointer")
+        self.assertFalse(payload["checks"][0]["ok"])
+        self.assertNotIn("Argument types do not match", stderr)
+
+    def test_deployment_verifier_ps51_serializes_successful_checks_as_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="StoryForgeVerifyValid-") as temporary:
+            install_root = Path(temporary).resolve(strict=True)
+            app_directory = install_root / "App-9.9.9"
+            app_directory.mkdir()
+            entrypoint = app_directory / "StoryForge Studio.exe"
+            entrypoint.write_bytes(b"isolated-verifier-fixture")
+            (app_directory / "storyforge-update.json").write_text(
+                json.dumps(
+                    {
+                        "version": "9.9.9",
+                        "entrypoint": entrypoint.name,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (install_root / "current.json").write_text(
+                json.dumps(
+                    {
+                        "version": "9.9.9",
+                        "app_directory": str(app_directory),
+                        "entrypoint": str(entrypoint),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_windows_powershell(
+                "-File",
+                str(
+                    self.project
+                    / "scripts"
+                    / "verify_storyforge_deployment.ps1"
+                ),
+                "-Role",
+                "Employee",
+                "-InstallRoot",
+                str(install_root),
+            )
+
+        stdout = result.stdout.decode("utf-8-sig", errors="strict")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0, stdout + stderr)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["role"], "Employee")
+        self.assertIsInstance(payload["checks"], list)
+        self.assertEqual(
+            [check["name"] for check in payload["checks"]],
+            ["app_location", "entrypoint", "internal_manifest"],
+        )
+        self.assertTrue(all(check["ok"] for check in payload["checks"]))
+        self.assertNotIn("Argument types do not match", stderr)
+
     def test_hub_preflight_refuses_existing_task_and_firewall(self) -> None:
         self.assertIn("Scheduled task '$TaskName' already exists", self.bootstrap)
         self.assertIn("Firewall rule '$ruleName' already exists", self.bootstrap)

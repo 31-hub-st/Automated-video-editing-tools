@@ -189,7 +189,7 @@ $result = [ordered]@{
     role = $Role
     install_root = $InstallRoot
     checked_at_utc = [DateTime]::UtcNow.ToString('o')
-    checks = @($checks)
+    checks = $checks.ToArray()
 }
 $result | ConvertTo-Json -Depth 6
 if ($failed.Count -gt 0) {

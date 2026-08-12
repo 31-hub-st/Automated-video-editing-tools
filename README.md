@@ -2,7 +2,7 @@
 
 ## 新电脑一键恢复 Hub
 
-普通用户不需要 Codex，也不用输入 PowerShell 命令：`v1.0.5` 正式发布后，在浏览器登录有私有仓库权限的 GitHub 账号，从该正式 Release 下载 `StoryForge-1.0.5-update.zip`（不要下载 GitHub 的 Source code/源码 ZIP），完整解压后双击解压目录根部的：
+普通用户不需要 Codex，也不用输入 PowerShell 命令：`v1.0.6` 正式发布后，在浏览器登录有私有仓库权限的 GitHub 账号，从该正式 Release 下载 `StoryForge-1.0.6-update.zip`（不要下载 GitHub 的 Source code/源码 ZIP），完整解压后双击解压目录根部的：
 
 ```text
 一键恢复StoryForge-Hub.cmd
@@ -14,7 +14,7 @@
 
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
-当前源码候选版本：`v1.0.5`。在 [v1.0.5 发布交付报告](docs/V1.0.5_RELEASE.md) 的测试、哈希和远程门禁 TODO 全部由真实结果替换前，不得把候选源码或本地目录当成已交付程序。
+当前源码候选版本：`v1.0.6`。在 [v1.0.6 发布交付报告](docs/V1.0.6_RELEASE.md) 的测试、哈希和远程门禁 TODO 全部由真实结果替换前，不得把候选源码或本地目录当成已交付程序。
 
 ## 先看这三份文档
 
@@ -22,7 +22,7 @@ StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制�
 - [Windows 部署与多电脑协同](docs/DEPLOYMENT_WINDOWS.md)：主机、员工制作电脑、数据目录、登录和故障处理。
 - [员工快速使用说明](docs/EMPLOYEE_QUICK_START.md)：最短生产流程。
 
-`v1.0.5` 的发布阻断项和待填写证据见 [v1.0.5 发布交付报告](docs/V1.0.5_RELEASE.md)；`v1.0.4` 因旧 Hub 任务主体显示形式导致同一账号被误拒绝，已转为零下载的历史预发布，不得分发。
+`v1.0.6` 的发布阻断项和待填写证据见 [v1.0.6 发布交付报告](docs/V1.0.6_RELEASE.md)；`v1.0.4` 与 `v1.0.5` 均为零下载的历史预发布，不得分发，后者的真实制品证据与 Windows PowerShell 5.1 验收输出缺陷见 [v1.0.5 历史暂缓发布报告](docs/V1.0.5_RELEASE.md)。
 
 ## 产品能力
 
@@ -113,8 +113,8 @@ git diff --check
   -RequireStableAcceptance `
   -WithLocalAI `
   -StableStressSeconds 600 `
-  -OutputDirectory 'D:\StoryForgeRelease\1.0.5\dist' `
-  -WorkDirectory 'D:\StoryForgeRelease\1.0.5\work' `
+  -OutputDirectory 'D:\StoryForgeRelease\1.0.6\dist' `
+  -WorkDirectory 'D:\StoryForgeRelease\1.0.6\work' `
   -HubEndpoint 'http://<Hub-IP>:8765'
 ```
 

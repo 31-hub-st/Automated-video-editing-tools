@@ -39,6 +39,12 @@ class PackageSmokeError(RuntimeError):
     """The frozen release package does not satisfy its smoke contract."""
 
 
+def _json_for_console(payload: dict[str, Any]) -> str:
+    # GitHub's Windows runner can expose a legacy stdout code page (for example
+    # cp1252). JSON escapes preserve Unicode exactly while remaining ASCII-safe.
+    return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     if not path.is_file():
         raise PackageSmokeError(f"{label} is missing: {path}")
@@ -472,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
             "error": str(error) or type(error).__name__,
         }
     _write_report(report_path, payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(_json_for_console(payload))
     return 0 if payload.get("ok") is True else 1
 
 

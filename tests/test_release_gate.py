@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -185,6 +186,46 @@ class PackageSmokeTests(unittest.TestCase):
             list(package_smoke.RECOVERY_PAYLOAD_FILES),
         )
         self.assertTrue(all(int(item["bytes"]) > 0 for item in files))
+
+    def test_package_smoke_console_json_is_safe_for_legacy_windows_codepages(self) -> None:
+        launcher = "\u4e00\u952e\u6062\u590dStoryForge-Hub.cmd"
+
+        rendered = package_smoke._json_for_console({"name": launcher})
+
+        rendered.encode("cp1252", errors="strict")
+        self.assertEqual(json.loads(rendered), {"name": launcher})
+        self.assertNotIn(launcher, rendered)
+
+    def test_package_smoke_cli_survives_cp1252_stdout_with_chinese_launcher(self) -> None:
+        launcher = "\u4e00\u952e\u6062\u590dStoryForge-Hub.cmd"
+        payload = {"ok": True, "recovery": {"files": [{"name": launcher}]}}
+        raw_console = io.BytesIO()
+        console = io.TextIOWrapper(raw_console, encoding="cp1252", errors="strict")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_root = root / "package"
+            package_root.mkdir()
+            report_path = root / "package-smoke.json"
+            with patch.object(package_smoke, "run_package_smoke", return_value=payload), patch.object(
+                package_smoke.sys, "stdout", console
+            ):
+                exit_code = package_smoke.main(
+                    [
+                        "--package-root",
+                        str(package_root),
+                        "--report",
+                        str(report_path),
+                    ]
+                )
+            console.flush()
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        rendered = raw_console.getvalue().decode("cp1252")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report, payload)
+        self.assertEqual(json.loads(rendered), payload)
+        self.assertNotIn(launcher, rendered)
 
     def test_metadata_smoke_records_explicit_runtime_and_ffmpeg_skip_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

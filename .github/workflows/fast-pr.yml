@@ -52,8 +52,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed.' }
           $powerShellFiles = @(
             'scripts/bootstrap_storyforge.ps1',
+            'scripts/enable_storyforge_hub.ps1',
+            'scripts/repair_storyforge_hub_launcher.ps1',
+            'scripts/restore_storyforge_hub_new_machine.ps1',
             'scripts/publish_hub_snapshot.ps1',
-            'scripts/verify_storyforge_deployment.ps1'
+            'scripts/verify_storyforge_deployment.ps1',
+            'ops/Start-StoryForgeHub.ps1'
           )
           foreach ($file in $powerShellFiles) {
             $tokens = $null
@@ -79,7 +83,8 @@ jobs:
           --output-dir test-results/fast-pr
           -- tests.test_release_gate tests.test_stability_acceptance
           tests.test_production_workflow tests.test_ui_contract
-          tests.test_bootstrap_contract tests.test_startup
+          tests.test_bootstrap_contract tests.test_one_click_hub_recovery
+          tests.test_startup
 
       - name: Upload fast-gate summary
         if: always()

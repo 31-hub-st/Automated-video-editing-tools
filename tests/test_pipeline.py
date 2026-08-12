@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from storyforge import pipeline as pipeline_module
 from storyforge.cancellation import (
     CancellationToken,
     JobCancelledError,
@@ -26,6 +27,7 @@ from storyforge.pipeline import (
     _decode_media_sample,
     _fit_preview_tts_to_duration,
     _intro_card_media_options,
+    _intro_card_opening_silence,
     _preview_subtitle_style,
     _copy_file_atomic,
     _completed_failure_code,
@@ -50,6 +52,7 @@ from storyforge.pipeline import (
     narration_units,
     production_exports_narration_audio,
     production_output_mode,
+    prepared_recipe_hash,
 )
 from storyforge.providers.text import TextRequest, TextResult
 from storyforge.providers.base import ProviderError, ProviderResponseError
@@ -94,6 +97,120 @@ def _speech_segment(index: int, text: str, path: Path, duration: float) -> Speec
 
 
 class IntroCardMediaGeometryTests(unittest.TestCase):
+    def test_manifest_card_windows_report_absolute_clipped_display(self) -> None:
+        intro = pipeline_module._card_timeline_manifest(
+            enabled=True,
+            start_seconds=6.25,
+            duration_seconds=4.5,
+            target_duration=15.0,
+        )
+        code = pipeline_module._card_timeline_manifest(
+            enabled=True,
+            start_seconds=12.0,
+            duration_seconds=0.0,
+            target_duration=15.0,
+            zero_duration_to_end=True,
+        )
+
+        self.assertEqual(
+            intro,
+            {
+                "enabled": True,
+                "start_seconds": 6.25,
+                "duration_seconds": 4.5,
+                "end_seconds": 10.75,
+                "display_duration_seconds": 4.5,
+            },
+        )
+        self.assertEqual(code["end_seconds"], 15.0)
+        self.assertEqual(code["display_duration_seconds"], 3.0)
+        clipped = pipeline_module._card_timeline_manifest(
+            enabled=True,
+            start_seconds=14.0,
+            duration_seconds=8.0,
+            target_duration=15.0,
+        )
+        self.assertEqual(clipped["end_seconds"], 15.0)
+        self.assertEqual(clipped["display_duration_seconds"], 1.0)
+
+    def test_intro_media_options_freeze_start_and_can_be_disabled(self) -> None:
+        settings = AppSettings.from_dict(
+            {
+                "video_template": "platform_story_card",
+                "intro_card_enabled": True,
+                "intro_card_start_seconds": 7.0,
+                "intro_card_duration_seconds": 4.0,
+            }
+        )
+        options = _intro_card_media_options(
+            settings,
+            Path("C:/StoryForge/cover.jpg"),
+            intro_card_text="A synopsis.",
+        )
+        self.assertEqual(options["intro_card_cover_start"], 7.0)
+        self.assertEqual(options["intro_card_cover_duration"], 4.0)
+
+        settings.intro_card_enabled = False
+        disabled = _intro_card_media_options(
+            settings,
+            Path("C:/StoryForge/cover.jpg"),
+            intro_card_text="A synopsis.",
+        )
+        self.assertIsNone(disabled["intro_card_cover_path"])
+
+    def test_later_intro_overlay_never_inserts_opening_silence(self) -> None:
+        later = AppSettings.from_dict(
+            {
+                "video_template": "platform_story_card",
+                "intro_card_enabled": True,
+                "intro_card_start_seconds": 8.0,
+                "intro_card_duration_seconds": 4.0,
+            }
+        )
+        legacy_opening = AppSettings.from_dict(
+            {
+                "video_template": "platform_story_card",
+                "intro_card_enabled": True,
+                "intro_card_start_seconds": 0.0,
+                "intro_card_duration_seconds": 4.0,
+            }
+        )
+        self.assertEqual(_intro_card_opening_silence(later, 15.0), 0.0)
+        self.assertEqual(_intro_card_opening_silence(legacy_opening, 15.0), 4.0)
+
+    def test_platform_copy_overrides_invalidate_prepared_text_cache(self) -> None:
+        settings = AppSettings()
+        platform = PlatformProfile(
+            id="goodnovel",
+            name="GoodNovel",
+            search_template="Search {code}",
+            ending_template="Continue with {code}",
+        )
+        required = dict(
+            batch_id="batch",
+            platform_id=platform.id,
+            source_file="source.txt",
+            title="Story",
+            code="CODE1",
+            video_folder="videos",
+            music_folder="music",
+            output_folder="output",
+        )
+        first = RenderJob(
+            **required,
+            platform_search_text="Exact search A",
+            platform_ending_text="Exact ending A",
+        )
+        second = RenderJob(
+            **required,
+            platform_search_text="Exact search B",
+            platform_ending_text="Exact ending B",
+        )
+        self.assertNotEqual(
+            prepared_recipe_hash(first, platform, settings, "a" * 64),
+            prepared_recipe_hash(second, platform, settings, "a" * 64),
+        )
+
     def test_bundled_cover_story_presets_are_large_and_height_adaptive(self) -> None:
         summaries = (
             "A hidden photograph changes everything.",
@@ -260,6 +377,48 @@ class HeavyResourceSerializationTests(unittest.TestCase):
 
 
 class NarrationAssemblyTests(unittest.TestCase):
+    def test_reuse_audio_rejects_new_exact_ending_copy_before_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manuscript = root / "B56826_Story.txt"
+            manuscript.write_text("Chapter 1\nShe opened the door.", encoding="utf-8")
+            reused = root / "old-narration.mp3"
+            reused.write_bytes(b"old-audio")
+            video_folder = root / "videos"
+            video_folder.mkdir()
+            output_folder = root / "output"
+            runner = PipelineRunner(
+                lambda: AppSettings(),
+                ffmpeg_path=Path("fake-ffmpeg.exe"),
+                work_root=root / "render-work",
+            )
+            job = RenderJob(
+                batch_id="reuse-copy-batch",
+                platform_id="goodnovel",
+                source_file=str(manuscript),
+                title="Story",
+                code="B56826",
+                video_folder=str(video_folder),
+                music_folder="",
+                output_folder=str(output_folder),
+                platform_ending_text="Read this exact new ending.",
+                settings_snapshot={
+                    "output_mode": "reuse_audio",
+                    "source_narration_audio": str(reused),
+                    "bgm_mode": "none",
+                },
+            )
+
+            with self.assertRaisesRegex(PipelineError, "重新生成旁白"):
+                runner._run_job(
+                    job,
+                    PlatformProfile(id="goodnovel", name="GoodNovel"),
+                    lambda *_args: None,
+                )
+            self.assertFalse(
+                (job_workspace_directory(job, root / "render-work") / "manifest.json").exists()
+            )
+
     def test_extreme_wpm_is_not_silently_capped_for_any_provider(self) -> None:
         self.assertAlmostEqual(
             narration_speed_for_wpm(280, "local_kokoro"), 280 / 185
@@ -2123,7 +2282,18 @@ class PipelineRunnerTests(unittest.TestCase):
         self.assertFalse(_cover_outro_enabled(disabled, RenderJob(**required)))
 
     def test_approved_snapshot_freezes_creative_recipe_but_uses_live_secret(self) -> None:
-        live = AppSettings(narration_wpm=230, bgm_volume=0.1)
+        live = AppSettings.from_dict(
+            {
+                "narration_wpm": 230,
+                "bgm_volume": 0.1,
+                "video_template": "classic",
+                "intro_card_enabled": False,
+                "intro_card_start_seconds": 91.0,
+                "code_card_enabled": False,
+                "code_card_start_seconds": 92.0,
+                "code_card_duration_seconds": 93.0,
+            }
+        )
         live.providers.text_api_key = "rotated-live-key"
         live.providers.text_provider = "groq"
         job = RenderJob(
@@ -2140,6 +2310,8 @@ class PipelineRunnerTests(unittest.TestCase):
                 "output_fps": 30,
                 "bgm_volume": 0.31,
                 "cover_outro_enabled": False,
+                # Legacy frozen recipe: these five newer fields are absent.
+                "video_template": "platform_story_card",
                 "providers": {"text_provider": "local", "text_model": "approved"},
             },
         )
@@ -2150,6 +2322,11 @@ class PipelineRunnerTests(unittest.TestCase):
         self.assertEqual(frozen.output_fps, 30)
         self.assertEqual(frozen.bgm_volume, 0.31)
         self.assertFalse(frozen.cover_outro_enabled)
+        self.assertTrue(frozen.intro_card_enabled)
+        self.assertEqual(frozen.intro_card_start_seconds, 0.0)
+        self.assertTrue(frozen.code_card_enabled)
+        self.assertEqual(frozen.code_card_start_seconds, 0.0)
+        self.assertEqual(frozen.code_card_duration_seconds, 0.0)
         self.assertEqual(frozen.providers.text_provider, "local")
         self.assertEqual(frozen.providers.text_model, "approved")
         self.assertEqual(frozen.providers.text_api_key, "rotated-live-key")
@@ -2178,6 +2355,7 @@ class PipelineRunnerTests(unittest.TestCase):
 
             settings = AppSettings(chapter_pause_seconds=0.08)
             settings.video_template = "platform_story_card"
+            settings.intro_card_enabled = True
             settings.export_narration_audio = False
             settings.providers.text_provider = "local"
             settings.providers.tts_provider = "local_kokoro"
@@ -2258,6 +2436,8 @@ class PipelineRunnerTests(unittest.TestCase):
                 episode_number=2,
                 episode_count=2,
                 is_final_episode=True,
+                platform_search_text="Find this exact batch code: 123456",
+                platform_ending_text="Open the exact final chapter now.",
             )
             platform = PlatformProfile(
                 id="platform-1",
@@ -2355,6 +2535,10 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertNotIn("Chapter 1", text_requests[0].text)
             self.assertNotIn("Chapter 2", text_requests[0].text)
             self.assertEqual(text_requests[0].text.count(CHAPTER_MARKER), 1)
+            self.assertEqual(
+                text_requests[0].ending_template,
+                "Open the exact final chapter now.",
+            )
             self.assertEqual(len(tts_calls), 2)
             spoken, selected_voice, selected_speed, stem = tts_calls[0]
             self.assertEqual(selected_voice, "af_bella")
@@ -2364,7 +2548,8 @@ class PipelineRunnerTests(unittest.TestCase):
             self.assertEqual(stem, "line")
             self.assertFalse(any("Chapter" in sentence for sentence in spoken))
             self.assertFalse(any(CHAPTER_MARKER in sentence for sentence in spoken))
-            self.assertIn("123456", spoken[-1])
+            self.assertTrue(spoken[-1].endswith("Open the exact final chapter now."))
+            self.assertFalse(any("discover who was there" in item for item in spoken))
             self.assertEqual(len(text_configs), 1)
             self.assertEqual(len(tts_configs), 2)
 
@@ -2372,7 +2557,7 @@ class PipelineRunnerTests(unittest.TestCase):
             subtitle_text = (job_dir / ".work" / "subtitles.ass").read_text(
                 encoding="utf-8-sig"
             )
-            self.assertIn("Search NovelBox: 123456", subtitle_text)
+            self.assertIn("Find this exact batch code: 123456", subtitle_text)
             self.assertIn("FINAL PART", subtitle_text)
             self.assertFalse(
                 any(
@@ -2388,7 +2573,7 @@ class PipelineRunnerTests(unittest.TestCase):
             )
             self.assertRegex(
                 subtitle_text.replace(r"\N", " "),
-                r"(?m)^Dialogue: .*?,Subtitle,.*Download NovelBox and search code 123456",
+                r"(?m)^Dialogue: .*?,Subtitle,.*Open the exact final chapter now",
             )
             self.assertNotIn("Part 2", subtitle_text)
             self.assertNotIn("Chapter 1", subtitle_text)
@@ -2406,7 +2591,7 @@ class PipelineRunnerTests(unittest.TestCase):
                 "the legacy preview must not fall back to the job title",
             )
             self.assertIn(
-                "Download NovelBox and search code 123456",
+                "Open the exact final chapter now",
                 preview_subtitle_text.replace(r"\N", " "),
             )
             self.assertNotRegex(
@@ -2415,7 +2600,7 @@ class PipelineRunnerTests(unittest.TestCase):
             )
             self.assertRegex(
                 preview_subtitle_text.replace(r"\N", " "),
-                r"(?m)^Dialogue: .*?,Subtitle,.*Download NovelBox and search code 123456",
+                r"(?m)^Dialogue: .*?,Subtitle,.*Open the exact final chapter now",
             )
             self.assertNotIn("Part 2", preview_subtitle_text)
 
@@ -2445,13 +2630,34 @@ class PipelineRunnerTests(unittest.TestCase):
             )
             self.assertTrue(preview_manifest["review_timeline"]["structured"])
             self.assertEqual(
+                preview_manifest["review_timeline"]["opening_card"],
+                {
+                    "kind": "platform_story_card",
+                    "enabled": True,
+                    "start_seconds": 0.0,
+                    "duration_seconds": 5.5,
+                    "end_seconds": 5.5,
+                    "display_duration_seconds": 5.5,
+                },
+            )
+            self.assertEqual(
+                preview_manifest["review_timeline"]["code_card"],
+                {
+                    "enabled": True,
+                    "start_seconds": 0.0,
+                    "duration_seconds": 0.0,
+                    "end_seconds": 15.0,
+                    "display_duration_seconds": 15.0,
+                },
+            )
+            self.assertEqual(
                 preview_manifest["review_timeline"]["opening_card"]["end_seconds"],
-                4.0,
+                5.5,
             )
             self.assertEqual(
                 preview_manifest["review_timeline"]["story_body"],
                 {
-                    "start_seconds": 4.0,
+                    "start_seconds": 5.5,
                     "end_seconds": 10.0,
                     "narration_and_captions": True,
                 },
@@ -2464,11 +2670,19 @@ class PipelineRunnerTests(unittest.TestCase):
                 preview_manifest["review_timeline"]["ending_card"]["kind"],
                 "cover_caption",
             )
-            self.assertIn("123456", preview_manifest["review_timeline"]["ending_card"]["narrated_cta"])
+            self.assertEqual(
+                preview_manifest["review_timeline"]["ending_card"]["narrated_cta"],
+                "Open the exact final chapter now.",
+            )
             self.assertTrue(Path(preview_output).name.endswith("_15s.mp4"))
 
             manifest = json.loads(
                 (job_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["media"]["intro_card"]["end_seconds"], 5.5)
+            self.assertEqual(
+                manifest["media"]["code_card"]["end_seconds"],
+                manifest["duration_seconds"],
             )
             self.assertEqual(manifest["voice"]["voice"], "af_bella")
             self.assertEqual(manifest["voice"]["provider"], "local_kokoro")
@@ -2555,6 +2769,7 @@ class PipelineRunnerTests(unittest.TestCase):
             # switch as a full production.  With the intro card disabled, the
             # story starts at zero instead of reserving silent/cover time.
             settings.video_template = "classic"
+            settings.intro_card_enabled = False
             classic_preview_job = replace(
                 job,
                 id="classic-preview-job",

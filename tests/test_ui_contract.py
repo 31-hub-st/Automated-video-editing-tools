@@ -311,7 +311,7 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("setProductionPreviewScene(previewScene.dataset.productionPreviewScene)", javascript)
         self.assertIn("function productionPreviewSceneForControl(control)", javascript)
         self.assertIn("resetProductionStyleFromPreset(event.target)", javascript)
-        self.assertIn('#production-intro-card-enabled, #production-cover-outro-enabled', javascript)
+        self.assertIn('#production-intro-card-enabled, #production-code-card-enabled, #production-cover-outro-enabled', javascript)
         self.assertIn('productionJump.dataset.productionMissing === "platform-binding"', javascript)
         self.assertIn('await openNovelDetail(state.productionNovel.id, productionJump)', javascript)
         self.assertIn(".production-section-jumpbar {", css)
@@ -1105,10 +1105,13 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('id="production-intro-card-copy"', javascript)
         self.assertIn("productionSettings.intro_card_duration_seconds = Math.max", javascript)
         self.assertIn("production_settings: structuredClone(draft.production_settings || {})", javascript)
-        self.assertIn(
+        self.assertNotIn(
             'productionSettings.video_template = productionSettings.intro_card_enabled ? "platform_story_card" : "classic"',
             javascript,
         )
+        self.assertIn('novel.draft.production_settings.video_template ||=', javascript)
+        self.assertIn('typeof defaults.intro_card_enabled === "boolean"', javascript)
+        self.assertIn('? defaults.intro_card_enabled', javascript)
         self.assertIn("video_template: defaults.video_template", javascript)
         self.assertIn("root.dataset.videoTemplate = videoTemplate", javascript)
         self.assertIn('event.target.matches(\'input[name="production-voice"]\')', javascript)
@@ -1164,6 +1167,152 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("characters.slice(0, 48)", javascript)
         self.assertIn("words.slice(0, 20)", javascript)
         self.assertIn(r"\u2e80-\u9fff", javascript)
+
+    def test_employee_batch_card_timeline_and_platform_copy_overrides_are_wired(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "production-intro-card-enabled",
+            "production-intro-card-start",
+            "production-intro-card-duration",
+            "production-code-card-enabled",
+            "production-code-card-start",
+            "production-code-card-duration",
+            "production-platform-search-text",
+            "production-platform-ending-text",
+        ):
+            self.assertIn(f'id="{element_id}"', javascript)
+
+        for field in (
+            "intro_card_enabled",
+            "intro_card_start_seconds",
+            "intro_card_duration_seconds",
+            "code_card_enabled",
+            "code_card_start_seconds",
+            "code_card_duration_seconds",
+        ):
+            self.assertIn(f"productionSettings.{field} =", javascript)
+
+        self.assertIn("0 表示持续到视频结尾", javascript)
+        self.assertIn("只覆盖本批，不修改团队平台模板", javascript)
+        self.assertIn("function syncDraftPlatformCopyDefaults(novel, draft)", javascript)
+        self.assertIn("draft._platformSearchTextCustomized", javascript)
+        self.assertIn("draft._platformEndingTextCustomized", javascript)
+        self.assertIn("platformSearchInput.value.trim()", javascript)
+        self.assertIn("platformEndingInput.value.trim()", javascript)
+        self.assertIn('event.target.dataset.custom = String(customized)', javascript)
+        self.assertIn("platform_search_text: String(draft.platform_search_text || \"\")", javascript)
+        self.assertIn("platform_ending_text: String(draft.platform_ending_text || \"\")", javascript)
+        self.assertIn("text: outroCopy", javascript)
+        self.assertNotIn("`${outroCopy} Search ${code}.`", javascript)
+
+        self.assertIn("root.dataset.codeCardEnabled = String(codeCardEnabled)", javascript)
+        self.assertIn("root.dataset.introCardStartSeconds =", javascript)
+        self.assertIn("root.dataset.codeCardStartSeconds =", javascript)
+        self.assertIn('"production-platform-search-text"].includes(id)) return "subtitle"', javascript)
+        self.assertIn('const videoTemplate = settings.video_template || "classic"', javascript)
+        self.assertIn("draft.platform_search_text", javascript)
+        self.assertIn("draft.platform_ending_text", javascript)
+        self.assertIn(".production-card-timeline-controls[data-card-enabled=\"false\"]", css)
+        self.assertIn('[data-code-card-enabled="false"] > .code-card', css)
+        self.assertIn(
+            '[data-video-template="platform_story_card"][data-intro-card-enabled="true"] .story-template-intro',
+            css,
+        )
+        self.assertIn(
+            '[data-video-template="classic"][data-intro-card-enabled="true"] > .preview-hook',
+            css,
+        )
+        self.assertNotIn(
+            '[data-intro-card-enabled="false"] > .preview-hook { display: block; }',
+            css,
+        )
+        self.assertIn('videoTemplate === "platform_story_card" ? "平台简介卡" : "经典简介"', javascript)
+
+        workbench = javascript[
+            javascript.index("function renderProductionWorkbench()"):
+            javascript.index("function syncProductionDraftFromControls")
+        ]
+        self.assertNotIn('checkedCall("save_platform"', workbench)
+        self.assertNotIn('checkedCall("set_user_permission"', workbench)
+        self.assertNotIn("platforms.manage", workbench)
+
+    def test_batch_platform_copy_preserves_custom_text_and_resets_empty_text_to_templates(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        defaults = javascript[
+            javascript.index("function draftPlatformCopyDefaults(novel, draft)"):
+            javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)")
+        ]
+        self.assertIn("platformById(draft?.platform_id)", defaults)
+        self.assertIn("draft?.promo_code_id", defaults)
+        self.assertIn("safeTemplate(platform.search_template, platform.name, code)", defaults)
+        self.assertIn("safeTemplate(platform.ending_template, platform.name, code)", defaults)
+
+        sync_defaults = javascript[
+            javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)"):
+            javascript.index("function coverToneClass")
+        ]
+        self.assertIn('if (!draft._platformSearchTextCustomized) draft.platform_search_text = ""', sync_defaults)
+        self.assertIn('if (!draft._platformEndingTextCustomized) draft.platform_ending_text = ""', sync_defaults)
+        self.assertIn("draft._platformSearchTextCustomized", sync_defaults)
+        self.assertIn("draft._platformEndingTextCustomized", sync_defaults)
+        self.assertIn("defaults.search", sync_defaults)
+        self.assertIn("defaults.ending", sync_defaults)
+
+        active_draft = javascript[
+            javascript.index("function activeDraft(novel)"):
+            javascript.index("function freshProductionDraftForNextBatch")
+        ]
+        self.assertIn(
+            "novel.draft._platformSearchTextCustomized = Boolean(novel.draft.platform_search_text.trim())",
+            active_draft,
+        )
+        self.assertIn(
+            "novel.draft._platformEndingTextCustomized = Boolean(novel.draft.platform_ending_text.trim())",
+            active_draft,
+        )
+        self.assertNotIn('intro_card_enabled: defaults.intro_card_enabled === true ||', active_draft)
+
+        next_batch = javascript[
+            javascript.index("function freshProductionDraftForNextBatch"):
+            javascript.index("function productionRoot")
+        ]
+        self.assertIn("...previous", next_batch)
+        self.assertNotIn("intro_card_enabled:", next_batch)
+
+        sync_controls = javascript[
+            javascript.index("function syncProductionDraftFromControls"):
+            javascript.index("function resetProductionStyleFromPreset")
+        ]
+        self.assertLess(
+            sync_controls.index('draft.promo_code_id = $("#production-code-select")'),
+            sync_controls.index("syncDraftPlatformCopyDefaults(novel, draft)"),
+        )
+        self.assertIn('platformSearchInput.dataset.custom === "true"', sync_controls)
+        self.assertIn('platformEndingInput.dataset.custom === "true"', sync_controls)
+        self.assertIn('draft.platform_search_text = draft._platformSearchTextCustomized', sync_controls)
+        self.assertIn('draft.platform_ending_text = draft._platformEndingTextCustomized', sync_controls)
+
+        input_handler = javascript[
+            javascript.index('document.addEventListener("input"'):
+            javascript.index('document.addEventListener("keydown"')
+        ]
+        self.assertIn("const customized = Boolean(event.target.value.trim())", input_handler)
+        self.assertIn("event.target.dataset.custom = String(customized)", input_handler)
+        self.assertIn("if (!customized)", input_handler)
+        self.assertIn("draftPlatformCopyDefaults(state.productionNovel, draft)", input_handler)
+
+        platform_change = javascript[
+            javascript.index('if (event.target.matches("#production-platform-select"))'):
+            javascript.index('if (event.target.matches("#production-local-tts-provider"')
+        ]
+        self.assertIn("renderProductionWorkbench()", platform_change)
+        self.assertNotIn("_platformSearchTextCustomized = false", platform_change)
+        self.assertNotIn("_platformEndingTextCustomized = false", platform_change)
+
+        self.assertIn('"web-can-global-queue": ["drafts.create"', javascript)
 
     def test_platform_logo_branding_is_configurable_and_shared_by_previews(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")

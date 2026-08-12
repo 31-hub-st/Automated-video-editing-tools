@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,31 @@ class ReleaseBuildContractTests(unittest.TestCase):
             validator,
             "python -c code passed through Windows PowerShell must use single quotes",
         )
+
+    def test_frozen_smokes_clear_hub_identity_and_restore_the_build_shell(self) -> None:
+        script = (ROOT / "scripts" / "build_exe.ps1").read_text(encoding="utf-8")
+        scope = script[script.index("$previousDataDir"):script.index("$sizeMb")]
+        first_frozen_launch = scope.index("$smokeProcess = Start-Process")
+        package_smoke_launch = scope.index("scripts\\package_smoke.py")
+
+        previous_names = {
+            "STORYFORGE_DEPLOYMENT_ROLE": "previousDeploymentRole",
+            "STORYFORGE_FROZEN_HUB_DATA_ROOT": "previousFrozenHubDataRoot",
+            "STORYFORGE_PORTABLE_MODE": "previousPortableMode",
+        }
+        for environment_name, previous_name in previous_names.items():
+            capture = (
+                f"${previous_name} = [Environment]::GetEnvironmentVariable("
+                f"'{environment_name}', 'Process')"
+            )
+            clear = f"Remove-Item Env:{environment_name} -ErrorAction SilentlyContinue"
+            restore = f"$env:{environment_name} = ${previous_name}"
+            self.assertIn(capture, scope)
+            self.assertLess(scope.index(clear), first_frozen_launch)
+            self.assertGreater(scope.index(restore), package_smoke_launch)
+
+        self.assertIn("$kokoroProcess = Start-Process", scope)
+        self.assertIn("$acceptanceProcess = Start-Process", scope)
 
     def test_workflows_keep_fast_nightly_and_release_gates_separate(self) -> None:
         workflows = ROOT / ".github" / "workflows"
@@ -121,6 +147,65 @@ class PackageSmokeTests(unittest.TestCase):
         self.assertEqual(report["runtime"]["ffmpeg"]["status"], "skipped")
         self.assertIn("unit test", report["runtime"]["ffmpeg"]["reason"])
         self.assertEqual(report["runtime"]["ui"]["root"], str(ui_root.resolve()))
+
+    def test_runtime_smoke_does_not_inherit_hub_or_portable_identity(self) -> None:
+        captured_environment: dict[str, str] = {}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_package(root)
+            fake_ffmpeg = root / "_internal" / "imageio_ffmpeg" / "ffmpeg.exe"
+
+            def run_frozen(command, **kwargs):
+                captured_environment.update(dict(kwargs["env"]))
+                result_root = Path(command[2])
+                (result_root / "startup-self-test.json").write_text(
+                    json.dumps({"ok": True}), encoding="utf-8"
+                )
+                return Mock(returncode=0, stdout="", stderr="")
+
+            validated_runtime = {
+                "version": __version__,
+                "imports": {"status": "passed"},
+                "ui": {"status": "passed"},
+                "ffmpeg": {"status": "passed", "path": str(fake_ffmpeg)},
+                "worker": {"status": "passed"},
+            }
+            inherited = {
+                "STORYFORGE_DEPLOYMENT_ROLE": "Hub",
+                "STORYFORGE_FROZEN_HUB_DATA_ROOT": "D:/StoryForgeHub/Data",
+                "STORYFORGE_PORTABLE_MODE": "1",
+            }
+            with (
+                patch.dict(os.environ, inherited, clear=False),
+                patch(
+                    "scripts.package_smoke.subprocess.run",
+                    side_effect=run_frozen,
+                ),
+                patch(
+                    "scripts.package_smoke._validate_startup_payload",
+                    return_value=validated_runtime,
+                ),
+                patch(
+                    "scripts.package_smoke._probe_ffmpeg",
+                    return_value={"status": "passed", "path": str(fake_ffmpeg)},
+                ),
+            ):
+                report = package_smoke.run_package_smoke(
+                    package_root=root,
+                    expected_version=__version__,
+                    require_stable_acceptance=False,
+                    skip_runtime_reason="",
+                    timeout_seconds=1,
+                )
+                self.assertEqual(
+                    {name: os.environ.get(name) for name in inherited}, inherited
+                )
+
+        self.assertTrue(report["ok"])
+        self.assertTrue(captured_environment.get("STORYFORGE_DATA_DIR", "").endswith("data"))
+        for name in inherited:
+            self.assertNotIn(name, captured_environment)
 
     def test_fresh_runtime_payload_proves_version_imports_ui_and_bundled_ffmpeg(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

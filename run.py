@@ -14,6 +14,36 @@ from pathlib import Path
 
 
 _UPDATE_INSTALLING_GRACE_SECONDS = 10 * 60
+_FROZEN_HUB_DATA_ROOT_ENV = "STORYFORGE_FROZEN_HUB_DATA_ROOT"
+_DEPLOYMENT_ROLE_ENV = "STORYFORGE_DEPLOYMENT_ROLE"
+
+
+def _record_frozen_hub_data_root_authorization() -> Path | None:
+    """Bind this frozen launch's Hub authority to its original DataRoot.
+
+    ``configure_runtime_environment`` may create ``STORYFORGE_DATA_DIR`` for a
+    portable employee process. That late value must not be confused with the
+    explicit fixed Hub DataRoot supplied by a deployment launcher. Always
+    replace any inherited marker so a stale or user-supplied value cannot
+    authorize the current process.
+    """
+
+    os.environ.pop(_FROZEN_HUB_DATA_ROOT_ENV, None)
+    if not bool(getattr(sys, "frozen", False)):
+        return None
+    # Updaters and helper children inherit the employee sidecar DataRoot. The
+    # existing portable marker is a stronger identity signal than the path and
+    # must never be promoted into Hub authority by a child process.
+    if os.environ.get("STORYFORGE_PORTABLE_MODE") == "1":
+        return None
+    if str(os.environ.get(_DEPLOYMENT_ROLE_ENV) or "").strip().casefold() != "hub":
+        return None
+    configured = str(os.environ.get("STORYFORGE_DATA_DIR") or "").strip()
+    if not configured:
+        return None
+    authorized = Path(configured).expanduser().resolve(strict=False)
+    os.environ[_FROZEN_HUB_DATA_ROOT_ENV] = str(authorized)
+    return authorized
 
 
 def _early_storyforge_data_root() -> Path | None:
@@ -239,6 +269,11 @@ def _run() -> int:
     # launches before importing even ``storyforge.portable`` while its marker
     # or named mutex says the installation is inside that copy window.
     _enforce_update_installation_idle(sys.argv[1:])
+
+    # Record Hub authorization before portable setup can synthesize a sidecar
+    # DataRoot. Frozen Hub hosting is allowed only for this exact, preconfigured
+    # path; source development keeps its existing behavior.
+    _record_frozen_hub_data_root_authorization()
 
     # This must run before importing the application, pywebview, TTS or any
     # module which asks Python/Windows for a cache or temporary directory.

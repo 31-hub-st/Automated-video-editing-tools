@@ -261,7 +261,8 @@
     "caption_mode", "subtitle_preset", "intro_card_preset", "code_card_preset",
     "outro_card_preset", "subtitle_animation", "intro_animation",
     "max_episode_minutes", "cover_outro_enabled", "cover_animation", "color_grade", "end_card_seconds",
-    "render_mode", "video_template", "intro_card_enabled", "intro_card_duration_seconds",
+    "render_mode", "video_template", "intro_card_enabled", "intro_card_start_seconds", "intro_card_duration_seconds",
+    "code_card_enabled", "code_card_start_seconds", "code_card_duration_seconds",
     "output_mode", "export_narration_audio",
     "video_playback_speed", "video_transition", "subtitle_word_mode", "bgm_mode",
   ]);
@@ -434,6 +435,12 @@
       preview_seconds: DEFAULT_PREVIEW_SECONDS,
       render_mode: "speed",
       cover_outro_enabled: true,
+      intro_card_enabled: false,
+      intro_card_start_seconds: 0,
+      intro_card_duration_seconds: 5.5,
+      code_card_enabled: true,
+      code_card_start_seconds: 0,
+      code_card_duration_seconds: 0,
       cover_animation: "gentle_push",
       color_grade: "neutral",
       voice_by_mood: {
@@ -2855,6 +2862,42 @@
     return novel?.platform_bindings?.find((item) => item.platform_id === target) || null;
   }
 
+  function draftPlatformCopyDefaults(novel, draft) {
+    const platform = platformById(draft?.platform_id);
+    const binding = bindingFor(novel, draft?.platform_id);
+    const code = binding?.codes?.find((item) => item.id === draft?.promo_code_id)?.value || "123456";
+    return {
+      search: platform
+        ? safeTemplate(platform.search_template, platform.name, code)
+        : `Search Platform: ${code}`,
+      ending: platform
+        ? safeTemplate(platform.ending_template, platform.name, code)
+        : "Download the novel app to discover what happened next.",
+    };
+  }
+
+  function syncDraftPlatformCopyDefaults(novel, draft) {
+    if (!novel || !draft) return { search: "", ending: "" };
+    const defaults = draftPlatformCopyDefaults(novel, draft);
+    const searchInput = $("#production-platform-search-text");
+    const endingInput = $("#production-platform-ending-text");
+    if (!draft._platformSearchTextCustomized) draft.platform_search_text = "";
+    if (!draft._platformEndingTextCustomized) draft.platform_ending_text = "";
+    if (searchInput) {
+      searchInput.dataset.custom = String(Boolean(draft._platformSearchTextCustomized));
+      searchInput.value = draft._platformSearchTextCustomized
+        ? String(draft.platform_search_text || "")
+        : defaults.search;
+    }
+    if (endingInput) {
+      endingInput.dataset.custom = String(Boolean(draft._platformEndingTextCustomized));
+      endingInput.value = draft._platformEndingTextCustomized
+        ? String(draft.platform_ending_text || "")
+        : defaults.ending;
+    }
+    return defaults;
+  }
+
   function coverToneClass(value) {
     const allowed = new Set(["ember", "violet", "noir", "cobalt"]);
     return allowed.has(value) ? `tone-${value}` : "tone-cobalt";
@@ -3721,6 +3764,14 @@
     novel.draft.production_preset_dirty = Boolean(novel.draft.production_preset_dirty);
     novel.draft.intro_card_text ||= "";
     novel.draft.intro_card_source ||= "";
+    novel.draft.platform_search_text = String(novel.draft.platform_search_text || "");
+    novel.draft.platform_ending_text = String(novel.draft.platform_ending_text || "");
+    if (typeof novel.draft._platformSearchTextCustomized !== "boolean") {
+      novel.draft._platformSearchTextCustomized = Boolean(novel.draft.platform_search_text.trim());
+    }
+    if (typeof novel.draft._platformEndingTextCustomized !== "boolean") {
+      novel.draft._platformEndingTextCustomized = Boolean(novel.draft.platform_ending_text.trim());
+    }
     if (isAuthenticatedHubBrowser() || isClientLocalBrowser()) {
       const folderDefaults = webFolderDefaults();
       Object.keys(draftFolderCatalog).forEach((key) => {
@@ -3746,8 +3797,14 @@
       bgm_volume: Number(defaults.bgm_volume || 0.28),
       adult_mode: defaults.adult_mode || "engaging",
       video_template: defaults.video_template || "classic",
-      intro_card_enabled: defaults.intro_card_enabled === true || defaults.video_template === "platform_story_card",
+      intro_card_enabled: typeof defaults.intro_card_enabled === "boolean"
+        ? defaults.intro_card_enabled
+        : defaults.video_template === "platform_story_card",
+      intro_card_start_seconds: Number(defaults.intro_card_start_seconds || 0),
       intro_card_duration_seconds: Number(defaults.intro_card_duration_seconds || 5.5),
+      code_card_enabled: defaults.code_card_enabled !== false,
+      code_card_start_seconds: Number(defaults.code_card_start_seconds || 0),
+      code_card_duration_seconds: Number(defaults.code_card_duration_seconds || 0),
       intro_card_preset: defaults.intro_card_preset || "editorial_white",
       caption_mode: defaults.caption_mode || "semantic",
       subtitle_preset: defaults.subtitle_preset || "clear_outline",
@@ -3779,13 +3836,25 @@
     novel.draft.production_settings.intro_card_enabled = typeof novel.draft.production_settings.intro_card_enabled === "boolean"
       ? novel.draft.production_settings.intro_card_enabled
       : novel.draft.production_settings.video_template === "platform_story_card";
+    novel.draft.production_settings.intro_card_start_seconds = Math.max(
+      0,
+      Number(novel.draft.production_settings.intro_card_start_seconds || 0),
+    );
     novel.draft.production_settings.intro_card_duration_seconds = Math.max(
       2.5,
       Math.min(8, Number(novel.draft.production_settings.intro_card_duration_seconds || 5.5)),
     );
-    novel.draft.production_settings.video_template = novel.draft.production_settings.intro_card_enabled
-      ? "platform_story_card"
-      : "classic";
+    novel.draft.production_settings.code_card_enabled = (
+      novel.draft.production_settings.code_card_enabled !== false
+    );
+    novel.draft.production_settings.code_card_start_seconds = Math.max(
+      0,
+      Number(novel.draft.production_settings.code_card_start_seconds || 0),
+    );
+    novel.draft.production_settings.code_card_duration_seconds = Math.max(
+      0,
+      Number(novel.draft.production_settings.code_card_duration_seconds || 0),
+    );
     novel.draft.production_settings.intro_card_preset ||= defaults.intro_card_preset || "editorial_white";
     novel.draft.production_settings.code_card_preset ||= defaults.code_card_preset || "brand_pill";
     novel.draft.production_settings.outro_card_preset ||= defaults.outro_card_preset || "editorial_white";
@@ -3859,6 +3928,10 @@
       intro_card_text: "",
       intro_card_source: "",
       intro_card_copies: {},
+      platform_search_text: "",
+      platform_ending_text: "",
+      _platformSearchTextCustomized: false,
+      _platformEndingTextCustomized: false,
       variant_count: 1,
       approvals: { main: "pending", variants: {} },
       recipe_dirty: false,
@@ -4586,7 +4659,13 @@
     const durationWarningVisible = selectedDurationSeconds > MERGED_DURATION_WARNING_SECONDS;
     const targetMinimum = 1;
     draft.target_video_count = Math.max(targetMinimum, Math.trunc(Number(draft.target_video_count || 10)));
-    const currentCode = activeCodes.find((item) => item.id === draft.promo_code_id);
+    const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
+    const platformSearchText = draft._platformSearchTextCustomized
+      ? String(draft.platform_search_text || "")
+      : platformCopyDefaults.search;
+    const platformEndingText = draft._platformEndingTextCustomized
+      ? String(draft.platform_ending_text || "")
+      : platformCopyDefaults.ending;
     const structureLocked = productionStructureLocked(novel, draft);
     const recentBatch = (
       !draft.id
@@ -4607,7 +4686,7 @@
     const sectionOpen = state.productionSectionExpanded;
     const selectedPlatformName = platformById(draft.platform_id)?.name || binding?.platform_name || "平台待选";
     const selectedVoiceLabel = draft.voice?.label || draft.voice?.voice_id || (reuseAudio ? "已有配音" : "女声待选");
-    const visualSummary = `${settings.intro_card_enabled ? "简介卡开启" : "简介卡关闭"} · ${settings.subtitle_word_mode === "single" ? "单词逐个" : settings.subtitle_word_mode === "cumulative" ? "逐词变色" : "整句字幕"}`;
+    const visualSummary = `${settings.intro_card_enabled ? "简介卡开启" : "简介卡关闭"} · ${settings.code_card_enabled !== false ? "口令卡开启" : "口令卡关闭"} · ${settings.subtitle_word_mode === "single" ? "单词逐个" : settings.subtitle_word_mode === "cumulative" ? "逐词变色" : "整句字幕"}`;
     const outputSummary = audioOnly
       ? "纯旁白配音"
       : `${Number(settings.output_fps || 60)} FPS · ${draft.target_video_count} 个视频`;
@@ -4686,15 +4765,16 @@
           <div class="production-visual-semantics">
             <section class="production-semantic-panel" data-visual-panel="picture" aria-labelledby="production-picture-panel-title">
               <div class="production-semantic-heading"><span aria-hidden="true">▧</span><div><h4 id="production-picture-panel-title">画面效果</h4><p>模板、素材速度与封面结尾</p></div></div>
-              <div class="production-intro-card-controls" data-intro-card-enabled="${settings.intro_card_enabled ? "true" : "false"}">
+              <div class="production-card-timeline-controls production-intro-card-controls" data-card-enabled="${settings.intro_card_enabled ? "true" : "false"}" data-intro-card-enabled="${settings.intro_card_enabled ? "true" : "false"}">
                 <label class="option-toggle production-intro-toggle">
                   <input id="production-intro-card-enabled" type="checkbox" ${settings.intro_card_enabled ? "checked" : ""} />
-                  <span><b>使用简介卡</b><small>开头展示平台、口令和精简故事钩子。</small></span>
+                  <span><b>使用简介卡</b><small>可指定从视频第几秒开始展示。</small></span>
                   <i aria-hidden="true"></i>
                 </label>
-                <label class="field"><span>出现时长</span><input id="production-intro-card-duration" type="number" min="2.5" max="8" step="0.5" value="${Number(settings.intro_card_duration_seconds || 5.5)}" /><small>2.5–8 秒</small></label>
-                <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset"><option value="editorial_white">杂志白卡</option><option value="cover_story_dark">深色封面故事卡</option><option value="cover_story_noir">电影黑卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
-                <label class="field production-intro-copy-field"><span>简介短文案</span><textarea id="production-intro-card-copy" rows="3" maxlength="155" placeholder="${escapeHtml(storyPreviewText(novel, draft))}">${escapeHtml(draft.intro_card_text || "")}</textarea><small>留空则使用 AI 精简结果；只保留最有吸引力的冲突，不显示小说名和多余标签。</small></label>
+                <label class="field"><span>开始时间</span><input id="production-intro-card-start" type="number" min="0" step="0.5" value="${Number(settings.intro_card_start_seconds || 0)}" ${settings.intro_card_enabled ? "" : "disabled"} /><small>从视频第几秒出现</small></label>
+                <label class="field"><span>显示时长</span><input id="production-intro-card-duration" type="number" min="2.5" max="8" step="0.5" value="${Number(settings.intro_card_duration_seconds || 5.5)}" ${settings.intro_card_enabled ? "" : "disabled"} /><small>2.5–8 秒</small></label>
+                <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset" ${settings.intro_card_enabled ? "" : "disabled"}><option value="editorial_white">杂志白卡</option><option value="cover_story_dark">深色封面故事卡</option><option value="cover_story_noir">电影黑卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
+                <label class="field production-intro-copy-field"><span>简介短文案</span><textarea id="production-intro-card-copy" rows="3" maxlength="155" placeholder="${escapeHtml(storyPreviewText(novel, draft))}" ${settings.intro_card_enabled ? "" : "disabled"}>${escapeHtml(draft.intro_card_text || "")}</textarea><small>留空则使用 AI 精简结果；只保留最有吸引力的冲突，不显示小说名和多余标签。</small></label>
               </div>
               ${productionVideoSpeedMarkup(settings)}
               <label class="option-toggle production-cover-toggle">
@@ -4708,8 +4788,22 @@
               <div class="workbench-field-grid workbench-field-grid-two production-caption-primary-grid">
                 <label class="field"><span>字幕预设</span><select id="production-subtitle-preset"><option value="clear_outline">清晰描边</option><option value="soft_box">柔和底板</option><option value="romance_glow">浪漫柔光</option><option value="suspense_noir">悬疑黑金</option><option value="confession_clean">对白清透</option><option value="golden_hook">金色钩子</option><option value="midnight_reader">午夜阅读</option></select></label>
                 <label class="field"><span>字幕行为</span><select id="production-subtitle-word-mode"><option value="off">整句稳定</option><option value="cumulative">逐词累积高亮</option><option value="single">单词逐个出现</option></select></label>
-                <label class="field"><span>口令卡样式</span><select id="production-code-card-preset"><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
                 <label class="field"><span>字幕切分</span><select id="production-caption-mode"><option value="semantic">按语义停顿</option><option value="sentence">按完整句子</option></select></label>
+              </div>
+              <div class="production-card-timeline-controls production-code-card-controls" data-card-enabled="${settings.code_card_enabled !== false ? "true" : "false"}">
+                <label class="option-toggle production-code-toggle">
+                  <input id="production-code-card-enabled" type="checkbox" ${settings.code_card_enabled !== false ? "checked" : ""} />
+                  <span><b>使用口令卡</b><small>展示本批平台和口令，可设置出现时段。</small></span>
+                  <i aria-hidden="true"></i>
+                </label>
+                <label class="field"><span>开始时间</span><input id="production-code-card-start" type="number" min="0" step="0.5" value="${Number(settings.code_card_start_seconds || 0)}" ${settings.code_card_enabled !== false ? "" : "disabled"} /><small>从视频第几秒出现</small></label>
+                <label class="field"><span>显示时长</span><input id="production-code-card-duration" type="number" min="0" step="0.5" value="${Number(settings.code_card_duration_seconds || 0)}" ${settings.code_card_enabled !== false ? "" : "disabled"} /><small>0 表示持续到视频结尾</small></label>
+                <label class="field"><span>口令卡样式</span><select id="production-code-card-preset" ${settings.code_card_enabled !== false ? "" : "disabled"}><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
+                <label class="field production-platform-search-copy-field"><span>平台口令卡文案</span><textarea id="production-platform-search-text" rows="2" maxlength="300" data-custom="${draft._platformSearchTextCustomized ? "true" : "false"}" ${settings.code_card_enabled !== false ? "" : "disabled"}>${escapeHtml(platformSearchText)}</textarea><small>默认使用所选平台模板和当前口令解析。</small></label>
+              </div>
+              <div class="production-platform-copy-overrides">
+                <label class="field"><span>结尾引导文案</span><textarea id="production-platform-ending-text" rows="3" maxlength="600" data-custom="${draft._platformEndingTextCustomized ? "true" : "false"}">${escapeHtml(platformEndingText)}</textarea><small>默认使用平台结尾模板，用于本批旁白与字幕。</small></label>
+                <p><b>员工可直接编辑</b><span>只覆盖本批，不修改团队平台模板，也不需要平台管理权限。</span></p>
               </div>
             </section>
           </div>
@@ -4781,6 +4875,7 @@
     $("#production-color-grade").value = settings.color_grade || "neutral";
     $("#production-intro-animation").value = settings.intro_animation || "fade_rise";
     $("#production-subtitle-font").value = subtitle.font_family || "Arial";
+    syncDraftPlatformCopyDefaults(novel, draft);
     syncProductionDraftFromControls({ render: false });
     updateProductionPreview();
     state.lastDetailJobSignature = detailJobSignature(novel);
@@ -5059,12 +5154,43 @@
     }
     productionSettings.video_transition = $("#production-video-transition")?.value === "fade" ? "fade" : "cut";
     productionSettings.intro_card_enabled = $("#production-intro-card-enabled")?.checked === true;
+    productionSettings.intro_card_start_seconds = Math.max(
+      0,
+      Number($("#production-intro-card-start")?.value || productionSettings.intro_card_start_seconds || 0),
+    );
     productionSettings.intro_card_duration_seconds = Math.max(
       2.5,
       Math.min(8, Number($("#production-intro-card-duration")?.value || productionSettings.intro_card_duration_seconds || 5.5)),
     );
-    productionSettings.video_template = productionSettings.intro_card_enabled ? "platform_story_card" : "classic";
+    productionSettings.code_card_enabled = $("#production-code-card-enabled")?.checked !== false;
+    productionSettings.code_card_start_seconds = Math.max(
+      0,
+      Number($("#production-code-card-start")?.value || productionSettings.code_card_start_seconds || 0),
+    );
+    productionSettings.code_card_duration_seconds = Math.max(
+      0,
+      Number($("#production-code-card-duration")?.value || productionSettings.code_card_duration_seconds || 0),
+    );
     if ($("#production-intro-card-copy")) draft.intro_card_text = $("#production-intro-card-copy").value.trim();
+    const platformSearchInput = $("#production-platform-search-text");
+    const platformEndingInput = $("#production-platform-ending-text");
+    if (platformSearchInput) {
+      draft._platformSearchTextCustomized = (
+        platformSearchInput.dataset.custom === "true" && Boolean(platformSearchInput.value.trim())
+      );
+      draft.platform_search_text = draft._platformSearchTextCustomized
+        ? platformSearchInput.value.trim()
+        : "";
+    }
+    if (platformEndingInput) {
+      draft._platformEndingTextCustomized = (
+        platformEndingInput.dataset.custom === "true" && Boolean(platformEndingInput.value.trim())
+      );
+      draft.platform_ending_text = draft._platformEndingTextCustomized
+        ? platformEndingInput.value.trim()
+        : "";
+    }
+    syncDraftPlatformCopyDefaults(novel, draft);
     productionSettings.intro_card_preset = $("#production-intro-card-preset")?.value || productionSettings.intro_card_preset || "editorial_white";
     productionSettings.subtitle_preset = $("#production-subtitle-preset")?.value || productionSettings.subtitle_preset || "clear_outline";
     productionSettings.code_card_preset = $("#production-code-card-preset")?.value || productionSettings.code_card_preset || "brand_pill";
@@ -5090,9 +5216,17 @@
     const introCardControls = $(".production-intro-card-controls", root);
     if (introCardControls) {
       introCardControls.dataset.introCardEnabled = String(productionSettings.intro_card_enabled);
-      [$("#production-intro-card-duration"), $("#production-intro-card-preset"), $("#production-intro-animation")]
+      introCardControls.dataset.cardEnabled = String(productionSettings.intro_card_enabled);
+      [$("#production-intro-card-start"), $("#production-intro-card-duration"), $("#production-intro-card-preset"), $("#production-intro-card-copy"), $("#production-intro-animation")]
         .filter(Boolean)
         .forEach((control) => { control.disabled = !productionSettings.intro_card_enabled; });
+    }
+    const codeCardControls = $(".production-code-card-controls", root);
+    if (codeCardControls) {
+      codeCardControls.dataset.cardEnabled = String(productionSettings.code_card_enabled);
+      [$("#production-code-card-start"), $("#production-code-card-duration"), $("#production-code-card-preset"), $("#production-platform-search-text")]
+        .filter(Boolean)
+        .forEach((control) => { control.disabled = !productionSettings.code_card_enabled; });
     }
     productionSettings.subtitle ||= {};
     Object.assign(productionSettings.subtitle, {
@@ -5225,8 +5359,9 @@
   function productionPreviewSceneForControl(control) {
     const id = control?.id || "";
     const name = control?.name || "";
-    if (["production-intro-card-enabled", "production-intro-card-duration", "production-intro-card-copy", "production-intro-card-preset", "production-code-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
-    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset"].includes(id)) return "outro";
+    if (["production-intro-card-enabled", "production-intro-card-start", "production-intro-card-duration", "production-intro-card-copy", "production-intro-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
+    if (["production-code-card-enabled", "production-code-card-start", "production-code-card-duration", "production-code-card-preset", "production-platform-search-text"].includes(id)) return "subtitle";
+    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset", "production-platform-ending-text"].includes(id)) return "outro";
     if (id.startsWith("production-subtitle-") || id === "production-caption-mode") return "subtitle";
     return "";
   }
@@ -5613,7 +5748,14 @@
     const binding = bindingFor(novel, draft.platform_id);
     const platform = platformById(draft.platform_id);
     const code = binding?.codes?.find((item) => item.id === draft.promo_code_id)?.value || "123456";
-    $("#preview-code").textContent = platform ? safeTemplate(platform.search_template, platform.name, code) : `Search Platform: ${code}`;
+    const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
+    const platformSearchText = draft._platformSearchTextCustomized
+      ? String(draft.platform_search_text || "")
+      : platformCopyDefaults.search;
+    const platformEndingText = draft._platformEndingTextCustomized
+      ? String(draft.platform_ending_text || "")
+      : platformCopyDefaults.ending;
+    $("#preview-code").textContent = platformSearchText;
     $("#preview-platform").textContent = platform?.name || "尚未选择";
     const subtitle = $("#preview-subtitle");
     const outroSubtitle = $("#preview-outro-caption");
@@ -5622,13 +5764,19 @@
     const previewLanguage = novelLanguageInfo(novel).code || "en";
     const root = $("#video-preview");
     const introCardEnabled = settings.intro_card_enabled === true;
-    const videoTemplate = introCardEnabled ? "platform_story_card" : "classic";
+    const codeCardEnabled = settings.code_card_enabled !== false;
+    const videoTemplate = settings.video_template || "classic";
     const coverAnimation = normalizedCoverAnimation(settings.cover_animation);
     const coverOutroEnabled = settings.cover_outro_enabled !== false;
     let introPreviewGeometry = null;
     if (root) {
       root.dataset.videoTemplate = videoTemplate;
       root.dataset.introCardEnabled = String(introCardEnabled);
+      root.dataset.codeCardEnabled = String(codeCardEnabled);
+      root.dataset.introCardStartSeconds = String(Number(settings.intro_card_start_seconds || 0));
+      root.dataset.introCardDurationSeconds = String(Number(settings.intro_card_duration_seconds || 5.5));
+      root.dataset.codeCardStartSeconds = String(Number(settings.code_card_start_seconds || 0));
+      root.dataset.codeCardDurationSeconds = String(Number(settings.code_card_duration_seconds || 0));
       root.dataset.subtitlePreset = settings.subtitle_preset || "clear_outline";
       root.dataset.subtitleAnimation = settings.subtitle_animation || "none";
       root.dataset.codePreset = settings.code_card_preset || "brand_pill";
@@ -5644,9 +5792,16 @@
       introPreviewGeometry = applyProductionCardStyles(root, settings, { introCardText, codeValue: code, coverPresent });
     }
     if ($("#preview-output")) $("#preview-output").textContent = `1080 × 1920 · ${Number(settings.output_fps || 60)} FPS`;
-    if ($("#preview-template")) $("#preview-template").textContent = introCardEnabled
-      ? `简介卡开启 · ${Number(settings.intro_card_duration_seconds || 5.5)}秒`
-      : "简介卡关闭";
+    if ($("#preview-template")) {
+      const introSummary = introCardEnabled
+        ? `${videoTemplate === "platform_story_card" ? "平台简介卡" : "经典简介"} ${Number(settings.intro_card_start_seconds || 0)}秒起·${Number(settings.intro_card_duration_seconds || 5.5)}秒`
+        : "简介卡关闭";
+      const codeDuration = Number(settings.code_card_duration_seconds || 0);
+      const codeSummary = codeCardEnabled
+        ? `口令卡 ${Number(settings.code_card_start_seconds || 0)}秒起·${codeDuration > 0 ? `${codeDuration}秒` : "至结尾"}`
+        : "口令卡关闭";
+      $("#preview-template").textContent = `${introSummary} / ${codeSummary}`;
+    }
     if ($("#preview-story-platform-name")) $("#preview-story-platform-name").textContent = platform?.name || "Platform";
     if ($("#preview-story-platform-tagline")) {
       $("#preview-story-platform-tagline").textContent = platform?.tagline || "Stories that stay with you";
@@ -5671,9 +5826,7 @@
       $("#preview-story-copy-secondary").lang = previewLanguage;
     }
     paintIntroCardCover($("#preview-story-cover"), novel, introCardEnabled);
-    const outroCopy = platform
-      ? safeTemplate(platform.ending_template, platform.name, code)
-      : "Download the novel app to discover what happened next.";
+    const outroCopy = platformEndingText;
     if ($("#preview-outro-copy")) $("#preview-outro-copy").textContent = outroCopy;
     if ($("#preview-outro-code")) $("#preview-outro-code").textContent = `Search “${code}”`;
     const subtitleSettings = settings.subtitle || {};
@@ -5693,10 +5846,9 @@
       text: representativeSubtitleText(novel, draft),
     });
     if (subtitle) subtitle.lang = previewLanguage;
-    const outroCaptionText = String(outroCopy).includes(code) ? outroCopy : `${outroCopy} Search ${code}.`;
     applySubtitlePreviewStyles(outroSubtitle, root, subtitleSettings, {
       ...subtitleOptions,
-      text: outroCaptionText,
+      text: outroCopy,
     });
   }
 
@@ -7317,6 +7469,8 @@
       intro_card_source: String(
         draft.intro_card_source || (String(novel.synopsis || "").trim() ? "novel_synopsis" : "episode_excerpt"),
       ),
+      platform_search_text: String(draft.platform_search_text || ""),
+      platform_ending_text: String(draft.platform_ending_text || ""),
       video_folder: draft.video_folder,
       music_folder: draft.music_folder,
       output_folder: draft.output_folder,
@@ -10493,7 +10647,7 @@
         }
         return;
       }
-      if (event.target.closest("#production-workbench-content") && event.target.matches('[data-episode-id], input[name="production-voice"], input[name="production-output-mode"], #production-intro-card-enabled, #production-cover-outro-enabled, select, input[type="color"]')) {
+      if (event.target.closest("#production-workbench-content") && event.target.matches('[data-episode-id], input[name="production-voice"], input[name="production-output-mode"], #production-intro-card-enabled, #production-code-card-enabled, #production-cover-outro-enabled, select, input[type="color"]')) {
         const previewScene = productionPreviewSceneForControl(event.target);
         if (previewScene) state.productionPreviewScene = previewScene;
         markProductionRecipeDirty();
@@ -10518,6 +10672,17 @@
         syncProductionDraftFromControls();
         updateProductionPreview();
         return;
+      }
+      if (event.target.matches("#production-platform-search-text, #production-platform-ending-text") && state.productionNovel) {
+        const customized = Boolean(event.target.value.trim());
+        event.target.dataset.custom = String(customized);
+        if (!customized) {
+          const draft = activeDraft(state.productionNovel);
+          const defaults = draftPlatformCopyDefaults(state.productionNovel, draft);
+          event.target.value = event.target.id === "production-platform-search-text"
+            ? defaults.search
+            : defaults.ending;
+        }
       }
       if (event.target.matches('input[type="range"], input[type="number"], textarea, [data-draft-path], #production-source-narration-audio, #production-bgm-file')) {
         const previewScene = productionPreviewSceneForControl(event.target);

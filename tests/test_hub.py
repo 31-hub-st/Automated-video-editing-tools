@@ -1206,10 +1206,27 @@ class PermissionEnforcementTests(HubTestCase):
                     "promo_code_id": code["id"],
                     "creative_line_count": 1,
                     "created_by_user_id": self.actor["id"],
+                    "metadata": {
+                        "platform_search_text": "Search this batch: CODEMETHODS",
+                        "platform_ending_text": "Continue this exact batch.",
+                    },
                 }
             },
         )
         self.assertEqual(draft["created_by_user_id"], producer["id"])
+        self.assertEqual(
+            draft["metadata"]["platform_search_text"],
+            "Search this batch: CODEMETHODS",
+        )
+        self.assertEqual(
+            draft["metadata"]["platform_ending_text"],
+            "Continue this exact batch.",
+        )
+        effective = producer_client.call(
+            "get_effective_permissions", {"user_id": producer["id"]}
+        )["effective"]
+        self.assertTrue(effective["drafts.create"])
+        self.assertFalse(effective["platforms.manage"])
         self.catalog.set_user_permission(
             producer["id"], "promo_codes.use", False, actor_user_id=self.actor["id"]
         )

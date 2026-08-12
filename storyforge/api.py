@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -83,6 +84,40 @@ PRODUCTION_STREAM_THRESHOLD = 128
 QUEUE_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 RECORD_LEASE_SECONDS = 180
 RECORD_LEASE_HEARTBEAT_SECONDS = 45.0
+_FROZEN_HUB_DATA_ROOT_ENV = "STORYFORGE_FROZEN_HUB_DATA_ROOT"
+_DEPLOYMENT_ROLE_ENV = "STORYFORGE_DEPLOYMENT_ROLE"
+
+
+class _HubClientActivationSuperseded(RuntimeError):
+    """A newer persisted Hub credential replaced this activation attempt."""
+
+
+def _assert_hub_runtime_authorized(data_dir: Path) -> None:
+    """Reject host mode unless this process has an authorized Hub identity."""
+
+    if os.environ.get("STORYFORGE_PORTABLE_MODE") == "1":
+        raise RuntimeError(
+            "Refusing Hub host startup from a portable employee runtime."
+        )
+    if not bool(getattr(sys, "frozen", False)):
+        return
+    role = str(os.environ.get(_DEPLOYMENT_ROLE_ENV) or "").strip().casefold()
+    if role != "hub":
+        raise RuntimeError(
+            "Frozen Hub startup requires STORYFORGE_DEPLOYMENT_ROLE=Hub."
+        )
+    configured = str(os.environ.get(_FROZEN_HUB_DATA_ROOT_ENV) or "").strip()
+    if not configured:
+        raise RuntimeError(
+            "Frozen Hub startup requires an explicit STORYFORGE_DATA_DIR "
+            "before portable runtime configuration."
+        )
+    authorized = Path(configured).expanduser().resolve(strict=False)
+    if authorized != data_dir.resolve(strict=False):
+        raise RuntimeError(
+            "Frozen Hub startup requires the authorized explicit "
+            "STORYFORGE_DATA_DIR."
+        )
 
 
 def _sanitize_hub_diagnostic_value(value: Any) -> Any:
@@ -119,11 +154,13 @@ class StoryForgeApi:
         *,
         hub_listen_host: str | None = None,
         hub_listen_port: int | None = None,
+        local_production_enabled: bool = True,
     ) -> None:
         # pywebview recursively exposes every public attribute on ``js_api``.
         # Keeping the object graph private prevents it from walking through the
         # queue, repository and bound pipeline forever during bridge startup.
         self._repository = repository or SettingsRepository()
+        self._local_production_enabled = bool(local_production_enabled)
         self._backup_manager = HubBackupManager(self._repository.data_dir)
         self._hub_listen_host_override = (
             str(hub_listen_host).strip() if hub_listen_host is not None else None
@@ -286,7 +323,8 @@ class StoryForgeApi:
             rendering_busy_getter=self._queue.has_unfinished_work,
             heavy_resource_lock=self._heavy_resource_lock,
         )
-        self._reconcile_interrupted_records()
+        if self._local_production_enabled:
+            self._reconcile_interrupted_records()
         self._update_manager.start()
         self._ensure_device_sync()
         if self._runtime_hub_mode == "host":
@@ -481,18 +519,30 @@ class StoryForgeApi:
             text_provider_factory=self._runtime_text_provider_factory,
             remote_text_provider=True,
         )
-        self._catalog = catalog
-        self._library = library
-        self._runtime_hub_mode = "client"
-        self._hub_error = ""
-        self._state.platforms = [
+        remote_profiles = [
             PlatformProfile.from_dict(dict(item))
             for item in remote_platforms
             if isinstance(item, Mapping)
         ]
-        # Publish readiness only after every shared-data dependency has moved
-        # to the newly verified transport.
+        # Password enrolment persists its new token before activation. An old
+        # sync attempt can finish verification after that rotation; commit the
+        # transport and all of its dependent proxies only if this credential
+        # is still the one selected by current settings.
         with self._hub_client_lock:
+            configured_token = str(self._state.settings.hub.access_token or "")
+            if not configured_token or not hmac.compare_digest(
+                str(client.token), configured_token
+            ):
+                raise _HubClientActivationSuperseded(
+                    "Hub client activation was superseded by a newer credential."
+                )
+            self._catalog = catalog
+            self._library = library
+            self._runtime_hub_mode = "client"
+            self._hub_error = ""
+            self._state.platforms = remote_profiles
+            # Publish readiness only after every shared-data dependency has
+            # moved to the newly verified transport.
             self._hub_client = client
         return identity
 
@@ -633,18 +683,24 @@ class StoryForgeApi:
     def _device_sync_loop(self) -> None:
         while not self._device_sync_stop.is_set():
             self._device_sync_wake.clear()
+            sync_client = self._hub_client_snapshot()
             try:
                 self._device_sync_once()
-            except HubAuthenticationError as error:
-                client = self._hub_client_snapshot()
-                if client is not None:
-                    self._mark_hub_authentication_failed(client, error)
+            except (_HubClientActivationSuperseded, HubAuthenticationError):
+                # Observed HubClient instances report credential rejection
+                # through their source-bound callback. Re-reading the current
+                # slot here could apply an old request's 401 to a freshly
+                # enrolled client.
+                pass
             except (HubError, OSError, RuntimeError, TypeError, ValueError) as error:
-                self._hub_error = str(error) or type(error).__name__
-                self._set_device_sync_status(
-                    state="offline",
-                    last_error=self._hub_error,
-                )
+                # Likewise, a late timeout from an old transport must not
+                # overwrite the status published by a newer activation.
+                if self._hub_client_snapshot() is sync_client:
+                    self._hub_error = str(error) or type(error).__name__
+                    self._set_device_sync_status(
+                        state="offline",
+                        last_error=self._hub_error,
+                    )
             interval = 10.0 if self._queue.is_rendering_busy() else 20.0
             self._device_sync_wake.wait(interval)
 
@@ -699,6 +755,11 @@ class StoryForgeApi:
         hub = self._state.settings.hub
         mode = str(hub.mode or "local").strip().casefold()
         self._runtime_hub_mode = mode
+        if mode == "host":
+            # This guard deliberately precedes CatalogRepository and
+            # HubServer construction. A packaged employee copy or a frozen EXE
+            # without a deployment-authorized DataRoot must never bind 8765.
+            _assert_hub_runtime_authorized(self._repository.data_dir)
         if mode == "client":
             try:
                 if not hub.access_token:
@@ -762,6 +823,14 @@ class StoryForgeApi:
         if self._runtime_hub_mode == "client" and self._hub_client is None:
             detail = self._hub_error or "Hub 当前不可连接"
             raise RuntimeError(f"Hub 已断开，不能新建或修改共享数据：{detail}")
+
+    def _require_local_production_enabled(self) -> None:
+        """Fail closed before a Hub-only process can touch its local queue."""
+
+        if not self._local_production_enabled:
+            raise RuntimeError(
+                "Hub-only runtime cannot queue, restore, retry, or start local production."
+            )
 
     @staticmethod
     def _hub_reference(value: str) -> tuple[str, str] | None:
@@ -1805,6 +1874,10 @@ class StoryForgeApi:
     ) -> Any:
         """Start the fixed-port localhost media worker for this installation."""
 
+        if not self._local_production_enabled:
+            raise RuntimeError(
+                "Hub-only runtime cannot start a local production worker."
+            )
         from .web import ClientLocalWebServer
         from .worker import LOCAL_WORKER_DEFAULT_PORT, LOCAL_WORKER_DISCOVERY_PORTS
 
@@ -1874,12 +1947,10 @@ class StoryForgeApi:
             ui_root=root,
             upload_root=self._repository.data_dir / "web-uploads",
         )
-        # The Hub computer is also allowed to produce.  Its browser discovers
-        # this loopback-only worker exactly like every employee workstation,
-        # so media never travels through the shared Hub HTTP surface.
-        self._ensure_local_worker_server(
-            root, serve_ui=False, use_port_override=False
-        )
+        # Hub-only owns the authoritative catalog and shared browser surface,
+        # but not a local production queue. An enrolled client/Worker owns the
+        # loopback media service and its global production mutex, including
+        # when that client happens to run on the Hub computer.
         return {
             "url": f"http://{self._local_ipv4()}:{self._hub_server.address[1]}",
             "local_url": self._hub_server.base_url,
@@ -2761,8 +2832,9 @@ class StoryForgeApi:
                 self._client_web_server = None
             # A verified package is handed to an external updater only after
             # the queue is confirmed idle. The live process never overwrites
-            # its own files.
-            if queue_stopped:
+            # its own files. A Hub publishes updates for clients but never
+            # installs a pending client package during its own shutdown.
+            if queue_stopped and self._runtime_hub_mode != "host":
                 try:
                     self._update_manager.launch_scheduled_update()
                 except (OSError, RuntimeError, ValueError):
@@ -3944,6 +4016,7 @@ class StoryForgeApi:
         """Create a full-render queue from one novel/platform draft."""
 
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             self._require_shared_catalog_online()
             payload_value = dict(value)
             if self._runtime_hub_mode == "client":
@@ -4504,6 +4577,7 @@ class StoryForgeApi:
 
     def queue_batch(self, value: dict[str, Any]) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             batch = self._batch_from_payload(value)
             platform = self._state.platform_by_id(batch.platform_id)
             if platform is None:
@@ -4540,6 +4614,7 @@ class StoryForgeApi:
 
     def start_queue(self) -> dict[str, Any]:
         def operation() -> list[dict[str, Any]]:
+            self._require_local_production_enabled()
             self._queue.resume_streams()
             pending = [
                 item
@@ -4857,6 +4932,7 @@ class StoryForgeApi:
         """Restore an archived task card without rerendering any files."""
 
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             archived = dict(self._catalog.get_archived_job(str(job_id)))
             record_id = str(archived.get("production_record_id") or "")
             self._require_job_record_access(record_id)
@@ -4896,6 +4972,7 @@ class StoryForgeApi:
         """Restore every archived task card in one batch without rerendering."""
 
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             normalized = str(batch_id or "").strip()
             self._batch_records(normalized)
             actor_user_id = self._current_web_actor() or None
@@ -4994,6 +5071,7 @@ class StoryForgeApi:
 
     def approve_preview(self, job_id: str) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             job = self._queue.get_job(str(job_id))
             self._validate_provider_readiness(
                 job.settings_snapshot if job is not None else None
@@ -5007,6 +5085,7 @@ class StoryForgeApi:
 
     def regenerate_preview(self, job_id: str) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             job = self._queue.get_job(str(job_id))
             terminal_retry = bool(
                 job is not None
@@ -5119,6 +5198,7 @@ class StoryForgeApi:
         worker_folders: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
+            self._require_local_production_enabled()
             existing = self._queue.get_job(str(job_id))
             if existing is not None and existing.job_kind == "preview":
                 raise ValueError(
@@ -5642,6 +5722,8 @@ class StoryForgeApi:
     def _reconcile_interrupted_records(self) -> None:
         """Recover durable queued work and mark only vanished active work interrupted."""
 
+        if not self._local_production_enabled:
+            return
         device_id = self._current_device_id()
         try:
             records = self._catalog.list_reconciliation_records(device_id)["items"]

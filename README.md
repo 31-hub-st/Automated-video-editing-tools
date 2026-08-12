@@ -1,26 +1,20 @@
 # StoryForge Studio
 
-## 新电脑一键部署
+## 新电脑一键恢复 Hub
 
-更换 Codex 账号、主电脑或网络后，不需要从旧电脑手工拼装程序。先给 GitHub CLI 授权私有仓库，再让 Codex 读取 [AGENTS.md](AGENTS.md) 和 [新电脑恢复说明](docs/NEW_MACHINE_RECOVERY.md)。
+普通用户不需要 Codex，也不用输入 PowerShell 命令：在浏览器登录有私有仓库权限的 GitHub 账号，下载仓库 ZIP、解压，然后双击根目录的：
 
-```powershell
-gh auth login --hostname github.com
-gh repo clone 31-hub-st/Automated-video-editing-tools D:\StoryForgeSource
-Set-Location D:\StoryForgeSource
-
-# 新 Hub 主机：管理员 PowerShell
-.\scripts\bootstrap_storyforge.ps1 -Role Hub -RestoreHubData -ReplaceExistingData
-
-# 员工制作电脑：只安装程序
-.\scripts\bootstrap_storyforge.ps1 -Role Employee -InstallRoot D:\StoryForge
+```text
+一键恢复StoryForge-Hub.cmd
 ```
+
+入口会申请管理员权限、准备 GitHub CLI、打开浏览器授权，并复用受测试的部署与验证脚本。它仅限没有旧 Hub 的全新 Windows 替换主机；发现 `D:\StoryForgeHub` 旧内容、正式任务、8765 监听或 StoryForge 进程时会安全拒绝。最短说明见 [StoryForge Hub 新电脑一键恢复](docs/ONE_CLICK_HUB_RECOVERY.md)，管理员手动流程见 [新电脑恢复说明](docs/NEW_MACHINE_RECOVERY.md)。
 
 正式程序来自 GitHub 最新稳定 Release；Hub 小说库、平台绑定、全部口令、成员和记录来自私有预发布 `hub-state-latest`。两者均进行 SHA-256、大小和 manifest 校验。Hub 快照每次覆盖同名资产，不累计重复文件。API Key 因 Windows 加密机制需要在新主机重新填写；员工素材、成品与缓存不上传 GitHub。
 
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
-当前正式版本：`v1.0.1`
+当前正式版本：`v1.0.2`
 
 ## 先看这三份文档
 
@@ -28,7 +22,7 @@ StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制�
 - [Windows 部署与多电脑协同](docs/DEPLOYMENT_WINDOWS.md)：主机、员工制作电脑、数据目录、登录和故障处理。
 - [员工快速使用说明](docs/EMPLOYEE_QUICK_START.md)：最短生产流程。
 
-发布证据、包体哈希和验收结果见 [v1.0.1 正式版交付报告](docs/V1.0.1_RELEASE.md)。
+发布证据、包体哈希和验收结果见 [v1.0.2 正式版交付报告](docs/V1.0.2_RELEASE.md)。
 
 ## 产品能力
 
@@ -39,7 +33,7 @@ StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制�
 - 支持本地 Kokoro、Edge TTS 和 Deepgram；默认美式英语，并可按语种读取可用女声。
 - 支持舒适 220、推荐 240、快速 260、极快 280 WPM，以及 200–280 WPM 自定义试听。
 - 支持整句字幕、单词逐个出现、逐词高亮、稳定字幕、口令卡、安全区、字体/颜色/描边/位置自定义。
-- 支持简介卡开关、出现时长、封面图、两种封面故事卡、颜色自定义和内容自适应布局。
+- 支持简介卡与口令卡各自独立开关、绝对出现时间和显示时长，以及封面图、两种封面故事卡、颜色自定义和内容自适应布局。
 - 视频素材由员工选择本机目录；支持递归读取、多素材拼接、循环、镜像、裁切、起点变化和 0.8–3.0 倍固定速度。
 - 删除素材原声；背景音乐可关闭、随机/自动选择或手动指定，并在人声和卡片旁白出现时自动压低。
 - 默认输出 H.264、1080×1920、60 FPS MP4；音频模式输出 MP3。
@@ -119,8 +113,8 @@ git diff --check
   -RequireStableAcceptance `
   -WithLocalAI `
   -StableStressSeconds 600 `
-  -OutputDirectory 'D:\StoryForgeRelease\1.0.0\dist' `
-  -WorkDirectory 'D:\StoryForgeRelease\1.0.0\work' `
+  -OutputDirectory 'D:\StoryForgeRelease\1.0.2\dist' `
+  -WorkDirectory 'D:\StoryForgeRelease\1.0.2\work' `
   -HubEndpoint 'http://<Hub-IP>:8765'
 ```
 

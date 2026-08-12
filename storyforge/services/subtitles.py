@@ -2126,6 +2126,7 @@ def _cover_split_intro_events(
     platform: str,
     code: str,
     intro_card_text: str,
+    intro_start: float,
     intro_duration: float,
     platform_logo_present: bool,
     cover_present: bool,
@@ -2150,7 +2151,8 @@ def _cover_split_intro_events(
     radius = round(style.intro_radius * layout_scale)
     panel_path = _rounded_rect_path(panel_width, panel_height, radius)
     shadow_path = _rounded_rect_path(panel_width, panel_height, radius)
-    intro_end = seconds_to_ass_time(intro_duration)
+    intro_start_time = seconds_to_ass_time(intro_start)
+    intro_end = seconds_to_ass_time(intro_start + intro_duration)
     panel_colour = colour_to_ass(
         style.intro_background_color,
         opacity=style.intro_background_opacity,
@@ -2182,32 +2184,32 @@ def _cover_split_intro_events(
     tagline_copy = _escape_ass_text("Stories that stay with you")
     code_copy = _escape_ass_text(f'Search "{str(code or "").strip()}"')
     events = [
-        "Dialogue: 0,0:00:00.00,"
+        f"Dialogue: 0,{intro_start_time},"
         f"{intro_end},TemplateShadow,,0,0,0,,"
         f"{{\\an7\\pos({panel_x + round(8 * scale_x)},{panel_y + round(12 * scale_y)})"
         f"\\p1\\1c{shadow_colour}\\bord0\\shad0}}{shadow_path}{{\\p0}}",
-        "Dialogue: 1,0:00:00.00,"
+        f"Dialogue: 1,{intro_start_time},"
         f"{intro_end},TemplatePanel,,0,0,0,,"
         f"{{\\an7\\pos({panel_x},{panel_y})\\p1\\1c{panel_colour}"
         f"\\3c{colour_to_ass(style.intro_border_color)}\\bord{style.intro_border_width}\\shad0}}"
         f"{panel_path}{{\\p0}}",
-        "Dialogue: 2,0:00:00.00,"
+        f"Dialogue: 2,{intro_start_time},"
         f"{intro_end},TemplateAccent,,0,0,0,,"
         f"{{\\an7\\pos({upper_x},{upper_y})\\p1\\1c{colour_to_ass(style.intro_label_color)}"
         f"\\bord0\\shad0}}{accent_path}{{\\p0}}",
-        "Dialogue: 2,0:00:00.00,"
+        f"Dialogue: 2,{intro_start_time},"
         f"{intro_end},TemplatePanel,,0,0,0,,"
         f"{{\\an7\\pos({code_chip_x},{code_chip_y})\\p1"
         f"\\1c{colour_to_ass(style.card_background_color, opacity=style.card_background_opacity)}"
         f"\\3c{colour_to_ass(style.card_outline_color)}\\bord{style.card_outline_width}\\shad0}}"
         f"{code_chip_path}{{\\p0}}",
-        "Dialogue: 4,0:00:00.00,"
+        f"Dialogue: 4,{intro_start_time},"
         f"{intro_end},IntroPlatform,,0,0,0,,"
         f"{{\\an4\\pos({platform_x},{header_y})\\q2}}{platform_copy}",
-        "Dialogue: 4,0:00:00.00,"
+        f"Dialogue: 4,{intro_start_time},"
         f"{intro_end},IntroTagline,,0,0,0,,"
         f"{{\\an7\\pos({platform_x},{tagline_y})\\q2}}{tagline_copy}",
-        "Dialogue: 5,0:00:00.00,"
+        f"Dialogue: 5,{intro_start_time},"
         f"{intro_end},IntroCode,,0,0,0,,"
         f"{{\\an5\\pos({code_chip_x + code_chip_width // 2},{code_chip_y + code_chip_height // 2})"
         f"\\fs{geometry.code_font_size}\\q2}}"
@@ -2216,21 +2218,21 @@ def _cover_split_intro_events(
     if not platform_logo_present:
         badge_center_x = panel_x + padding + round(24 * scale_x)
         events.append(
-            "Dialogue: 4,0:00:00.00,"
+            f"Dialogue: 4,{intro_start_time},"
             f"{intro_end},IntroBadge,,0,0,0,,"
             f"{{\\an5\\pos({badge_center_x},{header_y})\\3c{brand_colour}\\4c{brand_colour}}}"
             f"{_escape_ass_text(platform[:1].upper())}"
         )
     if summary_upper:
         events.append(
-            "Dialogue: 4,0:00:00.00,"
+            f"Dialogue: 4,{intro_start_time},"
             f"{intro_end},IntroSummary,,0,0,0,,"
             f"{{\\an7\\pos({geometry.upper_text_x},{upper_y})\\q2}}"
             f"{summary_upper}"
         )
     if summary_lower:
         events.append(
-            "Dialogue: 4,0:00:00.00,"
+            f"Dialogue: 4,{intro_start_time},"
             f"{intro_end},IntroSummary,,0,0,0,,"
             f"{{\\an7\\pos({geometry.lower_text_x},{lower_y})\\q2}}{summary_lower}"
         )
@@ -2369,7 +2371,12 @@ def generate_ass(
     video_template: str = "classic",
     intro_card_text: str = "",
     intro_headline: str = "",
+    intro_card_enabled: bool | None = None,
+    intro_card_start: float = 0.0,
     intro_card_duration: float = 5.5,
+    code_card_enabled: bool = True,
+    code_card_start: float = 0.0,
+    code_card_duration: float = 0.0,
     final_label: str = "",
     platform_logo_present: bool = False,
     intro_card_cover_present: bool = True,
@@ -2409,13 +2416,43 @@ def generate_ass(
             raise ValueError("end_card_duration must be between 5 and 7 seconds")
         if end_duration > duration:
             raise ValueError("end_card_duration cannot exceed video_duration")
+    if intro_card_enabled is None:
+        # Preserve the old low-level classic-preview API while production
+        # settings infer their legacy switch strictly from ``video_template``.
+        intro_enabled = template == "platform_story_card" or bool(
+            intro_headline.strip() and float(intro_card_duration) > 0
+        )
+    elif isinstance(intro_card_enabled, bool):
+        intro_enabled = intro_card_enabled
+    else:
+        raise ValueError("intro_card_enabled must be a boolean")
+    if not isinstance(code_card_enabled, bool):
+        raise ValueError("code_card_enabled must be a boolean")
+    intro_start = float(intro_card_start)
+    if not math.isfinite(intro_start) or intro_start < 0:
+        raise ValueError("intro_card_start must be a non-negative finite number")
     intro_duration = float(intro_card_duration)
-    if template == "platform_story_card":
-        if not math.isfinite(intro_duration) or not 2.5 <= intro_duration <= 8.0:
+    if not math.isfinite(intro_duration) or not 2.5 <= intro_duration <= 8.0:
+        if intro_enabled:
             raise ValueError("intro_card_duration must be between 2.5 and 8 seconds")
-        end_start = duration - end_duration if end_card_enabled else duration
-        if intro_duration > end_start:
-            raise ValueError("intro card must finish before the end card starts")
+        intro_duration = 0.0
+    intro_end_value = (
+        min(duration, intro_start + intro_duration)
+        if intro_enabled and intro_start < duration
+        else intro_start
+    )
+    effective_intro_duration = max(0.0, intro_end_value - intro_start)
+    code_start = float(code_card_start)
+    if not math.isfinite(code_start) or code_start < 0:
+        raise ValueError("code_card_start must be a non-negative finite number")
+    code_duration = float(code_card_duration)
+    if not math.isfinite(code_duration) or code_duration < 0:
+        raise ValueError("code_card_duration must be a non-negative finite number")
+    code_end = (
+        duration
+        if code_duration == 0
+        else min(duration, code_start + code_duration)
+    )
 
     style_lines = [
         _style_line(style, "Subtitle"),
@@ -2472,10 +2509,10 @@ def generate_ass(
     safe_top = round(_STORY_SAFE_TOP * scale_y)
     safe_width = style.play_res_x - safe_left - safe_right
     safe_center_x = round(style.play_res_x / 2)
-    search_start = intro_duration if template == "platform_story_card" else 0.0
-    search_end = duration - end_duration if end_card_enabled else duration
+    search_start = code_start
+    search_end = code_end
     events: list[str] = []
-    if search_end > search_start:
+    if code_card_enabled and search_end > search_start:
         search_panel_width = min(
             safe_width,
             max(
@@ -2559,7 +2596,12 @@ def generate_ass(
             f"\\q2\\fscx{search_scale}\\fscy{search_scale}\\shad0}}"
             f"{rendered_search}"
         )
-    if template == "classic" and intro_duration > 0 and intro_headline.strip():
+    if (
+        intro_enabled
+        and template == "classic"
+        and effective_intro_duration > 0
+        and intro_headline.strip()
+    ):
         # The compact approval reel promises a distinct opening phase.  Keep
         # the familiar classic layout, but show the generated hook below the
         # persistent search pill before narration and captions begin.
@@ -2583,7 +2625,7 @@ def generate_ass(
             safe_top + round(150 * scale_y),
             round(style.play_res_y * 0.16),
         )
-        classic_duration = min(duration, intro_duration)
+        classic_duration = effective_intro_duration
         classic_delay, classic_effect = _intro_layer_effect(
             style,
             layer="headline",
@@ -2595,13 +2637,13 @@ def generate_ass(
             layout_scale=layout_scale,
         )
         events.append(
-            f"Dialogue: 4,{seconds_to_ass_time(classic_delay)},"
-            f"{seconds_to_ass_time(classic_duration)},"
+            f"Dialogue: 4,{seconds_to_ass_time(intro_start + classic_delay)},"
+            f"{seconds_to_ass_time(intro_start + classic_duration)},"
             "IntroHeadline,,0,0,0,,"
             f"{{\\an8{classic_effect}\\q2}}"
             f"{classic_headline}"
         )
-    if template == "platform_story_card" and style.intro_layout in {
+    if intro_enabled and effective_intro_duration > 0 and template == "platform_story_card" and style.intro_layout in {
         "cover_split",
         "cover_split_noir",
     }:
@@ -2611,13 +2653,14 @@ def generate_ass(
                 platform=platform,
                 code=code,
                 intro_card_text=intro_card_text,
-                intro_duration=intro_duration,
+                intro_start=intro_start,
+                intro_duration=effective_intro_duration,
                 platform_logo_present=platform_logo_present,
                 cover_present=intro_card_cover_present,
                 brand_colour=brand_colour,
             )
         )
-    elif template == "platform_story_card":
+    elif intro_enabled and effective_intro_duration > 0 and template == "platform_story_card":
         panel_width = min(
             safe_width,
             round(style.play_res_x * style.intro_width_percent / 100.0),
@@ -2682,7 +2725,7 @@ def generate_ass(
             f"m 0 0 l {divider_width} 0 l {divider_width} {divider_height} "
             f"l 0 {divider_height}"
         )
-        intro_end = seconds_to_ass_time(intro_duration)
+        intro_end = seconds_to_ass_time(intro_start + effective_intro_duration)
         headline_font_size = max(
             round(style.intro_headline_font_size * layout_scale),
             round(style.subtitle_font_size * 1.12),
@@ -2779,7 +2822,7 @@ def generate_ass(
                 y=point[1],
                 panel_left=panel_x,
                 panel_right=panel_x + panel_width,
-                intro_duration=intro_duration,
+                intro_duration=effective_intro_duration,
                 layout_scale=layout_scale,
             )
             for layer, point in layer_points.items()
@@ -2794,23 +2837,23 @@ def generate_ass(
         footer_delay, footer_effect = layer_effects["footer"]
         badge_delay, badge_effect = layer_effects["badge"]
         ticket_events = [
-                f"Dialogue: 0,{seconds_to_ass_time(shadow_delay)},"
+                f"Dialogue: 0,{seconds_to_ass_time(intro_start + shadow_delay)},"
                 f"{intro_end},TemplateShadow,,0,0,0,,"
                 f"{{\\an7{shadow_effect}"
                 f"\\p1\\1c{intro_shadow_colour}\\bord0\\shad0}}"
                 f"{shadow_path}{{\\p0}}",
-                f"Dialogue: 1,{seconds_to_ass_time(panel_delay)},"
+                f"Dialogue: 1,{seconds_to_ass_time(intro_start + panel_delay)},"
                 f"{intro_end},TemplatePanel,,0,0,0,,"
                 f"{{\\an7{panel_effect}\\p1\\1c{intro_panel_colour}&"
                 f"\\3c{colour_to_ass(style.intro_border_color)}"
                 f"\\bord{style.intro_border_width}\\shad0}}"
                 f"{panel_path}{{\\p0}}",
-                f"Dialogue: 2,{seconds_to_ass_time(brand_delay)},"
+                f"Dialogue: 2,{seconds_to_ass_time(intro_start + brand_delay)},"
                 f"{intro_end},TemplateAccent,,0,0,0,,"
                 f"{{\\an7{brand_effect}\\p1\\1c{brand_colour}"
                 r"\bord0\shad0}"
                 f"{brand_rule_path}{{\\p0}}",
-                f"Dialogue: 2,{seconds_to_ass_time(divider_delay)},"
+                f"Dialogue: 2,{seconds_to_ass_time(intro_start + divider_delay)},"
                 f"{intro_end},TemplateAccent,,0,0,0,,"
                 f"{{\\an7{divider_effect}"
                 r"\p1\1c&H00E7D8D0&\bord0\shad0}"
@@ -2818,7 +2861,7 @@ def generate_ass(
             ]
         if headline:
             ticket_events.append(
-                f"Dialogue: 5,{seconds_to_ass_time(headline_delay)},"
+                f"Dialogue: 5,{seconds_to_ass_time(intro_start + headline_delay)},"
                 f"{intro_end},IntroHeadline,,0,0,0,,"
                 f"{{\\an{intro_top_alignment}{headline_effect}}}{headline}"
             )
@@ -2828,25 +2871,25 @@ def generate_ass(
             # this reserved slot after ASS, so no coloured badge can bleed
             # through a transparent logo.
             ticket_events.append(
-                f"Dialogue: 3,{seconds_to_ass_time(badge_delay)},"
+                f"Dialogue: 3,{seconds_to_ass_time(intro_start + badge_delay)},"
                 f"{intro_end},IntroBadge,,0,0,0,,"
                 f"{{\\an5{badge_effect}"
                 f"\\3c{brand_colour}\\4c{brand_colour}}}STORY",
             )
         ticket_events.extend(
             (
-                f"Dialogue: 3,{seconds_to_ass_time(platform_delay)},"
+                f"Dialogue: 3,{seconds_to_ass_time(intro_start + platform_delay)},"
                 f"{intro_end},IntroPlatform,,0,0,0,,"
                 f"{{\\an{intro_middle_alignment}{platform_effect}"
                 f"\\q2\\fscx{ticket_scale}}}{platform_ticket}",
-                f"Dialogue: 3,{seconds_to_ass_time(summary_delay)},"
+                f"Dialogue: 3,{seconds_to_ass_time(intro_start + summary_delay)},"
                 f"{intro_end},IntroSummary,,0,0,0,,"
                 f"{{\\an{intro_top_alignment}{summary_effect}\\q2}}{summary}",
             )
         )
         if render_final_footer:
             ticket_events.append(
-                f"Dialogue: 4,{seconds_to_ass_time(footer_delay)},"
+                f"Dialogue: 4,{seconds_to_ass_time(intro_start + footer_delay)},"
                 f"{intro_end},IntroFooter,,0,0,0,,"
                 f"{{\\an{intro_middle_alignment}{footer_effect}"
                 f"\\1c{footer_colour}\\fsp1}}{footer}"
@@ -3084,7 +3127,12 @@ def write_ass(
     video_template: str = "classic",
     intro_card_text: str = "",
     intro_headline: str = "",
+    intro_card_enabled: bool | None = None,
+    intro_card_start: float = 0.0,
     intro_card_duration: float = 5.5,
+    code_card_enabled: bool = True,
+    code_card_start: float = 0.0,
+    code_card_duration: float = 0.0,
     final_label: str = "",
     platform_logo_present: bool = False,
     intro_card_cover_present: bool = True,
@@ -3107,7 +3155,12 @@ def write_ass(
         video_template=video_template,
         intro_card_text=intro_card_text,
         intro_headline=intro_headline,
+        intro_card_enabled=intro_card_enabled,
+        intro_card_start=intro_card_start,
         intro_card_duration=intro_card_duration,
+        code_card_enabled=code_card_enabled,
+        code_card_start=code_card_start,
+        code_card_duration=code_card_duration,
         final_label=final_label,
         platform_logo_present=platform_logo_present,
         intro_card_cover_present=intro_card_cover_present,

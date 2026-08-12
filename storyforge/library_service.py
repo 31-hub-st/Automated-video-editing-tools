@@ -24,6 +24,7 @@ from .models import (
     JobStatus,
     PlatformProfile,
     RenderJob,
+    normalize_platform_copy,
     normalize_retired_subtitle_settings,
 )
 from .pipeline import safe_component
@@ -638,6 +639,8 @@ class LibraryService:
                 "row_version": 0,
                 "warnings": [],
                 "source_narration_audio": "",
+                "platform_search_text": "",
+                "platform_ending_text": "",
             }
         metadata = dict(value.get("metadata") or {})
         production_settings = (
@@ -682,6 +685,11 @@ class LibraryService:
             "production_settings": production_settings,
             "source_narration_audio": str(
                 production_settings.get("source_narration_audio") or ""
+            ),
+            "platform_search_text": str(metadata.get("platform_search_text") or ""),
+            "platform_ending_text": str(metadata.get("platform_ending_text") or ""),
+            "configuration_fingerprint": str(
+                metadata.get("configuration_fingerprint") or ""
             ),
             "subtitle_style_id": str(
                 production_settings.get("subtitle_preset")
@@ -739,7 +747,12 @@ class LibraryService:
             dict(value or {}) if isinstance(value, Mapping) else {}
         )
 
-        for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
+        for boolean_key in (
+            "export_narration_audio",
+            "cover_outro_enabled",
+            "intro_card_enabled",
+            "code_card_enabled",
+        ):
             if boolean_key not in incoming:
                 continue
             raw_boolean = incoming[boolean_key]
@@ -790,6 +803,19 @@ class LibraryService:
                 raise ValueError(f"{key} 选项无效。")
             result[key] = normalized
 
+        # Recipes written before the explicit switch used the template itself
+        # as the opening-card toggle. Infer only when that frozen recipe truly
+        # lacks the new field; an explicit false must remain authoritative.
+        legacy_base = base if isinstance(base, Mapping) else None
+        if (
+            "intro_card_enabled" not in incoming
+            and (legacy_base is None or "intro_card_enabled" not in legacy_base)
+        ):
+            result["intro_card_enabled"] = (
+                str(result.get("video_template") or "classic")
+                == "platform_story_card"
+            )
+
         if "narration_wpm" in incoming:
             try:
                 parsed_wpm = float(incoming["narration_wpm"])
@@ -812,6 +838,20 @@ class LibraryService:
             result["video_playback_speed"] = playback_speed
         clamp_int("preview_seconds", 12, 60)
         clamp_float("intro_card_duration_seconds", 2.5, 8.0)
+        for key in (
+            "intro_card_start_seconds",
+            "code_card_start_seconds",
+            "code_card_duration_seconds",
+        ):
+            if key not in incoming:
+                continue
+            try:
+                number = float(incoming[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} is not a valid number") from None
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{key} must be a non-negative finite number")
+            result[key] = number
         if "output_fps" in incoming:
             try:
                 output_fps = int(incoming["output_fps"])
@@ -1669,6 +1709,21 @@ class LibraryService:
                 "source": source_value,
             }
 
+        platform_search_text = normalize_platform_copy(
+            value.get(
+                "platform_search_text",
+                existing_metadata.get("platform_search_text", ""),
+            ),
+            "platform_search_text",
+        )
+        platform_ending_text = normalize_platform_copy(
+            value.get(
+                "platform_ending_text",
+                existing_metadata.get("platform_ending_text", ""),
+            ),
+            "platform_ending_text",
+        )
+
         production_preset_id = str(
             value.get("applied_production_preset_id") or ""
         ).strip()
@@ -1753,6 +1808,8 @@ class LibraryService:
             "intro_card_text": intro_card_text,
             "intro_card_source": intro_card_source,
             "intro_card_copies": intro_card_copies,
+            "platform_search_text": platform_search_text,
+            "platform_ending_text": platform_ending_text,
             "production_preset_id": production_preset_id,
             "production_preset_revision": production_preset_revision,
             "production_preset_hash": production_preset_hash,
@@ -1793,6 +1850,8 @@ class LibraryService:
             "output_folder": metadata["output_folder"],
             "intro_card_text": intro_card_text,
             "intro_card_source": intro_card_source,
+            "platform_search_text": platform_search_text,
+            "platform_ending_text": platform_ending_text,
             "subtitle_style_id": str(
                 production_settings.get("subtitle_preset") or "clear_outline"
             ),
@@ -2365,8 +2424,13 @@ class LibraryService:
             "outro_card_preset": settings.outro_card_preset,
             "subtitle_animation": settings.subtitle_animation,
             "intro_animation": settings.intro_animation,
+            "intro_card_enabled": bool(settings.intro_card_enabled),
+            "intro_card_start_seconds": settings.intro_card_start_seconds,
             "preview_seconds": settings.preview_seconds,
             "intro_card_duration_seconds": settings.intro_card_duration_seconds,
+            "code_card_enabled": settings.code_card_enabled,
+            "code_card_start_seconds": settings.code_card_start_seconds,
+            "code_card_duration_seconds": settings.code_card_duration_seconds,
             "max_episode_minutes": settings.max_episode_minutes,
             "cover_animation": settings.cover_animation,
             "cover_outro_enabled": settings.cover_outro_enabled,
@@ -2438,6 +2502,18 @@ class LibraryService:
         frozen_recipe = (
             dict(saved_recipe) if isinstance(saved_recipe, Mapping) else {}
         )
+        if isinstance(saved_recipe, Mapping):
+            # Compatibility defaults belong to the frozen recipe's schema.
+            # Never fill fields added later from today's live workstation.
+            frozen_recipe.setdefault(
+                "intro_card_enabled",
+                str(frozen_recipe.get("video_template") or "classic")
+                == "platform_story_card",
+            )
+            frozen_recipe.setdefault("intro_card_start_seconds", 0.0)
+            frozen_recipe.setdefault("code_card_enabled", True)
+            frozen_recipe.setdefault("code_card_start_seconds", 0.0)
+            frozen_recipe.setdefault("code_card_duration_seconds", 0.0)
         output_mode = str(
             frozen_recipe.get("output_mode") or "video_and_mp3"
         ).strip().casefold()
@@ -2625,8 +2701,8 @@ class LibraryService:
         )
         live_snapshot = self.production_settings_snapshot(self._settings_getter())
         settings_snapshot = self._validated_production_settings(
-            saved_recipe if isinstance(saved_recipe, Mapping) else None,
-            base=(saved_recipe if isinstance(saved_recipe, Mapping) else live_snapshot),
+            frozen_recipe if isinstance(saved_recipe, Mapping) else None,
+            base=(frozen_recipe if isinstance(saved_recipe, Mapping) else live_snapshot),
         )
         settings_snapshot["source_narration_audio"] = source_narration_audio
         settings_snapshot["bgm_file"] = bgm_file
@@ -2667,6 +2743,14 @@ class LibraryService:
         saved_intro_source = str(
             draft_metadata.get("intro_card_source") or ""
         ).strip()
+        platform_search_text = normalize_platform_copy(
+            draft_metadata.get("platform_search_text", ""),
+            "platform_search_text",
+        )
+        platform_ending_text = normalize_platform_copy(
+            draft_metadata.get("platform_ending_text", ""),
+            "platform_ending_text",
+        )
         novel_synopsis = str(novel.get("synopsis") or "")
         first_episode = episodes[0]
         first_episode_id = str(first_episode.get("id") or "")
@@ -2781,6 +2865,8 @@ class LibraryService:
                     ),
                     intro_card_text=intro_card_text,
                     intro_card_source=intro_card_source,
+                    platform_search_text=platform_search_text,
+                    platform_ending_text=platform_ending_text,
                     production_preset_id=str(
                         draft_metadata.get("production_preset_id") or ""
                     ),

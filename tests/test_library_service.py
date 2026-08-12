@@ -136,6 +136,196 @@ class LibraryServiceTests(unittest.TestCase):
         self.settings.intro_card.background_color = "#000000"
         self.assertEqual(snapshot["intro_card"]["background_color"], "#FFF1F5")
 
+    def test_card_timeline_contract_is_validated_and_legacy_intro_is_inferred(self) -> None:
+        recipe = self.service._validated_production_settings(
+            {
+                "video_template": "platform_story_card",
+                "intro_card_enabled": False,
+                "intro_card_start_seconds": 12.5,
+                "intro_card_duration_seconds": 4.0,
+                "code_card_enabled": False,
+                "code_card_start_seconds": 3.25,
+                "code_card_duration_seconds": 0.0,
+            }
+        )
+        self.assertFalse(recipe["intro_card_enabled"])
+        self.assertEqual(recipe["intro_card_start_seconds"], 12.5)
+        self.assertFalse(recipe["code_card_enabled"])
+        self.assertEqual(recipe["code_card_start_seconds"], 3.25)
+        self.assertEqual(recipe["code_card_duration_seconds"], 0.0)
+
+        legacy = self.service._validated_production_settings(
+            {"video_template": "platform_story_card"},
+            base={"video_template": "platform_story_card"},
+        )
+        self.assertTrue(legacy["intro_card_enabled"])
+        independent = self.service._validated_production_settings(
+            {"video_template": "platform_story_card"},
+            base={"video_template": "classic", "intro_card_enabled": False},
+        )
+        self.assertFalse(independent["intro_card_enabled"])
+        for key, invalid in (
+            ("intro_card_start_seconds", float("nan")),
+            ("code_card_start_seconds", -0.01),
+            ("code_card_duration_seconds", float("inf")),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                self.service._validated_production_settings({key: invalid})
+
+    def test_legacy_draft_materialization_never_inherits_live_card_timeline(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "LEGACY01",
+            }
+        )["promo_code"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "target_video_count": 1,
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+                "production_settings": {"video_template": "platform_story_card"},
+            }
+        )["draft"]
+        stored = self.catalog.get_draft(draft["id"])
+        metadata = dict(stored["metadata"])
+        old_recipe = dict(metadata["production_settings"])
+        for key in (
+            "intro_card_enabled",
+            "intro_card_start_seconds",
+            "code_card_enabled",
+            "code_card_start_seconds",
+            "code_card_duration_seconds",
+        ):
+            old_recipe.pop(key, None)
+        metadata["production_settings"] = old_recipe
+        self.catalog.save_draft({"id": draft["id"], "metadata": metadata})
+
+        self.settings.intro_card_enabled = False
+        self.settings.intro_card_start_seconds = 81.0
+        self.settings.code_card_enabled = False
+        self.settings.code_card_start_seconds = 82.0
+        self.settings.code_card_duration_seconds = 83.0
+        video = self.root / "legacy-video"
+        music = self.root / "legacy-music"
+        output = self.root / "legacy-output"
+        video.mkdir()
+        music.mkdir()
+        _draft, _platform_id, jobs = self.service.build_render_jobs(
+            {
+                "draft_id": draft["id"],
+                "video_folder": str(video),
+                "music_folder": str(music),
+                "output_folder": str(output),
+                "confirm_language": True,
+            }
+        )
+        frozen = jobs[0].settings_snapshot
+        self.assertTrue(frozen["intro_card_enabled"])
+        self.assertEqual(frozen["intro_card_start_seconds"], 0.0)
+        self.assertTrue(frozen["code_card_enabled"])
+        self.assertEqual(frozen["code_card_start_seconds"], 0.0)
+        self.assertEqual(frozen["code_card_duration_seconds"], 0.0)
+
+    def test_employee_platform_copy_overrides_are_normalized_fingerprinted_and_frozen(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "COPY01",
+            }
+        )["promo_code"]
+        payload = {
+            "novel_id": novel["id"],
+            "platform_id": self.platform.id,
+            "promo_code_id": promo["id"],
+            "episode_ids": [novel["episodes"][0]["id"]],
+            "target_video_count": 1,
+            "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            "platform_search_text": "  Search\tthis exact\r\ncode: COPY01  ",
+            "platform_ending_text": "  Read the next chapter\n  in the app.  ",
+        }
+        saved = self.service.save_draft(payload)["draft"]
+        self.assertEqual(
+            saved["platform_search_text"], "Search this exact code: COPY01"
+        )
+        self.assertEqual(
+            saved["platform_ending_text"], "Read the next chapter in the app."
+        )
+
+        with tempfile.TemporaryDirectory() as media:
+            media_root = Path(media)
+            (media_root / "videos").mkdir()
+            (media_root / "music").mkdir()
+            (media_root / "output").mkdir()
+            _draft, _platform_id, jobs = self.service.build_render_jobs(
+                {
+                    "draft_id": saved["id"],
+                    "video_folder": str(media_root / "videos"),
+                    "music_folder": str(media_root / "music"),
+                    "output_folder": str(media_root / "output"),
+                    "confirm_language": True,
+                }
+            )
+        self.assertEqual(jobs[0].platform_search_text, saved["platform_search_text"])
+        self.assertEqual(jobs[0].platform_ending_text, saved["platform_ending_text"])
+
+        first_fingerprint = saved["configuration_fingerprint"]
+        self.assertRegex(first_fingerprint, r"^[0-9a-f]{64}$")
+        changed = self.service.save_draft(
+            {
+                **payload,
+                "platform_search_text": "A different exact search line",
+            }
+        )["draft"]
+        self.assertNotEqual(
+            changed["configuration_fingerprint"], first_fingerprint
+        )
+
+    def test_platform_copy_rejects_controls_and_length_and_empty_falls_back(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "COPY02",
+            }
+        )["promo_code"]
+        base = {
+            "novel_id": novel["id"],
+            "platform_id": self.platform.id,
+            "promo_code_id": promo["id"],
+            "episode_ids": [novel["episodes"][0]["id"]],
+            "target_video_count": 1,
+            "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+        }
+        fallback = self.service.save_draft(
+            {**base, "platform_search_text": " ", "platform_ending_text": ""}
+        )["draft"]
+        self.assertEqual(fallback["platform_search_text"], "")
+        self.assertEqual(fallback["platform_ending_text"], "")
+        for key, invalid in (
+            ("platform_search_text", "bad\x00copy"),
+            ("platform_ending_text", "x" * 1201),
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                self.service.save_draft({**base, key: invalid})
+
     def test_retired_subtitle_presets_are_normalized_when_old_drafts_are_opened(self) -> None:
         projected = self.service._ui_draft(
             {

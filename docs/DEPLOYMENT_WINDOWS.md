@@ -3,7 +3,7 @@
 > Hub 主机向其他制作电脑发布软件更新的流程、安全边界和 API 见 [AUTO_UPDATE.md](AUTO_UPDATE.md)。
 
 适用系统：Windows 10/11 64 位  
-适用源码版本：StoryForge Studio `v1.0.1`。当前团队验收只使用包含本机制作服务、FFmpeg 和约定 TTS 组件的完整程序目录；不得用旧版单 EXE 或残缺目录代替。ZIP 名称、大小与 SHA-256 见 [v1.0.1 正式版交付报告](V1.0.1_RELEASE.md)。
+适用源码版本：StoryForge Studio `v1.0.2`。当前团队验收只使用包含本机制作服务、FFmpeg 和约定 TTS 组件的完整程序目录；不得用旧版单 EXE 或残缺目录代替。ZIP 名称、大小与 SHA-256 见 [v1.0.2 正式版交付报告](V1.0.2_RELEASE.md)。
 
 ## 最简单的开始方式
 
@@ -38,7 +38,7 @@ StoryForge 发布目录\
 
 ### 旧版迁移兼容
 
-从任意 `0.x` 旧版迁移时，先等待任务结束并完全退出旧桌面端与 Worker，再把 `v1.0.1` 完整包解压到新的纯英文目录；首次启动会迁移可识别的长期数据，完成一条真实任务并由管理员确认后，才可清理旧目录。
+从任意 `0.x` 旧版迁移时，先等待任务结束并完全退出旧桌面端与 Worker，再把 `v1.0.2` 完整包解压到新的纯英文目录；首次启动会迁移可识别的长期数据，完成一条真实任务并由管理员确认后，才可清理旧目录。
 
 ### 主电脑发布新版
 
@@ -53,10 +53,16 @@ StoryForge 发布目录\
      --output "<更新包输出路径>"
    ```
 
-3. 先备份并人工升级 Hub 主电脑，启动后确认 Hub 正常。主电脑不会自动安装自己发布的版本。
+3. 先备份并人工升级 Hub 主电脑。已有现代 `current.json` 布局时，确认它已精确指向新版 `App-<version>` 后，运行 `scripts\repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data`。只有旧参数化 ops-task 布局时，先经正式包校验链安装新 App，再在同一命令显式增加 `-TargetAppDirectory D:\StoryForgeHub\App-<version>`。最后只在批准的维护窗口重启原计划任务并确认 Hub 正常。主电脑不会自动安装自己发布的版本。
 4. 在主电脑“设置 → 软件更新”选择 ZIP，填写相同版本号和更新说明，点击发布；也可由管理员在 Hub 网页管理界面上传同一 ZIP 并发布。远程制作电脑不能通过设备 Hub RPC 发布软件。
 
 以上流程只发布**核心程序**。语言组件包使用独立后端：清单包含 `component_id`、版本、应用兼容范围及逐文件 SHA-256，Hub 或本地发布器还可校验整包 SHA-256；客户端安全解压到 `<StoryForgeData>\components`，通过不可变版本目录和原子状态文件切换，并保留上一版回退。组件包不得替换 EXE，核心程序 ZIP 也不得覆盖组件数据。
+
+旧 Hub 启动器修复只适用于已存在且身份完全匹配的受管部署。现代布局中，`repair_storyforge_hub_launcher.ps1` 会核对 `current.json` 当前入口、前一受管 `App-<version>`、两个版本的包内 manifest、固定 DataRoot、host 设置、catalog 文件和计划任务的精确动作/用户；通过后只将 `Start-StoryForge-Hub.ps1` 和 `Start-StoryForge.cmd` 分别原子切换到当前入口。
+
+若旧机只有参数化 `Start-StoryForgeHub.ps1` 计划任务，且三个现代文件全部不存在，必须先用正式 Release 的 GitHub digest、sidecar、archive、内部 manifest 和完整目录验证链安装新 `App-<version>`，再运行 `repair_storyforge_hub_launcher.ps1 -HubRoot D:\StoryForgeHub -DataRoot D:\StoryForgeHub\Data -TargetAppDirectory D:\StoryForgeHub\App-<version>`。此路径会逐字核对旧 wrapper/task/App/Data/Port 身份，并重算新 App 的 `BUILD_RELEASE_VALIDATION.json` 完整目录摘要；仅在全部通过后生成两个现代启动器和 `current.json`、更新任务 action，失败即回滚。两种路径都不会读取或修改 SQLite，不会启动或停止服务，也不会修改 DataRoot。任何半迁移或身份不匹配状态都必须查明原因，不能用 bootstrap、新机一键恢复或 `-Force` 注册来覆盖现有正式 Hub。
+
+`enable_storyforge_hub.ps1` 仅是旧发布目录的首次启用兼容入口：已有同名计划任务或端口监听时必须拒绝，不会覆盖。既有受管 Hub 升级后只能用 `repair_storyforge_hub_launcher.ps1`，不能重跑 enable。
 
 ### 制作电脑接收新版
 
@@ -80,7 +86,7 @@ StoryForge 发布目录\
 4. 填写容易识别的电脑名称；连接端口通常保持 `8765`。
 5. 保存并重启 StoryForge。Windows 防火墙询问时，只允许“专用网络”。
 6. 点击“检查连接”，记下主电脑显示的团队访问地址，例如 `http://192.168.1.20:8765`。这个地址可填入其他电脑的 StoryForge“设置 → 多电脑协同”，也可在普通浏览器打开团队资料与管理页面；浏览器不是本机媒体 Worker。
-7. 启用 Hub 后台任务。源码目录运行 `scripts\enable_storyforge_hub.ps1`；正式发布时使用发布目录提供的 Hub 后台入口。系统会注册当前用户的 `StoryForge Hub` 登录任务；此后关闭桌面窗口不会停止网页服务，异常退出后会自动重试。
+7. 启用 Hub 后台任务。源码目录运行 `scripts\enable_storyforge_hub.ps1 -DataRoot <正式固定数据目录>`；正式发布时使用发布目录提供的 Hub 后台入口。`DataRoot` 必须与当前 Hub 的 `settings.json` 和正式 catalog 所在目录一致。系统会注册当前用户的 `StoryForge Hub` 登录任务；此后关闭桌面窗口不会停止网页服务，异常退出后会自动重试。
    StoryForge 会在主机同时存在虚拟网卡、VPN 或沙箱网卡时优先选择 `10.x`、`172.16–31.x`、`192.168.x` 的真实局域网地址，避免把 `198.18.x.x` 等不可供制作电脑访问的测试网段显示出来。
 
 无需安装 StoryForge 的电脑可直接打开上述 Hub 地址，用成员账号和密码维护/查看获准资料、准备草稿、查看浏览器即时预览、生产记录和产物元数据。它不能播放或下载员工电脑上的本地成片。需要试听、选择本机素材、打开本机成片或生成视频时，当前员工电脑必须安装完整发布目录、完成一次账号绑定并启用本机制作服务；此后员工可以继续使用同一个 Hub 网页，不要求完整桌面窗口常开。详细边界见 [网页端使用说明](WEB_ACCESS.md)。
@@ -145,7 +151,7 @@ StoryForge 发布目录\
 - 服务 API Key 和自动登记的设备凭据由当前 Windows 用户加密保存，不在界面回显。
 - 电脑遗失或不再使用时，在主电脑打开“设置 → 多电脑协同”，停用对应设备；下一个本地网页请求即会失效。重新接入只需再次使用账号密码连接。
 - 卸载当前版本时，先退出 StoryForge 与 Worker，再删除程序目录；是否删除用户选择的 `<StoryForgeData>` 必须单独确认。员工另行选择的视频素材、音乐和输出目录不会随之删除。
-- 从旧版迁移过来的电脑可能仍保留旧 C 盘目录。必须先完成 `v1.0.1` 真机冒烟验收，再由管理员归档或删除；不要把旧目录继续作为活动数据使用。
+- 从旧版迁移过来的电脑可能仍保留旧 C 盘目录。必须先完成 `v1.0.2` 真机冒烟验收，再由管理员归档或删除；不要把旧目录继续作为活动数据使用。
 
 ## 常见问题
 
@@ -153,7 +159,7 @@ StoryForge 发布目录\
 - **第一次配音很久**：首次模型预热可能需要 1–3 分钟；之后相同文本、女声和语速会复用缓存，速度明显加快。
 - **其他电脑生成日语候选配音失败**：先确认使用当前完整程序包，而不是旧版单 EXE；当前包内置日语所需前处理、字典和 Voice。若是后续独立语言组件，则在 `<StoryForgeData>\components` 检查当前/上一版状态并重试或回退，不要手工把半包文件混入程序目录。
 - **日语分集只显示 0–2 秒**：这是旧版只按空格英文词计数造成的历史估算错误。当前 Catalog Schema 7 会按汉字、假名、韩文和泰文脚本重新计算当前正文版本的预计时长，同时保持分集 ID、正文和顺序不变；升级后请完整退出并重新打开 StoryForge 触发迁移。
-- **制作电脑或网页无法连接**：先在主电脑任务计划程序确认 `StoryForge Hub` 正在运行；源码部署可运行 `scripts\enable_storyforge_hub.ps1`。再确认电脑处于同一局域网/专用网络，地址使用主电脑局域网 IP，端口 `8765` 未被防火墙阻止，且成员账号和设备均为启用状态。浏览器打开根地址会进入登录页；若显示 `ERR_CONNECTION_REFUSED`，说明主机服务没有监听或被防火墙拦截。
+- **制作电脑或网页无法连接**：先在主电脑任务计划程序确认 `StoryForge Hub` 正在运行；源码部署可运行 `scripts\enable_storyforge_hub.ps1 -DataRoot <正式固定数据目录>`。再确认电脑处于同一局域网/专用网络，地址使用主电脑局域网 IP，端口 `8765` 未被防火墙阻止，且成员账号和设备均为启用状态。浏览器打开根地址会进入登录页；若显示 `ERR_CONNECTION_REFUSED`，说明主机服务没有监听或被防火墙拦截。
 - **Hub 网页提示“未连接本机制作服务”**：这是当前电脑没有可用媒体运行时，不是普通业务权限不足。重新打开完整 StoryForge，使用账号密码登录一次并刷新网页；软件会自动修复后台服务。仍失败时再由管理员运行诊断或维修脚本。
 - **网页显示 FFmpeg 缺失**：页面读取当前电脑本机制作服务的状态，不读取浏览器或 Hub 主机。先确认连接的是正确电脑；若服务已连接仍缺失，运行 `admin-tools\diagnose_storyforge.cmd` 检查发布目录。
 - **网页显示 Kokoro 还未配置**：若本机制作服务说明当前是轻量版，这属于正确状态。轻量版不含 Kokoro/PyTorch，改用 Edge TTS/Deepgram、配置 Kokoro HTTP 地址，或安装本地 AI 完整版。完整版还要核对 `local-ai\kokoro` 模型、配置和对应 Voice 文件。

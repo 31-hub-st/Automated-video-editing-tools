@@ -1574,6 +1574,7 @@ def build_ffmpeg_plan(
     end_card_without_cover: bool = False,
     cover_intro_enabled: bool = True,
     platform_logo_path: PathLike | None = None,
+    platform_logo_start: float = 0.0,
     platform_logo_duration: float = 5.5,
     platform_logo_x_percent: float = 50.0,
     platform_logo_y_percent: float = 28.645833,
@@ -1627,10 +1628,14 @@ def build_ffmpeg_plan(
         if end_card_duration > target_duration:
             raise ValueError("end_card_duration cannot exceed target_duration")
     if platform_logo_path is not None:
+        if not math.isfinite(platform_logo_start) or platform_logo_start < 0:
+            raise ValueError(
+                "platform_logo_start must be a non-negative finite number"
+            )
         if not math.isfinite(platform_logo_duration) or platform_logo_duration <= 0:
             raise ValueError("platform_logo_duration must be a positive finite number")
-        if platform_logo_duration > target_duration:
-            raise ValueError("platform_logo_duration cannot exceed target_duration")
+        if platform_logo_start + platform_logo_duration > target_duration + 1e-9:
+            raise ValueError("platform logo display window cannot exceed target_duration")
         if not math.isfinite(platform_logo_x_percent) or not 10 <= platform_logo_x_percent <= 90:
             raise ValueError("platform_logo_x_percent must be between 10 and 90")
         if not math.isfinite(platform_logo_y_percent) or not 5 <= platform_logo_y_percent <= 60:
@@ -1953,7 +1958,8 @@ def build_ffmpeg_plan(
                 round(height * platform_logo_y_percent / 100.0),
             ),
         )
-        logo_end = _ffmpeg_number(platform_logo_duration)
+        logo_start = _ffmpeg_number(platform_logo_start)
+        logo_end = _ffmpeg_number(platform_logo_start + platform_logo_duration)
         graph.append(
             f"[{platform_logo_index}:v:0]fps={fps},"
             f"scale={logo_box}:{logo_box}:force_original_aspect_ratio=decrease,"
@@ -2272,7 +2278,7 @@ def build_ffmpeg_plan(
     if platform_logo_index is not None:
         graph.append(
             f"[{post_ass_label}][platform_logo]overlay={logo_x}:{logo_y}:"
-            f"enable='between(t,0,{logo_end})':eof_action=pass[vout]"
+            f"enable='between(t,{logo_start},{logo_end})':eof_action=pass[vout]"
         )
 
     target = _ffmpeg_number(target_duration)

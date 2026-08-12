@@ -138,6 +138,94 @@ class SemanticCaptionTests(unittest.TestCase):
 
 
 class AssGenerationTests(unittest.TestCase):
+    def test_card_switches_and_absolute_windows_drive_ass_events(self) -> None:
+        content = generate_ass(
+            [SubtitleCue(0.0, 18.0, "The story continues.")],
+            platform="GoodNovel",
+            code="B39760",
+            search_text="Exact employee search copy",
+            video_duration=20.0,
+            video_template="platform_story_card",
+            intro_card_enabled=True,
+            intro_card_start=6.0,
+            intro_card_duration=5.5,
+            intro_card_text="A precise synopsis.",
+            code_card_enabled=True,
+            code_card_start=2.25,
+            code_card_duration=3.5,
+        )
+
+        intro_events = [
+            line
+            for line in content.splitlines()
+            if line.startswith("Dialogue:") and ",Intro" in line
+        ]
+        self.assertTrue(intro_events)
+        self.assertTrue(all(",0:00:06." in line for line in intro_events))
+        self.assertTrue(all(",0:00:11.50," in line for line in intro_events))
+        code_events = [
+            line
+            for line in content.splitlines()
+            if line.startswith("Dialogue:")
+            and (",SearchCard," in line or "Exact employee search copy" in line)
+        ]
+        self.assertTrue(code_events)
+        self.assertTrue(
+            all("0:00:02.25,0:00:05.75" in line for line in code_events)
+        )
+
+        disabled = generate_ass(
+            [SubtitleCue(0.0, 4.0, "Only subtitles remain.")],
+            platform="GoodNovel",
+            code="B39760",
+            video_duration=4.0,
+            video_template="platform_story_card",
+            intro_card_enabled=False,
+            intro_card_start=1.0,
+            intro_card_duration=3.0,
+            intro_card_text="Must not render.",
+            code_card_enabled=False,
+            code_card_start=1.0,
+            code_card_duration=2.0,
+        )
+        self.assertFalse(any(",Intro" in line for line in disabled.splitlines()))
+        self.assertNotIn(",SearchCard,", disabled)
+
+    def test_card_windows_clip_to_video_and_reject_non_finite_values(self) -> None:
+        clipped = generate_ass(
+            [SubtitleCue(0.0, 10.0, "Narration.")],
+            platform="GoodNovel",
+            code="B39760",
+            video_duration=10.0,
+            video_template="platform_story_card",
+            intro_card_enabled=True,
+            intro_card_start=8.0,
+            intro_card_duration=5.5,
+            intro_card_text="Clipped synopsis.",
+            code_card_start=9.0,
+            code_card_duration=0.0,
+        )
+        self.assertIn("0:00:08.00,0:00:10.00", clipped)
+        self.assertIn("0:00:09.00,0:00:10.00", clipped)
+
+        with self.assertRaisesRegex(ValueError, "intro_card_start"):
+            generate_ass(
+                [SubtitleCue(0.0, 2.0, "Narration.")],
+                platform="GoodNovel",
+                code="B39760",
+                video_duration=2.0,
+                intro_card_enabled=True,
+                intro_card_start=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "code_card_duration"):
+            generate_ass(
+                [SubtitleCue(0.0, 2.0, "Narration.")],
+                platform="GoodNovel",
+                code="B39760",
+                video_duration=2.0,
+                code_card_duration=float("inf"),
+            )
+
     def test_classic_preview_has_a_timed_opening_hook(self) -> None:
         content = generate_ass(
             [SubtitleCue(4.0, 7.0, "The first spoken sentence.")],
@@ -414,13 +502,13 @@ class AssGenerationTests(unittest.TestCase):
         intro_events = [
             event
             for event in events
-            if event[3] in intro_styles and event[1] < "0:00:05.50"
+            if event[3] in intro_styles and event[2] == "0:00:05.50"
         ]
         self.assertTrue(intro_events)
         self.assertTrue(all(event[2] == "0:00:05.50" for event in intro_events))
 
         search_event = by_style["SearchCard"][0]
-        self.assertEqual(search_event[1:3], ["0:00:05.50", "0:00:14.00"])
+        self.assertEqual(search_event[1:3], ["0:00:00.00", "0:00:20.00"])
         self.assertIn("Search GoodNovel: B73165", search_event[9])
 
         end_events = [
@@ -432,15 +520,15 @@ class AssGenerationTests(unittest.TestCase):
         self.assertTrue(all(event[1] >= "0:00:14.00" for event in end_events))
         self.assertTrue(all(event[2] == "0:00:20.00" for event in end_events))
 
-        # The three card phases are adjacent, never stacked on top of one
-        # another: intro -> persistent search command -> closing card.
-        self.assertEqual(intro_events[0][2], search_event[1])
+        # The code card has its own absolute window and no longer inherits the
+        # intro/end-card boundaries.
+        self.assertNotEqual(intro_events[0][2], search_event[1])
         closing_panel = next(
             event
             for event in by_style["TemplatePanel"]
             if event[1] == "0:00:14.00"
         )
-        self.assertEqual(search_event[2], closing_panel[1])
+        self.assertGreater(search_event[2], closing_panel[1])
 
     def test_story_card_wraps_cjk_summary_without_spaces_into_five_lines(self) -> None:
         document = generate_ass(
@@ -808,9 +896,8 @@ class AssGenerationTests(unittest.TestCase):
                     self.assertNotIn(r"\fad(", combined_intro)
                     self.assertNotIn(r"\t(", combined_intro)
 
-                # The platform/code line owns 0.00-5.50 and the persistent
-                # SearchCard takes over at exactly 5.50 without a visibility
-                # gap or decorative animation.
+                # The intro platform line and code card now have independent
+                # absolute windows; both remain seek-safe and static here.
                 platform_event = next(
                     line for line in intro_events if ",IntroPlatform," in line
                 )
@@ -822,7 +909,7 @@ class AssGenerationTests(unittest.TestCase):
                 self.assertNotIn(r"\move(", platform_event)
                 self.assertNotIn(r"\fad(", platform_event)
                 self.assertNotIn(r"\t(", platform_event)
-                self.assertIn(",0:00:05.50,0:00:07.00,SearchCard,", search_event)
+                self.assertIn(",0:00:00.00,0:00:07.00,SearchCard,", search_event)
                 self.assertNotIn(r"\move(", search_event)
                 self.assertNotIn(r"\fad(", search_event)
                 self.assertNotIn(r"\t(", search_event)

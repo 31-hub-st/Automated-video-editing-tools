@@ -1,4 +1,4 @@
-# StoryForge v1.0.1 发布与回归门禁
+# StoryForge v1.0.2 发布与回归门禁
 
 StoryForge 使用三层 Windows 门禁。Actions 只需要仓库读取权限，不读取私密 Token，也不会上传或发布 EXE/ZIP。
 
@@ -72,7 +72,7 @@ Release 构建依次生成并核对：
 ```powershell
 python scripts/package_smoke.py `
   --package-root 'D:\StoryForgeBuildTemp\release-dist\StoryForge Studio' `
-  --expected-version '1.0.1' `
+  --expected-version '1.0.2' `
   --report 'D:\StoryForgeBuildTemp\reports\package-smoke.json' `
   --require-stable-acceptance
 ```

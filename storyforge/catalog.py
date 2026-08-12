@@ -207,10 +207,15 @@ PORTABLE_CONFIG_NUMBER_RANGES: dict[str, tuple[float, float, bool]] = {
     "bgm_volume": (0.0, 1.0, False),
     "preview_seconds": (5, 60, True),
     "intro_card_duration_seconds": (2.5, 8.0, False),
+    "intro_card_start_seconds": (0.0, float("inf"), False),
+    "code_card_start_seconds": (0.0, float("inf"), False),
+    "code_card_duration_seconds": (0.0, float("inf"), False),
     "max_episode_minutes": (1.0, 60.0, False),
     "end_card_seconds": (5.0, 7.0, False),
 }
-PORTABLE_CONFIG_BOOLEAN_FIELDS = frozenset({"cover_outro_enabled"})
+PORTABLE_CONFIG_BOOLEAN_FIELDS = frozenset(
+    {"cover_outro_enabled", "intro_card_enabled", "code_card_enabled"}
+)
 PORTABLE_STYLE_FIELDS: dict[str, dict[str, tuple[str, Any]]] = {
     "subtitle": {
         "font_family": ("text", 120),

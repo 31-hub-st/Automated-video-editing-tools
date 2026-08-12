@@ -276,6 +276,17 @@ def run_package_smoke(
             data_root.mkdir()
             result_root.mkdir()
             environment = os.environ.copy()
+            # The smoke executable must prove the employee/standalone package
+            # path, regardless of whether this gate was launched from a Hub
+            # administration shell. A copied Hub identity could otherwise
+            # authorize the temporary DataRoot and make the gate pass without
+            # exercising portable startup.
+            for name in (
+                "STORYFORGE_DEPLOYMENT_ROLE",
+                "STORYFORGE_FROZEN_HUB_DATA_ROOT",
+                "STORYFORGE_PORTABLE_MODE",
+            ):
+                environment.pop(name, None)
             environment["STORYFORGE_DATA_DIR"] = str(data_root)
             try:
                 process = subprocess.run(

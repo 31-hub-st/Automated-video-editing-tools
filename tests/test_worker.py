@@ -28,6 +28,8 @@ from storyforge.worker import (
 from storyforge.web import ClientLocalWebServer
 from storyforge.api import StoryForgeApi
 from storyforge.config import AppSettings, SettingsRepository
+from storyforge.jobs import JobQueue
+from storyforge.models import JobStatus, PlatformProfile, RenderJob
 
 
 def _free_port() -> int:
@@ -1028,7 +1030,154 @@ class LocalWorkerGatewayTests(unittest.TestCase):
 
 
 class HostLocalWorkerIntegrationTests(unittest.TestCase):
-    def test_hub_host_loopback_service_is_not_an_employee_render_worker(self) -> None:
+    def test_hub_only_public_production_entries_cannot_touch_local_queue(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = SettingsRepository(root / "host-public-boundary")
+            settings = AppSettings()
+            settings.hub.mode = "host"
+            settings.hub.listen_host = "127.0.0.1"
+            settings.hub.listen_port = _free_port()
+            repository.save(settings, [], [])
+            queue = JobQueue()
+            api = StoryForgeApi(
+                repository=repository,
+                queue=queue,
+                local_production_enabled=False,
+            )
+            try:
+                with (
+                    patch.object(queue, "enqueue_stream") as enqueue_stream,
+                    patch.object(queue, "enqueue_jobs") as enqueue_jobs,
+                    patch.object(queue, "enqueue_batch") as enqueue_batch,
+                    patch.object(queue, "restore_archived") as restore_archived,
+                    patch.object(
+                        queue, "restore_archived_batch"
+                    ) as restore_archived_batch,
+                    patch.object(queue, "approve_preview") as approve_preview,
+                    patch.object(
+                        queue, "regenerate_preview"
+                    ) as regenerate_preview,
+                    patch.object(queue, "retry_failed") as retry_failed,
+                    patch.object(queue, "start") as start,
+                ):
+                    calls = (
+                        api.queue_production_draft({}),
+                        api.queue_batch({}),
+                        api.start_queue(),
+                        api.restore_job("archived-job"),
+                        api.restore_batch("archived-batch"),
+                        api.approve_preview("preview-job"),
+                        api.regenerate_preview("preview-job"),
+                        api.retry_failed("failed-job"),
+                    )
+
+                for result in calls:
+                    self.assertFalse(result["ok"], result)
+                    self.assertIn("Hub-only", result["error"])
+                for queue_call in (
+                    enqueue_stream,
+                    enqueue_jobs,
+                    enqueue_batch,
+                    restore_archived,
+                    restore_archived_batch,
+                    approve_preview,
+                    regenerate_preview,
+                    retry_failed,
+                    start,
+                ):
+                    queue_call.assert_not_called()
+            finally:
+                api._shutdown()
+
+    def test_hub_only_startup_does_not_recover_seeded_render_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = SettingsRepository(root / "host-recovery")
+            settings = AppSettings()
+            settings.hub.mode = "host"
+            settings.hub.device_id = "hub-device"
+            settings.hub.listen_host = "127.0.0.1"
+            settings.hub.listen_port = _free_port()
+            repository.save(
+                settings,
+                [PlatformProfile(id="goodnovel", name="GoodNovel")],
+                [],
+            )
+            seed_api = StoryForgeApi(repository=repository)
+            try:
+                novel = seed_api.import_novel_text(
+                    {
+                        "title": "Queued on Hub",
+                        "text": "Chapter 1\nThis task belongs to a worker.",
+                    }
+                )["data"]["novel"]
+                binding = seed_api._catalog.save_novel_binding(
+                    {"novel_id": novel["id"], "platform_id": "goodnovel"}
+                )
+                code = seed_api._catalog.add_promo_code(
+                    {"binding_id": binding["id"], "code": "HUB001"}
+                )
+                draft = seed_api._catalog.save_draft(
+                    {
+                        "novel_id": novel["id"],
+                        "binding_id": binding["id"],
+                        "promo_code_id": code["id"],
+                        "episode_ids": [novel["episodes"][0]["id"]],
+                        "creative_line_count": 1,
+                    }
+                )
+                job = RenderJob(
+                    id="hub-must-not-render",
+                    batch_id=draft["id"],
+                    platform_id="goodnovel",
+                    source_file=__file__,
+                    title="Queued on Hub",
+                    code="HUB001",
+                    video_folder=str(root / "video"),
+                    music_folder=str(root / "music"),
+                    output_folder=str(root / "output"),
+                    status=JobStatus.QUEUED,
+                    novel_id=novel["id"],
+                    episode_id=novel["episodes"][0]["id"],
+                    production_draft_id=draft["id"],
+                    variant_index=1,
+                    variant_count=1,
+                )
+                record = seed_api._catalog.save_production_record(
+                    {
+                        "draft_id": draft["id"],
+                        "job_id": job.id,
+                        "variant_index": 1,
+                        "device_id": "hub-device",
+                        "status": "queued",
+                        "metadata": {
+                            "production_run_id": "hub-only-recovery",
+                            "job_snapshot": job.to_dict(),
+                        },
+                    }
+                )
+            finally:
+                seed_api._shutdown()
+
+            queue = JobQueue()
+            hub_only = StoryForgeApi(
+                repository=repository,
+                queue=queue,
+                local_production_enabled=False,
+            )
+            try:
+                self.assertEqual(queue.list_jobs(), [])
+                self.assertEqual(
+                    hub_only._catalog.get_record(record["id"])["status"],
+                    "queued",
+                )
+            finally:
+                hub_only._shutdown()
+
+    def test_hub_host_web_does_not_start_a_local_render_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository = SettingsRepository(root / "host")
@@ -1048,19 +1197,12 @@ class HostLocalWorkerIntegrationTests(unittest.TestCase):
                     ("studio-theme.css", ""),
                 ):
                     (ui / name).write_text(body, encoding="utf-8")
-                web = api._enable_web_access(ui)
-                self.assertTrue(web["local_url"])
-                worker = api._client_web_server
-                self.assertIsNotNone(worker)
-                assert worker is not None
+                with patch.object(api, "_ensure_local_worker_server") as start_worker:
+                    web = api._enable_web_access(ui)
 
-                with urlopen(worker.base_url + "/worker/api/health", timeout=3) as response:
-                    health = json.loads(response.read().decode("utf-8"))["data"]
-                self.assertFalse(health["ready"])
-                self.assertTrue(health["hub_connected"])
-                self.assertEqual(health["worker_role"], "hub-only")
-                self.assertEqual(health["device_id"], "")
-                self.assertNotEqual(health["device_id"], "hub-host-local")
+                self.assertEqual(web["local_url"], api._hub_server.base_url)
+                self.assertIsNone(api._client_web_server)
+                start_worker.assert_not_called()
             finally:
                 api._shutdown()
 

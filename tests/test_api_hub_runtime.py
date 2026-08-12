@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
+import sys
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -42,6 +45,123 @@ class ApiHubRuntimeTests(unittest.TestCase):
             self.host_api._shutdown()
         self.temporary.cleanup()
 
+    def test_employee_portable_host_settings_fail_before_hub_server_construction(
+        self,
+    ) -> None:
+        repository = SettingsRepository(self.root / "portable-host")
+        settings = AppSettings()
+        settings.hub.mode = "host"
+        repository.save(settings, [], [])
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": str(repository.data_dir),
+                    "STORYFORGE_PORTABLE_MODE": "1",
+                    "STORYFORGE_FROZEN_HUB_DATA_ROOT": str(repository.data_dir),
+                },
+                clear=True,
+            ),
+            patch("storyforge.api.HubServer") as server,
+            patch("storyforge.api.UpdateManager.start"),
+            patch("storyforge.api.HubBackupManager.start_daily"),
+            self.assertRaisesRegex(RuntimeError, "portable employee runtime"),
+        ):
+            StoryForgeApi(repository=repository)
+
+        server.assert_not_called()
+
+    def test_frozen_host_rejects_data_root_created_after_startup_authorization(
+        self,
+    ) -> None:
+        repository = SettingsRepository(self.root / "unapproved-frozen-host")
+        settings = AppSettings()
+        settings.hub.mode = "host"
+        repository.save(settings, [], [])
+
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.dict(
+                os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": str(repository.data_dir),
+                    "STORYFORGE_PORTABLE_MODE": "",
+                    "STORYFORGE_DEPLOYMENT_ROLE": "Hub",
+                },
+                clear=True,
+            ),
+            patch("storyforge.api.HubServer") as server,
+            patch("storyforge.api.UpdateManager.start"),
+            patch("storyforge.api.HubBackupManager.start_daily"),
+            self.assertRaisesRegex(RuntimeError, "explicit STORYFORGE_DATA_DIR"),
+        ):
+            StoryForgeApi(repository=repository)
+
+        server.assert_not_called()
+
+    def test_frozen_host_allows_preconfigured_authorized_data_root(self) -> None:
+        repository = SettingsRepository(self.root / "approved-frozen-host")
+        settings = AppSettings()
+        settings.hub.mode = "host"
+        repository.save(settings, [], [])
+        authorized = str(repository.data_dir.resolve(strict=False))
+
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.dict(
+                os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": authorized,
+                    "STORYFORGE_PORTABLE_MODE": "",
+                    "STORYFORGE_FROZEN_HUB_DATA_ROOT": authorized,
+                    "STORYFORGE_DEPLOYMENT_ROLE": "Hub",
+                },
+                clear=True,
+            ),
+            patch("storyforge.api.HubServer") as server,
+        ):
+            server.return_value.start.return_value = server.return_value
+            self.host_api = StoryForgeApi(repository=repository)
+
+        server.assert_called_once()
+
+    def test_hub_only_shutdown_never_launches_a_pending_client_update(self) -> None:
+        repository = SettingsRepository(self.root / "hub-only-shutdown")
+        settings = AppSettings()
+        settings.hub.mode = "host"
+        settings.hub.listen_host = "127.0.0.1"
+        settings.hub.listen_port = _free_port()
+        repository.save(settings, [], [])
+        self.host_api = StoryForgeApi(
+            repository=repository,
+            local_production_enabled=False,
+        )
+        self.host_api._update_manager._pending_ready = True
+
+        with patch.object(
+            self.host_api._update_manager,
+            "launch_scheduled_update",
+        ) as launch_update:
+            self.host_api._shutdown()
+        self.host_api = None
+
+        launch_update.assert_not_called()
+
+    def test_local_shutdown_keeps_the_existing_update_handoff(self) -> None:
+        repository = SettingsRepository(self.root / "local-shutdown")
+        repository.save(AppSettings(), [], [])
+        api = StoryForgeApi(repository=repository)
+        api._update_manager._pending_ready = True
+
+        with patch.object(
+            api._update_manager,
+            "launch_scheduled_update",
+        ) as launch_update:
+            api._shutdown()
+
+        launch_update.assert_called_once_with()
+
     def test_stale_activation_failure_cannot_disconnect_newer_hub_client(self) -> None:
         repository = SettingsRepository(self.root / "activation-race-client")
         repository.save(AppSettings(), [], [])
@@ -68,6 +188,105 @@ class ApiHubRuntimeTests(unittest.TestCase):
             self.client_api._activate_hub_client(stale_client)  # type: ignore[arg-type]
 
         self.assertIs(self.client_api._hub_client_snapshot(), newer_client)
+
+    def test_stale_device_sync_exception_cannot_disconnect_reenrolled_client(
+        self,
+    ) -> None:
+        repository = SettingsRepository(self.root / "sync-race-client")
+        repository.save(AppSettings(), [], [])
+        self.client_api = StoryForgeApi(repository=repository)
+        stale_client = object()
+        newer_client = object()
+        rejection = HubAuthenticationError(
+            401,
+            "unauthorized",
+            "the stale workstation token was revoked",
+        )
+        with self.client_api._hub_client_lock:
+            self.client_api._hub_client = newer_client  # type: ignore[assignment]
+
+        def stale_sync_failure() -> None:
+            # HubClient's identity-aware callback has already rejected this
+            # stale source without touching the newly enrolled transport.
+            self.assertFalse(
+                self.client_api._mark_hub_authentication_failed(  # type: ignore[union-attr]
+                    stale_client,  # type: ignore[arg-type]
+                    rejection,
+                )
+            )
+            self.client_api._device_sync_stop.set()  # type: ignore[union-attr]
+            raise rejection
+
+        with patch.object(
+            self.client_api,
+            "_device_sync_once",
+            side_effect=stale_sync_failure,
+        ):
+            self.client_api._device_sync_loop()
+
+        self.assertIs(self.client_api._hub_client_snapshot(), newer_client)
+        self.assertEqual(self.client_api._hub_error, "")
+        self.assertNotEqual(
+            self.client_api._device_sync_status_value()["state"],
+            "authentication_required",
+        )
+
+    def test_stale_activation_cannot_publish_after_newer_token_is_installed(
+        self,
+    ) -> None:
+        repository = SettingsRepository(self.root / "late-activation-client")
+        repository.save(AppSettings(), [], [])
+        self.client_api = StoryForgeApi(repository=repository)
+        old_verified = threading.Event()
+        release_old = threading.Event()
+
+        class Client:
+            authentication_failure_callback = None
+
+            def __init__(self, token: str) -> None:
+                self.token = token
+
+            def verify_identity(self) -> dict:
+                if self.token == "old-token":
+                    old_verified.set()
+                    if not release_old.wait(5):
+                        raise TimeoutError("test did not release stale activation")
+                return {"user": {"id": self.token}}
+
+        class Proxy:
+            def __init__(self, client: Client) -> None:
+                self.client = client
+
+            @staticmethod
+            def list_platforms() -> dict:
+                return {"items": []}
+
+        stale_client = Client("old-token")
+        newer_client = Client("new-token")
+        self.client_api._state.update_settings(
+            {"hub": {"mode": "client", "access_token": stale_client.token}}
+        )
+
+        with (
+            patch("storyforge.api.HubCatalogProxy", side_effect=Proxy),
+            patch("storyforge.api.LibraryService", side_effect=lambda catalog, *_a, **_k: catalog),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            stale_activation = executor.submit(
+                self.client_api._activate_hub_client,
+                stale_client,
+            )
+            self.assertTrue(old_verified.wait(5), "stale activation did not start")
+            self.client_api._state.update_settings(
+                {"hub": {"access_token": newer_client.token}}
+            )
+            self.client_api._activate_hub_client(newer_client)
+            release_old.set()
+            with self.assertRaisesRegex(RuntimeError, "superseded"):
+                stale_activation.result(timeout=5)
+
+        self.assertIs(self.client_api._hub_client_snapshot(), newer_client)
+        self.assertIs(self.client_api._catalog.client, newer_client)
 
     def test_hub_status_prefers_real_lan_address_over_virtual_adapter(self) -> None:
         values = [

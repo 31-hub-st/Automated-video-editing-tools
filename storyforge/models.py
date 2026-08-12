@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
+import math
 import socket
 from typing import Any, Mapping
+import unicodedata
 from uuid import UUID, uuid4
 
 from . import __version__
@@ -12,6 +14,32 @@ from . import __version__
 
 DEFAULT_PREVIEW_SECONDS = 15
 MIN_STRUCTURED_PREVIEW_SECONDS = 12
+MAX_PLATFORM_SEARCH_TEXT = 300
+MAX_PLATFORM_ENDING_TEXT = 1200
+
+
+def normalize_platform_copy(value: Any, field_name: str) -> str:
+    """Validate one concrete per-batch platform line, never a shared template."""
+
+    text = str(value or "")
+    if any(
+        unicodedata.category(character) == "Cf"
+        or (
+            unicodedata.category(character) == "Cc"
+            and character not in {"\r", "\n", "\t"}
+        )
+        for character in text
+    ):
+        raise ValueError(f"{field_name} cannot contain control characters")
+    normalized = " ".join(text.split())
+    maximum = (
+        MAX_PLATFORM_SEARCH_TEXT
+        if field_name == "platform_search_text"
+        else MAX_PLATFORM_ENDING_TEXT
+    )
+    if len(normalized) > maximum:
+        raise ValueError(f"{field_name} cannot exceed {maximum} characters")
+    return normalized
 
 
 def utc_now() -> str:
@@ -752,7 +780,16 @@ class AppSettings:
     outro_card_preset: str = "editorial_white"
     subtitle_animation: str = "none"
     intro_animation: str = "fade_rise"
+    # ``None`` is accepted only at construction time so old direct callers can
+    # infer the switch from their legacy template.  ``__post_init__`` always
+    # resolves it to a real bool before settings are exposed or serialized.
+    intro_card_enabled: bool | None = None
+    intro_card_start_seconds: float = 0.0
     intro_card_duration_seconds: float = 5.5
+    code_card_enabled: bool = True
+    code_card_start_seconds: float = 0.0
+    # Zero means "from the absolute start above through the end of the video".
+    code_card_duration_seconds: float = 0.0
     preview_seconds: int = DEFAULT_PREVIEW_SECONDS
     max_episode_minutes: float = 10.0
     cover_animation: str = "gentle_push"
@@ -775,6 +812,25 @@ class AppSettings:
     outro_card: OutroCardStyle = field(default_factory=OutroCardStyle)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     hub: HubSettings = field(default_factory=HubSettings)
+
+    def __post_init__(self) -> None:
+        if self.intro_card_enabled is None:
+            self.intro_card_enabled = self.video_template == "platform_story_card"
+        if not isinstance(self.intro_card_enabled, bool):
+            raise ValueError("intro_card_enabled must be a boolean")
+        if not isinstance(self.code_card_enabled, bool):
+            raise ValueError("code_card_enabled must be a boolean")
+        for name in ("intro_card_start_seconds", "code_card_start_seconds"):
+            number = float(getattr(self, name))
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{name} must be a non-negative finite number")
+            setattr(self, name, number)
+        code_duration = float(self.code_card_duration_seconds)
+        if not math.isfinite(code_duration) or code_duration < 0:
+            raise ValueError(
+                "code_card_duration_seconds must be a non-negative finite number"
+            )
+        self.code_card_duration_seconds = code_duration
 
     def to_dict(self, *, redact_secrets: bool = False) -> dict[str, Any]:
         data = asdict(self)
@@ -964,7 +1020,12 @@ class AppSettings:
                 "outro_card_preset",
                 "subtitle_animation",
                 "intro_animation",
+                "intro_card_enabled",
+                "intro_card_start_seconds",
                 "intro_card_duration_seconds",
+                "code_card_enabled",
+                "code_card_start_seconds",
+                "code_card_duration_seconds",
                 "preview_seconds",
                 "max_episode_minutes",
                 "cover_animation",
@@ -1010,6 +1071,32 @@ class AppSettings:
             if 200 <= narration_wpm <= 280
             else defaults.narration_wpm
         )
+        raw_intro_enabled = value.get("intro_card_enabled")
+        scalar["intro_card_enabled"] = (
+            raw_intro_enabled
+            if isinstance(raw_intro_enabled, bool)
+            else str(scalar.get("video_template") or "classic")
+            == "platform_story_card"
+        )
+        for start_key in ("intro_card_start_seconds", "code_card_start_seconds"):
+            try:
+                start_value = float(scalar[start_key])
+            except (TypeError, ValueError):
+                start_value = getattr(defaults, start_key)
+            scalar[start_key] = (
+                start_value
+                if math.isfinite(start_value) and start_value >= 0
+                else getattr(defaults, start_key)
+            )
+        try:
+            code_card_duration = float(scalar["code_card_duration_seconds"])
+        except (TypeError, ValueError):
+            code_card_duration = defaults.code_card_duration_seconds
+        scalar["code_card_duration_seconds"] = (
+            code_card_duration
+            if math.isfinite(code_card_duration) and code_card_duration >= 0
+            else defaults.code_card_duration_seconds
+        )
         try:
             intro_card_duration = float(scalar["intro_card_duration_seconds"])
         except (TypeError, ValueError):
@@ -1019,7 +1106,11 @@ class AppSettings:
             if 2.5 <= intro_card_duration <= 8.0
             else defaults.intro_card_duration_seconds
         )
-        for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
+        for boolean_key in (
+            "export_narration_audio",
+            "cover_outro_enabled",
+            "code_card_enabled",
+        ):
             raw_boolean = scalar[boolean_key]
             scalar[boolean_key] = (
                 raw_boolean
@@ -1166,6 +1257,8 @@ class RenderJob:
     cover_outro_enabled: bool = True
     intro_card_text: str = ""
     intro_card_source: str = ""
+    platform_search_text: str = ""
+    platform_ending_text: str = ""
     production_preset_id: str = ""
     production_preset_revision: int = 0
     production_preset_hash: str = ""
@@ -1187,6 +1280,12 @@ class RenderJob:
         self.episode_label = str(self.episode_label or "").strip()
         self.batch_total_count = max(0, int(self.batch_total_count or 0))
         self.batch_ordinal = max(0, int(self.batch_ordinal or 0))
+        self.platform_search_text = normalize_platform_copy(
+            self.platform_search_text, "platform_search_text"
+        )
+        self.platform_ending_text = normalize_platform_copy(
+            self.platform_ending_text, "platform_ending_text"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

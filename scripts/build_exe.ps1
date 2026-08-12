@@ -324,6 +324,8 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\publish_hub_snapshot.ps1
     -Destination (Join-Path $adminToolsTarget 'publish_hub_snapshot.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\verify_storyforge_deployment.ps1') `
     -Destination (Join-Path $adminToolsTarget 'verify_storyforge_deployment.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\repair_storyforge_hub_launcher.ps1') `
+    -Destination (Join-Path $adminToolsTarget 'repair_storyforge_hub_launcher.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\EMPLOYEE_QUICK_START.md') `
     -Destination (Join-Path $bundleRoot 'QUICK_START.md') -Force
 
@@ -338,8 +340,17 @@ $smokeOutput = Join-Path $smokeRoot 'result'
 [System.IO.Directory]::CreateDirectory($smokeData) | Out-Null
 [System.IO.Directory]::CreateDirectory($smokeOutput) | Out-Null
 $previousDataDir = [Environment]::GetEnvironmentVariable('STORYFORGE_DATA_DIR', 'Process')
+$previousDeploymentRole = [Environment]::GetEnvironmentVariable('STORYFORGE_DEPLOYMENT_ROLE', 'Process')
+$previousFrozenHubDataRoot = [Environment]::GetEnvironmentVariable('STORYFORGE_FROZEN_HUB_DATA_ROOT', 'Process')
+$previousPortableMode = [Environment]::GetEnvironmentVariable('STORYFORGE_PORTABLE_MODE', 'Process')
 try {
     $env:STORYFORGE_DATA_DIR = $smokeData
+    # Build gates validate an employee/standalone frozen package, not the
+    # identity of the shell that invoked the build. Never let a Hub launcher
+    # environment authorize these child processes or suppress portable setup.
+    Remove-Item Env:STORYFORGE_DEPLOYMENT_ROLE -ErrorAction SilentlyContinue
+    Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue
+    Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue
     $fixtureScript = @'
 import os
 from pathlib import Path
@@ -584,6 +595,24 @@ finally {
     }
     else {
         $env:STORYFORGE_DATA_DIR = $previousDataDir
+    }
+    if ($null -eq $previousDeploymentRole) {
+        Remove-Item Env:STORYFORGE_DEPLOYMENT_ROLE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:STORYFORGE_DEPLOYMENT_ROLE = $previousDeploymentRole
+    }
+    if ($null -eq $previousFrozenHubDataRoot) {
+        Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:STORYFORGE_FROZEN_HUB_DATA_ROOT = $previousFrozenHubDataRoot
+    }
+    if ($null -eq $previousPortableMode) {
+        Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:STORYFORGE_PORTABLE_MODE = $previousPortableMode
     }
 }
 

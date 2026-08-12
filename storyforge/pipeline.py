@@ -162,6 +162,77 @@ def _story_card_final_label(job: RenderJob, story_card_template: bool) -> str:
     return ""
 
 
+def _platform_search_copy(
+    job: RenderJob, platform: PlatformProfile, effective_code: str
+) -> str:
+    """Return one concrete employee override, or the shared template fallback."""
+
+    return str(job.platform_search_text or "").strip() or platform.render_search(
+        effective_code
+    )
+
+
+def _platform_ending_copy(
+    job: RenderJob, platform: PlatformProfile, effective_code: str
+) -> str:
+    """Return one concrete employee override, or the shared template fallback."""
+
+    return str(job.platform_ending_text or "").strip() or platform.render_ending(
+        effective_code
+    )
+
+
+def _intro_card_opening_silence(
+    settings: AppSettings, target_duration: float
+) -> float:
+    """Preserve legacy start-zero previews without delaying later overlays."""
+
+    if not settings.intro_card_enabled or settings.intro_card_start_seconds != 0:
+        return 0.0
+    return max(
+        0.0,
+        min(float(target_duration), float(settings.intro_card_duration_seconds)),
+    )
+
+
+def _card_timeline_manifest(
+    *,
+    enabled: bool,
+    start_seconds: float,
+    duration_seconds: float,
+    target_duration: float,
+    zero_duration_to_end: bool = False,
+) -> dict[str, Any]:
+    """Describe the actual clipped display window used by ASS and FFmpeg."""
+
+    if not isinstance(enabled, bool):
+        raise ValueError("card enabled must be a boolean")
+    start = float(start_seconds)
+    configured_duration = float(duration_seconds)
+    target = float(target_duration)
+    if not math.isfinite(start) or start < 0:
+        raise ValueError("card start must be a non-negative finite number")
+    if not math.isfinite(configured_duration) or configured_duration < 0:
+        raise ValueError("card duration must be a non-negative finite number")
+    if not math.isfinite(target) or target <= 0:
+        raise ValueError("target duration must be a positive finite number")
+    if not enabled or start >= target:
+        display_duration = 0.0
+    elif zero_duration_to_end and configured_duration == 0:
+        display_duration = target - start
+    else:
+        display_duration = max(
+            0.0, min(target, start + configured_duration) - start
+        )
+    return {
+        "enabled": enabled,
+        "start_seconds": start,
+        "duration_seconds": configured_duration,
+        "end_seconds": start + display_duration,
+        "display_duration_seconds": display_duration,
+    }
+
+
 def _cover_outro_enabled(settings: AppSettings, job: RenderJob) -> bool:
     """Resolve the frozen job switch without letting either layer re-enable it."""
 
@@ -1850,6 +1921,12 @@ def _intro_card_media_options(
                 ),
             ),
             "intro_card_cover_path": None,
+            "intro_card_cover_start": float(settings.intro_card_start_seconds),
+            "intro_card_cover_duration": (
+                float(settings.intro_card_duration_seconds)
+                if intro_duration is None
+                else float(intro_duration)
+            ),
         }
 
     geometry = resolve_cover_split_geometry(
@@ -1863,12 +1940,13 @@ def _intro_card_media_options(
         if intro_duration is None
         else float(intro_duration)
     )
+    enabled = bool(settings.intro_card_enabled) and duration > 0
     return {
         "platform_logo_x_percent": geometry.platform_logo_x_percent,
         "platform_logo_y_percent": geometry.platform_logo_y_percent,
-        "intro_card_cover_path": cover_path,
-        "intro_card_cover_start": 0.0,
-        "intro_card_cover_duration": max(2.5, min(8.0, duration)),
+        "intro_card_cover_path": cover_path if enabled else None,
+        "intro_card_cover_start": float(settings.intro_card_start_seconds),
+        "intro_card_cover_duration": duration,
         "intro_card_cover_x_percent": geometry.cover_center_x_percent,
         "intro_card_cover_y_percent": geometry.cover_center_y_percent,
         "intro_card_cover_width_percent": geometry.cover_width_percent,
@@ -2051,6 +2129,8 @@ def prepared_recipe_hash(
         "platform_name": platform.name,
         "search_template": platform.search_template,
         "ending_template": platform.ending_template,
+        "platform_search_text": str(job.platform_search_text or ""),
+        "platform_ending_text": str(job.platform_ending_text or ""),
         "code": job.promo_code_snapshot or job.code,
         "adult_mode": settings.adult_mode,
         "retention_min": settings.retention_min,
@@ -3248,6 +3328,7 @@ class PipelineRunner:
         if not source_path.is_file():
             raise PipelineError(f"小说文件不存在：{source_path}")
         effective_code = job.promo_code_snapshot or job.code
+        platform_ending_copy = _platform_ending_copy(job, platform, effective_code)
         publish_dir = publish_batch_directory(job, platform)
         job.publish_batch_folder = str(publish_dir)
         job_dir = job_workspace_directory(job, self.work_root)
@@ -3282,6 +3363,11 @@ class PipelineRunner:
             duration_seconds=max(1.0, analysis.estimated_duration_seconds),
         )
         output_mode = production_output_mode(job)
+        if output_mode == "reuse_audio" and job.platform_ending_text:
+            raise PipelineError(
+                "复用已有旁白时不能修改本批平台结尾文案；"
+                "旧音频与字幕时间已经冻结，请改为重新生成旁白后再制作。"
+            )
         publish_narration_audio = production_exports_narration_audio(job)
         existing_narration_source: Path | None = None
         reuse_metadata: dict[str, Any] | None = None
@@ -3369,7 +3455,7 @@ class PipelineRunner:
                 title=job.title,
                 platform=platform.name,
                 code=effective_code,
-                ending_template=platform.render_ending(effective_code),
+                ending_template=platform_ending_copy,
                 adult_mode=settings.adult_mode,
                 retention_min=settings.retention_min,
                 retention_max=settings.retention_max,
@@ -3382,6 +3468,8 @@ class PipelineRunner:
                 ),
             )
             text_result = self._polish(text_request, settings, warnings)
+            if job.platform_ending_text:
+                text_result = replace(text_result, ending_cta=platform_ending_copy)
             self._save_prepared_text(
                 prepared_path,
                 recipe_hash=recipe_hash,
@@ -3396,6 +3484,8 @@ class PipelineRunner:
                 if reuse_metadata is not None
                 else "已复用此前准备的润色文稿。"
             )
+        if job.platform_ending_text and text_result.ending_cta != platform_ending_copy:
+            text_result = replace(text_result, ending_cta=platform_ending_copy)
         _write_pipeline_checkpoint(
             job_dir, job, stage="text", state="completed"
         )
@@ -3630,13 +3720,17 @@ class PipelineRunner:
 
         end_card_duration = max(5.0, min(7.0, settings.end_card_seconds))
         story_card_template = settings.video_template == "platform_story_card"
+        intro_card_enabled = bool(settings.intro_card_enabled)
+        intro_card_start = float(settings.intro_card_start_seconds)
         intro_card_duration = (
             max(2.5, min(8.0, float(settings.intro_card_duration_seconds)))
-            if story_card_template
+            if intro_card_enabled
             else 0.0
         )
         platform_logo_path = self._validated_optional_image(
-            _story_card_platform_logo(platform, story_card_template),
+            _story_card_platform_logo(
+                platform, story_card_template and intro_card_enabled
+            ),
             asset_label="平台 Logo",
             fallback_label="改用无 Logo 的简介卡布局",
             warnings=warnings,
@@ -3647,8 +3741,32 @@ class PipelineRunner:
         render_duration = max(
             narration.duration_seconds,
             end_card_duration
-            + (intro_card_duration + 1.0 if story_card_template else 4.0),
+            + (
+                intro_card_duration + 1.0
+                if story_card_template
+                and intro_card_enabled
+                and intro_card_start == 0
+                else 4.0
+            ),
         )
+        intro_card_timeline = _card_timeline_manifest(
+            enabled=intro_card_enabled,
+            start_seconds=intro_card_start,
+            duration_seconds=float(settings.intro_card_duration_seconds),
+            target_duration=render_duration,
+        )
+        code_card_timeline = _card_timeline_manifest(
+            enabled=settings.code_card_enabled,
+            start_seconds=settings.code_card_start_seconds,
+            duration_seconds=settings.code_card_duration_seconds,
+            target_duration=render_duration,
+            zero_duration_to_end=True,
+        )
+        intro_card_display_duration = float(
+            intro_card_timeline["display_duration_seconds"]
+        )
+        if intro_card_display_duration <= 0:
+            platform_logo_path = None
         _preflight_output_directory(
             job.output_folder,
             duration_seconds=render_duration,
@@ -3676,12 +3794,17 @@ class PipelineRunner:
             narration.cues,
             platform=platform.name,
             code=effective_code,
-            search_text=platform.render_search(effective_code),
+            search_text=_platform_search_copy(job, platform, effective_code),
             video_duration=render_duration,
             video_template=settings.video_template,
             intro_card_text=job.intro_card_text,
             intro_headline=text_result.hook,
+            intro_card_enabled=intro_card_enabled,
+            intro_card_start=intro_card_start,
             intro_card_duration=intro_card_duration,
+            code_card_enabled=settings.code_card_enabled,
+            code_card_start=settings.code_card_start_seconds,
+            code_card_duration=settings.code_card_duration_seconds,
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
             intro_card_cover_present=bool(effective_cover),
@@ -3813,7 +3936,7 @@ class PipelineRunner:
             intro_card_text=job.intro_card_text,
             code=effective_code,
             style=full_subtitle_style,
-            intro_duration=intro_card_duration,
+            intro_duration=intro_card_display_duration,
         )
         effective_cover_outro = bool(
             _cover_outro_enabled(settings, job)
@@ -3911,7 +4034,8 @@ class PipelineRunner:
             end_card_without_cover=True,
             cover_intro_enabled=False,
             platform_logo_path=platform_logo_path,
-            platform_logo_duration=intro_card_duration,
+            platform_logo_start=intro_card_start,
+            platform_logo_duration=intro_card_display_duration,
             video_transition=render_transition,
             **intro_card_media,
         )
@@ -3922,6 +4046,7 @@ class PipelineRunner:
         manifest = {
             "schema_version": 2,
             "output_mode": output_mode,
+            "duration_seconds": render_duration,
             "job": job.to_dict(),
             "business": {
                 "novel_id": job.novel_id,
@@ -3984,10 +4109,14 @@ class PipelineRunner:
                 "cover": str(effective_cover or ""),
                 "video_template": settings.video_template,
                 "intro_card": {
+                    **intro_card_timeline,
                     "headline": text_result.hook,
                     "text": job.intro_card_text,
                     "source": job.intro_card_source,
-                    "duration_seconds": intro_card_duration if story_card_template else 0.0,
+                },
+                "code_card": {
+                    **code_card_timeline,
+                    "text": _platform_search_copy(job, platform, effective_code),
                 },
                 "ending_card": {
                     "kind": (
@@ -4111,7 +4240,8 @@ class PipelineRunner:
                 end_card_without_cover=True,
                 cover_intro_enabled=False,
                 platform_logo_path=platform_logo_path,
-                platform_logo_duration=intro_card_duration,
+                platform_logo_start=intro_card_start,
+                platform_logo_duration=intro_card_display_duration,
                 video_transition=render_transition,
                 **intro_card_media,
             )
@@ -4259,7 +4389,8 @@ class PipelineRunner:
                     end_card_without_cover=True,
                     cover_intro_enabled=False,
                     platform_logo_path=platform_logo_path,
-                    platform_logo_duration=intro_card_duration,
+                    platform_logo_start=intro_card_start,
+                    platform_logo_duration=intro_card_display_duration,
                     video_transition="cut",
                     **intro_card_media,
                 )
@@ -4586,6 +4717,18 @@ class PipelineRunner:
             return live
         merged = live.to_dict()
         snapshot = dict(job.settings_snapshot)
+        # These fields were added after frozen recipes already existed. Their
+        # compatibility values come from that old recipe, never from whatever
+        # settings happen to be live on the worker that later claims the job.
+        snapshot.setdefault(
+            "intro_card_enabled",
+            str(snapshot.get("video_template") or "classic")
+            == "platform_story_card",
+        )
+        snapshot.setdefault("intro_card_start_seconds", 0.0)
+        snapshot.setdefault("code_card_enabled", True)
+        snapshot.setdefault("code_card_start_seconds", 0.0)
+        snapshot.setdefault("code_card_duration_seconds", 0.0)
         provider_snapshot = dict(snapshot.pop("providers", {}) or {})
         for key, value in snapshot.items():
             if key in merged:
@@ -4743,10 +4886,39 @@ class PipelineRunner:
     ) -> str:
         warnings: list[str] = []
         effective_code = job.promo_code_snapshot or job.code
+        platform_ending_copy = _platform_ending_copy(job, platform, effective_code)
         preview_seconds = float(settings.preview_seconds)
         story_card_template = settings.video_template == "platform_story_card"
+        intro_card_enabled = bool(settings.intro_card_enabled)
+        intro_card_start = float(settings.intro_card_start_seconds)
+        configured_intro_duration = float(settings.intro_card_duration_seconds)
+        intro_card_duration = configured_intro_duration if intro_card_enabled else 0.0
+        intro_card_timeline = _card_timeline_manifest(
+            enabled=intro_card_enabled,
+            start_seconds=intro_card_start,
+            duration_seconds=configured_intro_duration,
+            target_duration=preview_seconds,
+        )
+        code_card_timeline = _card_timeline_manifest(
+            enabled=settings.code_card_enabled,
+            start_seconds=settings.code_card_start_seconds,
+            duration_seconds=settings.code_card_duration_seconds,
+            target_duration=preview_seconds,
+            zero_duration_to_end=True,
+        )
+        intro_card_display_duration = float(
+            intro_card_timeline["display_duration_seconds"]
+        )
+        # Only the legacy opening window reserved silent narration time. A card
+        # placed later on the absolute timeline overlays ongoing narration.
+        opening_silence = _intro_card_opening_silence(settings, preview_seconds)
         platform_logo_path = self._validated_optional_image(
-            _story_card_platform_logo(platform, story_card_template),
+            _story_card_platform_logo(
+                platform,
+                story_card_template
+                and intro_card_enabled
+                and intro_card_display_duration > 0,
+            ),
             asset_label="平台 Logo",
             fallback_label="改用无 Logo 的简介卡布局",
             warnings=warnings,
@@ -4760,19 +4932,9 @@ class PipelineRunner:
             fallback_label="改用纯字幕结尾",
             warnings=warnings,
         )
-        # The approval sample is a compact review reel, not a blind prefix of
-        # the final video. Five closing seconds guarantee that the real CTA,
-        # subtitle and full-screen cover are visible; a shorter four-second
-        # intro leaves a distinct body window in the 15-second default.
+        # The approval sample preserves the frozen absolute card windows; only
+        # their visible tail is clipped at the sample boundary.
         end_card_duration = 5.0
-        intro_card_duration = (
-            min(
-                4.0,
-                max(2.5, preview_seconds - end_card_duration - 3.0),
-            )
-            if story_card_template
-            else 0.0
-        )
         preview_style = _preview_subtitle_style(settings)
         intro_card_media = _intro_card_media_options(
             settings,
@@ -4780,7 +4942,7 @@ class PipelineRunner:
             intro_card_text=job.intro_card_text,
             code=effective_code,
             style=preview_style,
-            intro_duration=intro_card_duration,
+            intro_duration=intro_card_display_duration,
         )
         preview_dir = job_dir / ".previews"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -4807,7 +4969,7 @@ class PipelineRunner:
                 title=job.title,
                 platform=platform.name,
                 code=effective_code,
-                ending_template=platform.render_ending(effective_code),
+                ending_template=platform_ending_copy,
                 adult_mode=settings.adult_mode,
                 retention_min=settings.retention_min,
                 retention_max=settings.retention_max,
@@ -4820,6 +4982,8 @@ class PipelineRunner:
                 ),
             )
             text_result = self._polish(request, settings, warnings)
+            if job.platform_ending_text:
+                text_result = replace(text_result, ending_cta=platform_ending_copy)
             self._save_prepared_text(
                 prepared_path,
                 recipe_hash=recipe_hash,
@@ -4836,8 +5000,9 @@ class PipelineRunner:
             mood = "suspense"
             warnings.append("样片题材无法识别，已使用悬疑素材预设。")
         preview_ending_cta = (
-            text_result.ending_cta.strip()
-            or platform.render_ending(effective_code).strip()
+            platform_ending_copy
+            if job.platform_ending_text
+            else text_result.ending_cta.strip() or platform_ending_copy
         )
         preview_text_result = replace(
             text_result,
@@ -4845,7 +5010,7 @@ class PipelineRunner:
         )
         units = self._preview_units(
             preview_text_result,
-            preview_seconds=preview_seconds - intro_card_duration,
+            preview_seconds=preview_seconds - opening_silence,
             narration_wpm=settings.narration_wpm,
             include_ending=True,
             end_card_seconds=end_card_duration,
@@ -4890,7 +5055,7 @@ class PipelineRunner:
                 tts_result,
                 units,
                 segment_unit_counts,
-                preview_seconds=preview_seconds - intro_card_duration,
+                preview_seconds=preview_seconds - opening_silence,
                 chapter_pause_seconds=settings.chapter_pause_seconds,
             )
             if len(tts_result.segments) < original_segment_count:
@@ -4902,7 +5067,7 @@ class PipelineRunner:
             units,
             work_dir / "preview-narration.wav",
             chapter_pause_seconds=settings.chapter_pause_seconds,
-            initial_silence_seconds=intro_card_duration,
+            initial_silence_seconds=opening_silence,
             segment_unit_counts=segment_unit_counts,
         )
         if preview_ending_cta:
@@ -4926,7 +5091,7 @@ class PipelineRunner:
                         final_chapter_pause_seconds=(
                             settings.chapter_pause_seconds + additional_pause
                         ),
-                        initial_silence_seconds=intro_card_duration,
+                        initial_silence_seconds=opening_silence,
                         segment_unit_counts=segment_unit_counts,
                     )
         # Always render the complete configured window. The narration assembler
@@ -4952,12 +5117,17 @@ class PipelineRunner:
             clipped_cues,
             platform=platform.name,
             code=effective_code,
-            search_text=platform.render_search(effective_code),
+            search_text=_platform_search_copy(job, platform, effective_code),
             video_duration=target_duration,
             video_template=settings.video_template,
             intro_card_text=job.intro_card_text,
             intro_headline=preview_intro_headline,
+            intro_card_enabled=intro_card_enabled,
+            intro_card_start=intro_card_start,
             intro_card_duration=intro_card_duration,
+            code_card_enabled=settings.code_card_enabled,
+            code_card_start=settings.code_card_start_seconds,
+            code_card_duration=settings.code_card_duration_seconds,
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
             intro_card_cover_present=bool(preview_cover),
@@ -5040,7 +5210,8 @@ class PipelineRunner:
             end_card_without_cover=True,
             cover_intro_enabled=False,
             platform_logo_path=platform_logo_path,
-            platform_logo_duration=intro_card_duration,
+            platform_logo_start=intro_card_start,
+            platform_logo_duration=intro_card_display_duration,
             **intro_card_media,
         )
         (preview_dir / "render-command.txt").write_text(
@@ -5095,7 +5266,8 @@ class PipelineRunner:
                 end_card_without_cover=True,
                 cover_intro_enabled=False,
                 platform_logo_path=platform_logo_path,
-                platform_logo_duration=intro_card_duration,
+                platform_logo_start=intro_card_start,
+                platform_logo_duration=intro_card_display_duration,
                 **intro_card_media,
             )
             (preview_dir / "render-command-fallback.txt").write_text(
@@ -5142,11 +5314,11 @@ class PipelineRunner:
                         if story_card_template
                         else "hook_and_code_card"
                     ),
-                    "start_seconds": 0.0,
-                    "end_seconds": intro_card_duration,
+                    **intro_card_timeline,
                 },
+                "code_card": code_card_timeline,
                 "story_body": {
-                    "start_seconds": intro_card_duration,
+                    "start_seconds": opening_silence,
                     "end_seconds": target_duration - end_card_duration,
                     "narration_and_captions": True,
                 },
@@ -5187,10 +5359,14 @@ class PipelineRunner:
                 "fps": settings.output_fps,
                 "video_template": settings.video_template,
                 "intro_card": {
+                    **intro_card_timeline,
                     "headline": preview_intro_headline,
                     "text": job.intro_card_text,
                     "source": job.intro_card_source,
-                    "duration_seconds": intro_card_duration if story_card_template else 0.0,
+                },
+                "code_card": {
+                    **code_card_timeline,
+                    "text": _platform_search_copy(job, platform, effective_code),
                 },
             },
             "warnings": warnings,

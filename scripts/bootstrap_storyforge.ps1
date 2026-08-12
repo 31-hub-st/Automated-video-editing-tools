@@ -10,7 +10,8 @@ param(
     [int]$Port = 8765,
     [string]$TaskName = 'StoryForge Hub',
     [switch]$RestoreHubData,
-    [switch]$ReplaceExistingData
+    [switch]$ReplaceExistingData,
+    [switch]$FreshReplacementHost
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +41,151 @@ function Get-SafeFixedPath {
         throw "$Label drive is not available: $volumeRoot"
     }
     return $full.TrimEnd('\')
+}
+
+function Assert-ExistingOrdinaryDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "$Label exists but is not a directory: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label cannot be a reparse point: $Path"
+    }
+}
+
+function Get-FreshReplacementDataState {
+    param([Parameter(Mandatory = $true)][string]$DataRoot)
+
+    if (-not (Test-Path -LiteralPath $DataRoot)) {
+        return @()
+    }
+    Assert-ExistingOrdinaryDirectory -Path $DataRoot -Label 'Fresh replacement DataRoot'
+    $fullRoot = [System.IO.Path]::GetFullPath($DataRoot).TrimEnd('\')
+    $items = @(
+        Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop
+    )
+    $records = @(
+        foreach ($item in $items) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Fresh replacement DataRoot contains a reparse point: $($item.FullName)"
+            }
+            $relative = $item.FullName.Substring($fullRoot.Length).TrimStart('\').Replace('\', '/')
+            if ($item.PSIsContainer) {
+                [PSCustomObject]@{
+                    relative = $relative
+                    kind = 'directory'
+                    size = [long]0
+                    sha256 = ''
+                }
+            }
+            else {
+                [PSCustomObject]@{
+                    relative = $relative
+                    kind = 'file'
+                    size = [long]$item.Length
+                    sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+            }
+        }
+    )
+    return @($records | Sort-Object -Property relative)
+}
+
+function Assert-FreshReplacementDataState {
+    param(
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][object[]]$ExpectedDataState
+    )
+
+    $actual = @(Get-FreshReplacementDataState -DataRoot $DataRoot)
+    $expected = @($ExpectedDataState)
+    if ($actual.Count -ne $expected.Count) {
+        throw 'Fresh replacement DataRoot changed after trusted initialization.'
+    }
+    for ($index = 0; $index -lt $expected.Count; $index += 1) {
+        $expectedItem = $expected[$index]
+        $actualItem = $actual[$index]
+        if (
+            -not [string]::Equals(
+                [string]$actualItem.relative,
+                [string]$expectedItem.relative,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$actualItem.kind -ne [string]$expectedItem.kind -or
+            [long]$actualItem.size -ne [long]$expectedItem.size -or
+            [string]$actualItem.sha256 -ne [string]$expectedItem.sha256
+        ) {
+            throw 'Fresh replacement DataRoot changed after trusted initialization.'
+        }
+    }
+}
+
+function Assert-FreshReplacementHostState {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DataRoot,
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [switch]$RequireEmptyData,
+        [object[]]$ExpectedDataState
+    )
+
+    Assert-ExistingOrdinaryDirectory -Path $InstallRoot -Label 'Fresh replacement InstallRoot'
+    Assert-ExistingOrdinaryDirectory -Path $DataRoot -Label 'Fresh replacement DataRoot'
+
+    $tasks = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    if ($tasks.Count -gt 0) {
+        throw "Scheduled task '$TaskName' appeared during fresh replacement."
+    }
+
+    $listeners = @(
+        Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
+    )
+    if ($listeners.Count -gt 0) {
+        $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+        throw "TCP port $Port became occupied during fresh replacement. PID=$($owners -join ',')"
+    }
+
+    $storyForgeProcesses = @(
+        Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+            Where-Object {
+                $name = [string]$_.Name
+                $executable = [string]$_.ExecutablePath
+                $commandLine = [string]$_.CommandLine
+                $name -ieq 'StoryForge Studio.exe' -or
+                $executable -match '(?i)\\StoryForgeHub\\App-[^\\]+\\StoryForge Studio\.exe$' -or
+                (
+                    $commandLine -match '(?i)StoryForge Studio\.exe' -and
+                    $commandLine -match '(?i)(?:--web|--local-worker)'
+                )
+            }
+    )
+    if ($storyForgeProcesses.Count -gt 0) {
+        $summary = @(
+            $storyForgeProcesses |
+                ForEach-Object { '{0}:{1}' -f $_.ProcessId, $_.Name }
+        ) -join ', '
+        throw "A formal StoryForge process appeared during fresh replacement: $summary"
+    }
+
+    $actualDataState = @(Get-FreshReplacementDataState -DataRoot $DataRoot)
+    if ($RequireEmptyData -and $actualDataState.Count -gt 0) {
+        throw 'Fresh replacement DataRoot is no longer empty.'
+    }
+    if ($PSBoundParameters.ContainsKey('ExpectedDataState')) {
+        Assert-FreshReplacementDataState `
+            -DataRoot $DataRoot `
+            -ExpectedDataState $ExpectedDataState
+    }
+    return $actualDataState
 }
 
 function Get-GhPath {
@@ -175,10 +321,37 @@ function Write-DeploymentPointer {
 function Write-DesktopLauncher {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][string]$Entrypoint
+        [Parameter(Mandatory = $true)][string]$Entrypoint,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Hub', 'Employee')]
+        [string]$Role,
+        [string]$DataRoot = ''
     )
 
-    $startCommand = "@echo off`r`nstart `"`" `"$Entrypoint`" %*`r`n"
+    if ($Role -eq 'Hub') {
+        if (-not $DataRoot) {
+            throw 'Hub desktop launcher requires DataRoot.'
+        }
+        $environmentCommands =
+            "set `"STORYFORGE_DEPLOYMENT_ROLE=Hub`"`r`n" +
+            "set `"STORYFORGE_DATA_DIR=$DataRoot`"`r`n" +
+            "set `"STORYFORGE_FROZEN_HUB_DATA_ROOT=`"`r`n" +
+            "set `"STORYFORGE_PORTABLE_MODE=`"`r`n"
+        $startArguments = ''
+    }
+    else {
+        if ($DataRoot) {
+            throw 'Employee desktop launcher must not receive DataRoot.'
+        }
+        $environmentCommands =
+            "set `"STORYFORGE_DEPLOYMENT_ROLE=`"`r`n" +
+            "set `"STORYFORGE_DATA_DIR=`"`r`n" +
+            "set `"STORYFORGE_FROZEN_HUB_DATA_ROOT=`"`r`n" +
+            "set `"STORYFORGE_PORTABLE_MODE=`"`r`n"
+        $startArguments = ' %*'
+    }
+
+    $startCommand = "@echo off`r`n$environmentCommands" + "start `"`" `"$Entrypoint`"$startArguments`r`n"
     [System.IO.File]::WriteAllText($Destination, $startCommand, [System.Text.Encoding]::ASCII)
 }
 
@@ -324,6 +497,7 @@ if (-not $InstallRoot) {
     $InstallRoot = if ($Role -eq 'Hub') { 'D:\StoryForgeHub' } else { 'D:\StoryForge' }
 }
 $InstallRoot = Get-SafeFixedPath -Value $InstallRoot -Label 'InstallRoot'
+Assert-ExistingOrdinaryDirectory -Path $InstallRoot -Label 'InstallRoot'
 if ($Role -eq 'Hub') {
     if (-not (Test-Administrator)) {
         throw 'Hub deployment must run in an elevated Windows PowerShell window.'
@@ -332,6 +506,7 @@ if ($Role -eq 'Hub') {
         $DataRoot = Join-Path $InstallRoot 'Data'
     }
     $DataRoot = Get-SafeFixedPath -Value $DataRoot -Label 'DataRoot'
+    Assert-ExistingOrdinaryDirectory -Path $DataRoot -Label 'DataRoot'
     if ($DataRoot -eq $InstallRoot) {
         throw 'DataRoot must be a dedicated directory, not InstallRoot itself.'
     }
@@ -341,6 +516,16 @@ elseif ($RestoreHubData -or $ReplaceExistingData -or $DataRoot) {
 }
 if ($ReplaceExistingData -and -not $RestoreHubData) {
     throw '-ReplaceExistingData is valid only together with -RestoreHubData.'
+}
+if (
+    $FreshReplacementHost -and
+    (
+        $Role -ne 'Hub' -or
+        -not $RestoreHubData -or
+        -not $ReplaceExistingData
+    )
+) {
+    throw 'FreshReplacementHost requires Hub restore with ReplaceExistingData.'
 }
 
 $dataHasContent = $false
@@ -366,6 +551,14 @@ if ($Role -eq 'Hub') {
     if ($existingRule.Count -gt 0) {
         throw "Firewall rule '$ruleName' already exists. Refusing to overwrite existing Hub configuration."
     }
+    if ($FreshReplacementHost) {
+        [void](Assert-FreshReplacementHostState `
+            -InstallRoot $InstallRoot `
+            -DataRoot $DataRoot `
+            -TaskName $TaskName `
+            -Port $Port `
+            -RequireEmptyData)
+    }
 }
 
 $script:GhPath = Get-GhPath
@@ -380,6 +573,7 @@ $stageRoot = Join-Path $InstallRoot ('.bootstrap-' + [Guid]::NewGuid().ToString(
 $hubTaskCreated = $false
 $hubFirewallRuleCreated = $false
 $hubProvisioningComplete = $false
+$freshInitializedDataState = @()
 
 try {
     Write-Host 'Reading the latest stable StoryForge release...'
@@ -463,6 +657,14 @@ try {
     $desktopLauncherPath = Join-Path $InstallRoot 'Start-StoryForge.cmd'
 
     if ($Role -eq 'Hub') {
+        if ($FreshReplacementHost) {
+            [void](Assert-FreshReplacementHostState `
+                -InstallRoot $InstallRoot `
+                -DataRoot $DataRoot `
+                -TaskName $TaskName `
+                -Port $Port `
+                -RequireEmptyData)
+        }
         [System.IO.Directory]::CreateDirectory($DataRoot) | Out-Null
         if (-not $dataHasContent) {
             $selfTestRoot = Join-Path $stageRoot 'startup-self-test'
@@ -493,6 +695,14 @@ try {
                     $env:STORYFORGE_DATA_DIR = $previousDataRoot
                 }
             }
+            if ($FreshReplacementHost) {
+                $freshInitializedDataState = @(
+                    Get-FreshReplacementDataState -DataRoot $DataRoot
+                )
+                if ($freshInitializedDataState.Count -eq 0) {
+                    throw 'Fresh replacement startup self-test created no DataRoot state.'
+                }
+            }
         }
 
         if ($RestoreHubData) {
@@ -521,6 +731,14 @@ try {
             Assert-GitHubAsset -Asset $hubManifestAssets[0] -Path $hubSidecar
             $hubManifest = Get-Content -LiteralPath $hubSidecar -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-SidecarFile -Manifest $hubManifest -PayloadPath $hubSnapshot -ExpectedFilename $hubName
+            if ($FreshReplacementHost) {
+                [void](Assert-FreshReplacementHostState `
+                    -InstallRoot $InstallRoot `
+                    -DataRoot $DataRoot `
+                    -TaskName $TaskName `
+                    -Port $Port `
+                    -ExpectedDataState $freshInitializedDataState)
+            }
             $previousDataRoot = [Environment]::GetEnvironmentVariable('STORYFORGE_DATA_DIR', 'Process')
             try {
                 $env:STORYFORGE_DATA_DIR = $DataRoot
@@ -553,7 +771,10 @@ try {
         $hubLauncher = Join-Path $InstallRoot 'Start-StoryForge-Hub.ps1'
         $launcherLines = @(
             '$ErrorActionPreference = ''Stop''',
+            '$env:STORYFORGE_DEPLOYMENT_ROLE = ''Hub''',
             "`$env:STORYFORGE_DATA_DIR = '$DataRoot'",
+            'Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue',
+            'Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue',
             "& '$entrypoint' --web --web-host 0.0.0.0 --web-port $Port",
             'exit $LASTEXITCODE'
         )
@@ -616,14 +837,14 @@ try {
         ) {
             throw "Unknown process is listening on TCP port $Port. PID=$($listenerProcess.ProcessId); exe=$actualExecutable"
         }
-        Write-DesktopLauncher -Destination $desktopLauncherPath -Entrypoint $entrypoint
+        Write-DesktopLauncher -Destination $desktopLauncherPath -Entrypoint $entrypoint -Role 'Hub' -DataRoot $DataRoot
         Write-DeploymentPointer -Destination $pointerPath -Value $pointer
         $hubProvisioningComplete = $true
         Write-Host "StoryForge Hub $version is ready: http://127.0.0.1:$Port/"
     }
     else {
         # Employee package validation has completed before publishing the pointer.
-        Write-DesktopLauncher -Destination $desktopLauncherPath -Entrypoint $entrypoint
+        Write-DesktopLauncher -Destination $desktopLauncherPath -Entrypoint $entrypoint -Role 'Employee'
         Write-DeploymentPointer -Destination $pointerPath -Value $pointer
         Write-Host "StoryForge Employee $version is installed: $entrypoint"
         Write-Host "Start it with: $(Join-Path $InstallRoot 'Start-StoryForge.cmd')"

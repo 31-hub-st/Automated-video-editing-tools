@@ -386,6 +386,346 @@ class StartupDiagnosticsTests(unittest.TestCase):
         unblock.assert_called_once_with(data_root)
         self.assertIn("--disable-gpu", browser_arguments)
 
+    def test_frozen_web_records_only_a_preconfigured_data_root_as_hub_authority(
+        self,
+    ) -> None:
+        configured_root = Path("D:/StoryForgeHub/Data").resolve(strict=False)
+
+        def configure_after_startup(_argv):
+            run.os.environ["STORYFORGE_DATA_DIR"] = str(configured_root)
+            return configured_root
+
+        with (
+            patch.object(run.sys, "frozen", True, create=True),
+            patch.object(
+                run.sys,
+                "argv",
+                ["StoryForge Studio.exe", "--web"],
+            ),
+            patch.dict(
+                run.os.environ,
+                {"STORYFORGE_FROZEN_HUB_DATA_ROOT": "forged-stale-value"},
+                clear=True,
+            ),
+            patch(
+                "storyforge.portable.configure_runtime_environment",
+                side_effect=configure_after_startup,
+            ),
+            patch(
+                "storyforge.component_updater.activate_component_runtime_from_environment"
+            ),
+            patch("storyforge.main.main", return_value=0),
+        ):
+            self.assertEqual(run._run(), 0)
+            self.assertNotIn(
+                "STORYFORGE_FROZEN_HUB_DATA_ROOT",
+                run.os.environ,
+            )
+
+        with (
+            patch.object(run.sys, "frozen", True, create=True),
+            patch.object(
+                run.sys,
+                "argv",
+                ["StoryForge Studio.exe", "--web"],
+            ),
+            patch.dict(
+                run.os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": str(configured_root),
+                    "STORYFORGE_DEPLOYMENT_ROLE": "Hub",
+                },
+                clear=True,
+            ),
+            patch(
+                "storyforge.portable.configure_runtime_environment",
+                return_value=configured_root,
+            ),
+            patch(
+                "storyforge.component_updater.activate_component_runtime_from_environment"
+            ),
+            patch("storyforge.main.main", return_value=0),
+        ):
+            self.assertEqual(run._run(), 0)
+            self.assertEqual(
+                run.os.environ.get("STORYFORGE_FROZEN_HUB_DATA_ROOT"),
+                str(configured_root),
+            )
+
+    def test_frozen_data_root_without_hub_deployment_role_is_not_authorized(
+        self,
+    ) -> None:
+        configured_root = Path("D:/Employee/StoryForgeData").resolve(strict=False)
+        with (
+            patch.object(run.sys, "frozen", True, create=True),
+            patch.dict(
+                run.os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": str(configured_root),
+                    "STORYFORGE_DEPLOYMENT_ROLE": "Employee",
+                    "STORYFORGE_FROZEN_HUB_DATA_ROOT": "stale-forged-value",
+                },
+                clear=True,
+            ),
+        ):
+            self.assertIsNone(run._record_frozen_hub_data_root_authorization())
+            self.assertNotIn(
+                "STORYFORGE_FROZEN_HUB_DATA_ROOT",
+                run.os.environ,
+            )
+
+    def test_frozen_employee_child_cannot_promote_inherited_data_root_to_hub(
+        self,
+    ) -> None:
+        previous_tempdir = tempfile.tempdir
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                install = Path(temporary) / "Employee"
+                install.mkdir()
+                executable = install / "StoryForge Studio.exe"
+                executable.write_bytes(b"exe")
+                (install / "storyforge-connection.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "endpoint": "http://10.0.0.225:8765",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                sidecar = install / "StoryForgeData"
+                with (
+                    patch.object(run.sys, "frozen", True, create=True),
+                    patch.object(run.sys, "executable", str(executable)),
+                    patch.object(run.sys, "argv", [str(executable)]),
+                    patch.dict(
+                        run.os.environ,
+                        {
+                            "STORYFORGE_DATA_DIR": str(sidecar),
+                            "STORYFORGE_PORTABLE_MODE": "1",
+                            "STORYFORGE_FROZEN_HUB_DATA_ROOT": "stale-forged-value",
+                        },
+                        clear=True,
+                    ),
+                    patch(
+                        "storyforge.component_updater.activate_component_runtime_from_environment"
+                    ),
+                    patch(
+                        "storyforge.windows_bootstrap.unblock_frozen_installation"
+                    ),
+                    patch("storyforge.main.main", return_value=0),
+                ):
+                    self.assertEqual(run._run(), 0)
+                    self.assertNotIn(
+                        "STORYFORGE_FROZEN_HUB_DATA_ROOT",
+                        run.os.environ,
+                    )
+                    self.assertEqual(
+                        run.os.environ.get("STORYFORGE_PORTABLE_MODE"),
+                        "1",
+                    )
+        finally:
+            tempfile.tempdir = previous_tempdir
+
+    def test_hub_web_mode_does_not_acquire_production_worker_mutex(self) -> None:
+        fake_api = unittest.mock.Mock()
+        fake_api._queue = unittest.mock.Mock()
+        fake_api._state.settings = SimpleNamespace()
+        fake_api._repository.data_dir = Path("data")
+        fake_api._heavy_resource_lock = threading.Lock()
+        fake_api._runtime_hub_mode = "host"
+        fake_api._enable_web_access.return_value = {
+            "url": "http://127.0.0.1:8765"
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "storyforge.portable.ensure_deferred_migration_complete"
+            ),
+            patch("storyforge.worker.ProductionWorkerMutex") as mutex,
+            patch("storyforge.api.StoryForgeApi", return_value=fake_api) as api_factory,
+            patch("storyforge.pipeline.PipelineRunner"),
+            patch.object(
+                storyforge_main,
+                "resource_path",
+                return_value=Path(temporary) / "index.html",
+            ),
+            patch.object(storyforge_main, "_wait_for_stop"),
+            patch.object(storyforge_main, "_PROCESS_WORKER_MUTEX", None),
+            redirect_stdout(io.StringIO()),
+        ):
+            (Path(temporary) / "index.html").write_text("UI", encoding="utf-8")
+            result = storyforge_main.main(["--web"])
+
+        self.assertEqual(result, 0)
+        mutex.assert_not_called()
+        api_factory.assert_called_once_with(
+            hub_listen_host=None,
+            hub_listen_port=None,
+            local_production_enabled=False,
+        )
+        fake_api._queue.set_processor.assert_not_called()
+        fake_api._shutdown.assert_called_once_with()
+
+    def test_local_worker_still_acquires_production_worker_mutex(self) -> None:
+        ownership = unittest.mock.Mock()
+        ownership.acquire.return_value = True
+        fake_api = unittest.mock.Mock()
+        fake_api._queue = unittest.mock.Mock()
+        fake_api._state.settings = SimpleNamespace()
+        fake_api._repository.data_dir = Path("data")
+        fake_api._heavy_resource_lock = threading.Lock()
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "storyforge.worker.discover_local_production_worker",
+                return_value=None,
+            ),
+            patch(
+                "storyforge.portable.ensure_deferred_migration_complete"
+            ),
+            patch(
+                "storyforge.worker.ProductionWorkerMutex",
+                return_value=ownership,
+            ) as mutex,
+            patch("storyforge.config.default_data_dir", return_value=Path("data")),
+            patch("storyforge.api.StoryForgeApi", return_value=fake_api),
+            patch("storyforge.pipeline.PipelineRunner"),
+            patch.object(
+                storyforge_main,
+                "resource_path",
+                return_value=Path(temporary) / "index.html",
+            ),
+            patch.object(storyforge_main, "_run_local_worker_service"),
+            patch.object(storyforge_main, "_PROCESS_WORKER_MUTEX", None),
+        ):
+            (Path(temporary) / "index.html").write_text("UI", encoding="utf-8")
+            result = storyforge_main.main(["--local-worker"])
+
+        self.assertEqual(result, 0)
+        mutex.assert_called_once_with(Path("data"))
+        ownership.acquire.assert_called_once_with()
+        fake_api._shutdown.assert_called_once_with()
+
+    def test_desktop_still_acquires_production_worker_mutex(self) -> None:
+        ownership = unittest.mock.Mock()
+        ownership.acquire.return_value = True
+        fake_api = unittest.mock.Mock()
+        fake_api._queue = unittest.mock.Mock()
+        fake_api._state.settings = SimpleNamespace()
+        fake_api._repository.data_dir = Path("data")
+        fake_api._heavy_resource_lock = threading.Lock()
+        fake_api._runtime_hub_mode = "local"
+        fake_api._enable_web_access.return_value = None
+        window = object()
+        fake_webview = SimpleNamespace(
+            create_window=unittest.mock.Mock(return_value=window),
+            start=unittest.mock.Mock(),
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "storyforge.worker.discover_local_production_worker",
+                return_value=None,
+            ),
+            patch(
+                "storyforge.portable.ensure_deferred_migration_complete"
+            ),
+            patch(
+                "storyforge.worker.ProductionWorkerMutex",
+                return_value=ownership,
+            ) as mutex,
+            patch("storyforge.config.default_data_dir", return_value=Path("data")),
+            patch("storyforge.api.StoryForgeApi", return_value=fake_api),
+            patch("storyforge.pipeline.PipelineRunner"),
+            patch("storyforge.desktop_bridge.StoryForgeDesktopBridge"),
+            patch.object(
+                storyforge_main,
+                "resource_path",
+                return_value=Path(temporary) / "index.html",
+            ),
+            patch.object(storyforge_main, "_PROCESS_WORKER_MUTEX", None),
+            patch.dict("sys.modules", {"webview": fake_webview}),
+        ):
+            (Path(temporary) / "index.html").write_text("UI", encoding="utf-8")
+            result = storyforge_main.main([])
+
+        self.assertEqual(result, 0)
+        mutex.assert_called_once_with(Path("data"))
+        ownership.acquire.assert_called_once_with()
+        fake_api._attach_window.assert_called_once_with(window)
+        fake_api._shutdown.assert_called_once_with()
+
+    def test_hub_desktop_stays_management_only_when_hub_and_worker_are_running(
+        self,
+    ) -> None:
+        fake_api = unittest.mock.Mock()
+        fake_api._queue = unittest.mock.Mock()
+        fake_api._state.settings = SimpleNamespace()
+        fake_api._repository.data_dir = Path("hub-data")
+        fake_api._heavy_resource_lock = threading.Lock()
+        fake_api._runtime_hub_mode = "host"
+        fake_api._enable_web_access.side_effect = RuntimeError(
+            "Hub port is already owned by the background service"
+        )
+        window = object()
+        fake_webview = SimpleNamespace(
+            create_window=unittest.mock.Mock(return_value=window),
+            start=unittest.mock.Mock(),
+        )
+        existing_worker = {
+            "ready": True,
+            "worker_role": "production-workstation",
+            "endpoint": "http://127.0.0.1:18765",
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(
+                storyforge_main.os.environ,
+                {"STORYFORGE_DEPLOYMENT_ROLE": "Hub"},
+                clear=True,
+            ),
+            patch(
+                "storyforge.worker.discover_local_production_worker",
+                return_value=existing_worker,
+            ) as discover_worker,
+            patch.object(
+                storyforge_main, "_open_existing_worker_window"
+            ) as open_worker,
+            patch(
+                "storyforge.portable.ensure_deferred_migration_complete"
+            ),
+            patch("storyforge.worker.ProductionWorkerMutex") as mutex,
+            patch(
+                "storyforge.api.StoryForgeApi", return_value=fake_api
+            ) as api_factory,
+            patch("storyforge.pipeline.PipelineRunner") as pipeline,
+            patch("storyforge.desktop_bridge.StoryForgeDesktopBridge"),
+            patch.object(
+                storyforge_main,
+                "resource_path",
+                return_value=Path(temporary) / "index.html",
+            ),
+            patch.object(storyforge_main, "_PROCESS_WORKER_MUTEX", None),
+            patch.dict("sys.modules", {"webview": fake_webview}),
+        ):
+            (Path(temporary) / "index.html").write_text("UI", encoding="utf-8")
+            result = storyforge_main.main([])
+
+        self.assertEqual(result, 0)
+        discover_worker.assert_not_called()
+        open_worker.assert_not_called()
+        mutex.assert_not_called()
+        api_factory.assert_called_once_with(
+            hub_listen_host=None,
+            hub_listen_port=None,
+            local_production_enabled=False,
+        )
+        pipeline.assert_not_called()
+        fake_api._queue.set_processor.assert_not_called()
+        fake_api._attach_window.assert_called_once_with(window)
+        fake_api._shutdown.assert_called_once_with()
+
     def test_frozen_stability_gate_dispatches_after_portable_setup(self) -> None:
         with (
             patch.object(

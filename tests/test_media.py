@@ -696,6 +696,37 @@ class MusicSelectionTests(unittest.TestCase):
 
 
 class FFmpegPlanningTests(unittest.TestCase):
+    def test_intro_logo_and_cover_share_the_absolute_display_window(self) -> None:
+        base = Path("C:/StoryForge/timed-intro")
+        plan = build_ffmpeg_plan(
+            [VideoSegment(base / "source.mp4", 20.0, 20.0)],
+            base / "voice.wav",
+            None,
+            base / "captions.ass",
+            base / "output.mp4",
+            20.0,
+            platform_logo_path=base / "logo.png",
+            platform_logo_start=6.25,
+            platform_logo_duration=4.5,
+            intro_card_cover_path=base / "cover.png",
+            intro_card_cover_start=6.25,
+            intro_card_cover_duration=4.5,
+        )
+
+        self.assertIn("enable='between(t,6.25,10.75)'", plan.filter_complex)
+        self.assertEqual(plan.filter_complex.count("between(t,6.25,10.75)"), 2)
+        with self.assertRaisesRegex(ValueError, "platform_logo_start"):
+            build_ffmpeg_plan(
+                [VideoSegment(base / "source.mp4", 20.0, 20.0)],
+                base / "voice.wav",
+                None,
+                base / "captions.ass",
+                base / "output.mp4",
+                20.0,
+                platform_logo_path=base / "logo.png",
+                platform_logo_start=float("nan"),
+            )
+
     def test_low_memory_segment_plan_opens_one_input_and_bounds_threads(self) -> None:
         base = Path("C:/Story Forge/low memory")
         segment = VideoSegment(

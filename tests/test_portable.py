@@ -58,6 +58,197 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                 )
                 self.assertFalse((executable.parent / "StoryForgeData").exists())
 
+    def test_frozen_employee_never_migrates_a_legacy_hub_data_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install = root / "Employee Install"
+            install.mkdir()
+            executable = install / "StoryForge Studio.exe"
+            executable.write_bytes(b"exe")
+            (install / "storyforge-connection.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "endpoint": "http://10.0.0.225:8765",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            roaming = root / "Roaming"
+            local = root / "Local"
+            legacy = roaming / "StoryForgeStudio"
+            legacy.mkdir(parents=True)
+            (legacy / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 14,
+                        "settings": {
+                            "language": "legacy-host-language",
+                            "hub": {
+                                "mode": "host",
+                                "endpoint": "http://127.0.0.1:8765",
+                                "access_token": "protected-host-token",
+                                "account_username": "hub-admin",
+                                "installation_id": "hub-installation",
+                                "device_id": "hub-device",
+                                "applied_config_revision_id": "hub-revision",
+                                "applied_config_hash": "hub-config-hash",
+                                "listen_host": "0.0.0.0",
+                                "listen_port": 8765,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            database = legacy / "storyforge-catalog.sqlite3"
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE host_only(value TEXT)")
+                connection.execute("INSERT INTO host_only VALUES ('must-not-copy')")
+                connection.commit()
+            finally:
+                connection.close()
+            host_cache = legacy / "cache" / "host-cache.bin"
+            host_cache.parent.mkdir()
+            host_cache.write_bytes(b"must remain with the legacy Hub")
+            legacy_local = local / "StoryForgeStudio"
+            legacy_local.mkdir(parents=True)
+            local_payload = legacy_local / "host-runtime.json"
+            local_payload.write_text("{}", encoding="utf-8")
+
+            environment = {
+                "APPDATA": str(roaming),
+                "LOCALAPPDATA": str(local),
+                "STORYFORGE_DATA_DIR": "",
+                "STORYFORGE_PORTABLE_MODE": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch("storyforge.portable._active_legacy_worker", return_value=False),
+            ):
+                configured = configure_runtime_environment(
+                    [], frozen=True, executable=executable
+                )
+
+            expected = install / "StoryForgeData"
+            self.assertEqual(configured, expected)
+            self.assertFalse((expected / "settings.json").exists())
+            self.assertFalse((expected / "storyforge-catalog.sqlite3").exists())
+            self.assertFalse((expected / "host-runtime.json").exists())
+            self.assertTrue(database.is_file())
+            self.assertTrue(host_cache.is_file())
+            self.assertTrue(local_payload.is_file())
+            marker = json.loads(
+                (expected / MIGRATION_MARKER).read_text(encoding="utf-8")
+            )
+            self.assertTrue(marker["completed"])
+            self.assertEqual(marker["copied_file_count"], 0)
+            self.assertEqual(
+                {Path(item) for item in marker["skipped_legacy_host_roots"]},
+                {legacy.resolve(), legacy_local.resolve()},
+            )
+
+    def test_frozen_employee_skips_legacy_catalog_when_role_is_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            roaming = root / "Roaming"
+            local = root / "Local"
+            legacy = roaming / "StoryForgeStudio"
+            legacy_local = local / "StoryForgeStudio"
+            legacy.mkdir(parents=True)
+            legacy_local.mkdir(parents=True)
+            (legacy / "settings.json").write_text(
+                '{"settings":{"hub":{"mode":"unknown"}',
+                encoding="utf-8",
+            )
+            database = legacy / "storyforge-catalog.sqlite3"
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE authority(value TEXT)")
+                connection.execute("INSERT INTO authority VALUES ('must-not-copy')")
+                connection.commit()
+            finally:
+                connection.close()
+            local_payload = legacy_local / "host-runtime.json"
+            local_payload.write_text("{}", encoding="utf-8")
+            target = root / "Employee" / "StoryForgeData"
+            target.mkdir(parents=True)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "APPDATA": str(roaming),
+                        "LOCALAPPDATA": str(local),
+                    },
+                    clear=False,
+                ),
+                patch("storyforge.portable._active_legacy_worker", return_value=False),
+            ):
+                result = migrate_legacy_employee_data(target)
+
+            self.assertTrue(result["completed"])
+            self.assertEqual(result["legacy_skip_reason"], "unclassified_catalog_role")
+            self.assertEqual(result["sources"], [])
+            self.assertEqual(result["copied_file_count"], 0)
+            self.assertEqual(
+                {Path(item) for item in result["skipped_legacy_roots"]},
+                {legacy.resolve(), legacy_local.resolve()},
+            )
+            self.assertFalse((target / "settings.json").exists())
+            self.assertFalse((target / "storyforge-catalog.sqlite3").exists())
+            self.assertFalse((target / "host-runtime.json").exists())
+            self.assertTrue(database.is_file())
+            self.assertTrue(local_payload.is_file())
+
+    def test_legacy_local_role_still_migrates_its_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            roaming = root / "Roaming"
+            legacy = roaming / "StoryForgeStudio"
+            legacy.mkdir(parents=True)
+            (legacy / "settings.json").write_text(
+                json.dumps({"settings": {"hub": {"mode": "local"}}}),
+                encoding="utf-8",
+            )
+            database = legacy / "storyforge-catalog.sqlite3"
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE local_work(value TEXT)")
+                connection.execute("INSERT INTO local_work VALUES ('migrated')")
+                connection.commit()
+            finally:
+                connection.close()
+            target = root / "Employee" / "StoryForgeData"
+            target.mkdir(parents=True)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "APPDATA": str(roaming),
+                        "LOCALAPPDATA": str(root / "Local"),
+                    },
+                    clear=False,
+                ),
+                patch("storyforge.portable._active_legacy_worker", return_value=False),
+            ):
+                result = migrate_legacy_employee_data(target)
+
+            self.assertTrue(result["completed"])
+            self.assertEqual(result["legacy_skip_reason"], "")
+            self.assertTrue((target / "settings.json").is_file())
+            migrated = sqlite3.connect(target / "storyforge-catalog.sqlite3")
+            try:
+                self.assertEqual(
+                    migrated.execute("SELECT value FROM local_work").fetchone()[0],
+                    "migrated",
+                )
+            finally:
+                migrated.close()
+
     def test_frozen_employee_routes_every_runtime_cache_beside_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -73,7 +264,22 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
             legacy = roaming / "StoryForgeStudio"
             legacy.mkdir(parents=True)
             (legacy / "settings.json").write_text(
-                json.dumps({"settings": {"hub": {"mode": "client"}}}),
+                json.dumps(
+                    {
+                        "settings": {
+                            "hub": {
+                                "mode": "client",
+                                "endpoint": "http://10.0.0.225:8765",
+                                "access_token": "protected-client-token",
+                                "account_username": "renderer",
+                                "installation_id": "employee-installation",
+                                "device_id": "employee-device",
+                                "listen_host": "127.0.0.1",
+                                "listen_port": 18000,
+                            }
+                        }
+                    }
+                ),
                 encoding="utf-8",
             )
             (legacy / "runtime-logs").mkdir()
@@ -168,6 +374,22 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                 self.assertEqual(tempfile.gettempdir(), str(expected / "runtime-temp"))
 
                 self.assertTrue((expected / "settings.json").is_file())
+                migrated_settings = json.loads(
+                    (expected / "settings.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    migrated_settings["settings"]["hub"],
+                    {
+                        "mode": "client",
+                        "endpoint": "http://10.0.0.225:8765",
+                        "access_token": "protected-client-token",
+                        "account_username": "renderer",
+                        "installation_id": "employee-installation",
+                        "device_id": "employee-device",
+                        "listen_host": "127.0.0.1",
+                        "listen_port": 18000,
+                    },
+                )
                 self.assertTrue((expected / "runtime-logs" / "worker.log").is_file())
                 self.assertFalse((expected / "updates" / "pending.zip").exists())
                 self.assertFalse((expected / "render-work" / "partial.mp4").exists())
@@ -460,6 +682,82 @@ class PortableEmployeeRuntimeTests(unittest.TestCase):
                 self.assertEqual(configured, target)
                 self.assertEqual(os.environ["TEMP"], str(target / "runtime-temp"))
                 self.assertNotIn("STORYFORGE_PORTABLE_MODE", os.environ)
+
+    def test_authorized_frozen_hub_gui_is_not_employee_portable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install = root / "Hub"
+            install.mkdir()
+            executable = install / "StoryForge Studio.exe"
+            executable.write_bytes(b"exe")
+            (install / "storyforge-connection.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "endpoint": "http://10.0.0.225:8765",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            target = root / "HubData"
+            authorized = str(target.resolve(strict=False))
+            with patch.dict(
+                os.environ,
+                {
+                    "STORYFORGE_DATA_DIR": authorized,
+                    "STORYFORGE_FROZEN_HUB_DATA_ROOT": authorized,
+                    "STORYFORGE_DEPLOYMENT_ROLE": "Hub",
+                    "STORYFORGE_PORTABLE_MODE": "1",
+                },
+                clear=False,
+            ):
+                configured = configure_runtime_environment(
+                    [], frozen=True, executable=executable
+                )
+
+                self.assertEqual(configured, target.resolve(strict=False))
+                self.assertNotIn("STORYFORGE_PORTABLE_MODE", os.environ)
+                self.assertFalse((target / MIGRATION_MARKER).exists())
+
+    def test_mismatched_hub_authorization_remains_employee_portable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install = root / "Employee"
+            install.mkdir()
+            executable = install / "StoryForge Studio.exe"
+            executable.write_bytes(b"exe")
+            (install / "storyforge-connection.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "endpoint": "http://10.0.0.225:8765",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            target = root / "EmployeeData"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "STORYFORGE_DATA_DIR": str(target),
+                        "STORYFORGE_FROZEN_HUB_DATA_ROOT": str(root / "OtherData"),
+                        "STORYFORGE_PORTABLE_MODE": "",
+                    },
+                    clear=False,
+                ),
+                patch(
+                    "storyforge.portable.migrate_legacy_employee_data",
+                    return_value={"completed": True, "errors": []},
+                ) as migrate,
+            ):
+                configured = configure_runtime_environment(
+                    [], frozen=True, executable=executable
+                )
+
+                self.assertEqual(configured, target.resolve(strict=False))
+                self.assertEqual(os.environ["STORYFORGE_PORTABLE_MODE"], "1")
+                migrate.assert_not_called()
 
     def test_read_only_selected_root_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

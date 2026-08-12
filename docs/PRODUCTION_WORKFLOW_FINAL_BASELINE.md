@@ -1,8 +1,8 @@
 # StoryForge 制作流程最终需求与接口基线
 
-更新日期：2026-08-01
+更新日期：2026-08-12
 
-适用版本：StoryForge Studio `v1.0.1`
+适用版本：StoryForge Studio `v1.0.2`
 
 用途：后续版本验收、迁移或嫁接到其他程序时，以本文件作为制作流程的当前基线。
 
@@ -73,7 +73,8 @@
   - `single`：画面只显示当前朗读单词。
 - `subtitle_word_mode=off` 时使用普通字幕。
 - 字幕模式和样式默认沿用员工上次选择。
-- 顶部搜索口令持续展示；口令值允许字母、数字及混合内容。
+- 简介卡和顶部口令卡都有独立开关、绝对开始时间和显示时长；绝对时间从成片第 `0` 秒起算，口令卡时长为 `0` 时持续到视频结尾。关闭任一卡片不影响另一张卡片、旁白或字幕；口令值允许字母、数字及混合内容。
+- 平台搜索文案和结尾引导文案默认从管理员维护的平台模板解析；员工可为单个批次填写覆盖文案，覆盖内容随任务冻结，不修改团队平台模板。
 - 素材原声始终删除；非 9:16 素材使用模糊背景保留完整画面。
 - 封面结尾可启用或关闭；启用时封面动画铺满全屏，CTA 由旁白和字幕继续展示，不再使用简陋平台结尾卡。
 
@@ -101,7 +102,7 @@
 
 - 角色只有管理员和员工。
 - 管理员维护小说、平台、口令、成员、Hub、团队预设和全部记录。
-- 员工可制作、试听、调整本批设置、管理本机目录、查看/重试自己的任务和更新自己的电脑；不能修改小说、平台和口令。
+- 员工可制作、试听、调整本批设置、管理本机目录、查看/重试自己的任务和更新自己的电脑。员工可为自己的单个批次覆盖平台搜索文案和结尾引导文案，但不能修改小说、团队平台模板和历史口令，也不因此获得 `platforms.manage`；团队模板仍由管理员管理。
 - 员工只用 8 位账号密码登录；新员工默认密码 `xs123456`。人工操作中不显示或要求令牌。
 - 每台员工电脑安装 StoryForge 一次。桌面和该电脑上的网页入口使用相同功能；网页任务仍由当前员工电脑的本机制作服务执行。
 - 员工电脑路径在发送 Hub 前替换为 `worker://` 引用，Hub 不保存其他电脑的绝对路径。
@@ -111,7 +112,7 @@
 ## 10. 预设与偏好
 
 - 一套方案可保存配音节奏、字幕、卡片、画面、BGM 模式、视频速度、转场和输出设置。
-- 团队默认由管理员在设置中维护，只影响之后新建的批次；制作台仍可覆盖本批参数。
+- 团队默认和平台模板由管理员在设置中维护，只影响之后新建的批次；制作台仍可覆盖本批参数，但本批平台文案覆盖不回写团队平台模板。
 - 员工可创建、修改和删除自己的个人方案；管理员可查看和删除全部成员方案。旧版内置、团队共享和无所有者方案均不再显示。
 - 制作方式、口令、音色、语速、字幕模式、视频速度、转场、BGM 和本机目录默认沿用员工/小说/平台对应的上次选择；分集每批重新确认。
 
@@ -125,7 +126,15 @@ production_settings.video_transition
 production_settings.subtitle_word_mode
 production_settings.bgm_mode
 production_settings.bgm_file
+production_settings.intro_card_enabled
+production_settings.intro_card_start_seconds
+production_settings.intro_card_duration_seconds
+production_settings.code_card_enabled
+production_settings.code_card_start_seconds
+production_settings.code_card_duration_seconds
 production_settings.cover_outro_enabled
+platform_search_text
+platform_ending_text
 source_narration_audio
 target_video_count
 episode_ids
@@ -146,13 +155,23 @@ video_playback_speed = number 0.8..3.0
 video_transition = cut | fade
 subtitle_word_mode = off | cumulative | single
 bgm_mode = auto | manual | none
+intro_card_enabled = true | false
+intro_card_start_seconds = number >= 0
+intro_card_duration_seconds = number 2.5..8.0
+code_card_enabled = true | false
+code_card_start_seconds = number >= 0
+code_card_duration_seconds = number >= 0（0 表示持续到视频结尾）
 ```
 
 `video_and_mp3` 是为兼容既有接口保留的枚举名，当前语义为“常规视频生成且只交付 MP4”，不得根据名称推断还会输出 MP3。
 
 所有提交任务必须冻结上述制作设置。已经排队的任务不得被下一批界面修改。
 
+旧草稿和已冻结作业缺少新增卡片字段时，使用兼容默认值继续读取和执行；兼容读取不得回写旧作业。`platform_search_text` 与 `platform_ending_text` 为空时使用团队平台模板，非空时只作为本批覆盖。
+
 ## 12. 当前验收结论
+
+本节记录既有基线证据；本次新增卡片时间与本批平台文案合同仍须以 `v1.0.2` 的完整测试、构建和发布门结果为准，本文件本身不代表版本已经构建或发布。
 
 - 编译检查通过。
 - 媒体、字幕、配音、生产管线、资料库、预设、UI、Hub、员工本机 Worker 与网页协同测试通过。

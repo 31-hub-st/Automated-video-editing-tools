@@ -298,11 +298,19 @@ def main(argv: list[str] | None = None) -> int:
             args.startup_self_test,
             ui_root=resource_path("ui"),
         )
-    if not args.web_only:
+    hub_deployment = (
+        str(os.environ.get("STORYFORGE_DEPLOYMENT_ROLE") or "").strip().casefold()
+        == "hub"
+    )
+    local_production_enabled = not args.web_only and not hub_deployment
+    if local_production_enabled:
         # The long-running local Worker is the sole owner of this computer's
         # render queue.  The desktop executable is only a viewer/client when
         # that Worker already exists; it must never stop an idle Worker and
         # create a second queue owner merely because a window was opened.
+        # An official Hub deployment remains a management-only process even
+        # when opened as a desktop GUI, so it must not discover or open an
+        # employee production Worker on the same computer.
         from .worker import (
             discover_local_production_worker,
             pause_local_worker_autostart_for_desktop,
@@ -353,29 +361,37 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
 
-    # Port discovery has a check-then-bind race. A scheduled Worker and the
-    # desktop can both see no listener and otherwise start two queues on
-    # adjacent ports. Acquire the per-data-directory mutex before constructing
-    # StoryForgeApi; the loser waits for and opens the sole owner.
-    from .config import default_data_dir
-    from .worker import ProductionWorkerMutex, wait_for_local_production_worker
-
-    ownership = ProductionWorkerMutex(default_data_dir())
-    if not ownership.acquire():
-        existing_worker = wait_for_local_production_worker(timeout_seconds=25.0)
-        if (
-            not args.local_worker
-            and not args.web_only
-            and existing_worker
-            and existing_worker.get("endpoint")
-        ):
-            return _open_existing_worker_window(
-                existing_worker["endpoint"], debug=args.debug
-            )
-        raise SystemExit(
-            "StoryForge 本机制作服务正在启动，请稍候几秒后重新打开；已有任务不会中断。"
+    if local_production_enabled:
+        # Port discovery has a check-then-bind race. A scheduled Worker and the
+        # desktop can both see no listener and otherwise start two queues on
+        # adjacent ports. Acquire the machine-wide production-worker mutex
+        # before constructing StoryForgeApi; the loser opens the sole owner.
+        # A Hub deployment does not own the local render queue, whether it was
+        # opened as a browser service or desktop management UI, and must leave
+        # this mutex available to an employee Worker on the same machine.
+        from .config import default_data_dir
+        from .worker import (
+            ProductionWorkerMutex,
+            wait_for_local_production_worker,
         )
-    _PROCESS_WORKER_MUTEX = ownership
+
+        ownership = ProductionWorkerMutex(default_data_dir())
+        if not ownership.acquire():
+            existing_worker = wait_for_local_production_worker(
+                timeout_seconds=25.0
+            )
+            if (
+                not args.local_worker
+                and existing_worker
+                and existing_worker.get("endpoint")
+            ):
+                return _open_existing_worker_window(
+                    existing_worker["endpoint"], debug=args.debug
+                )
+            raise SystemExit(
+                "StoryForge 本机制作服务正在启动，请稍候几秒后重新打开；已有任务不会中断。"
+            )
+        _PROCESS_WORKER_MUTEX = ownership
 
     from .api import StoryForgeApi
     from .pipeline import PipelineRunner
@@ -383,15 +399,17 @@ def main(argv: list[str] | None = None) -> int:
     api = StoryForgeApi(
         hub_listen_host=args.web_host,
         hub_listen_port=args.web_port,
+        local_production_enabled=local_production_enabled,
     )
-    api._queue.set_processor(
-        PipelineRunner(
-            lambda: api._state.settings,
-            text_provider_factory=api._runtime_text_provider_factory,
-            work_root=api._repository.data_dir / "render-work",
-            heavy_resource_lock=api._heavy_resource_lock,
+    if local_production_enabled:
+        api._queue.set_processor(
+            PipelineRunner(
+                lambda: api._state.settings,
+                text_provider_factory=api._runtime_text_provider_factory,
+                work_root=api._repository.data_dir / "render-work",
+                heavy_resource_lock=api._heavy_resource_lock,
+            )
         )
-    )
     page = resource_path("ui/index.html")
     api._desktop_ui_root = page.parent
     if not page.is_file():

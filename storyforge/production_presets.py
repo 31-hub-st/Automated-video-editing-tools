@@ -79,6 +79,9 @@ _PRODUCTION_NUMBERS: dict[str, tuple[float, float, bool]] = {
     # The full-screen cover ending is deliberately a brief 5–7 second CTA.
     "end_card_seconds": (5.0, 7.0, False),
     "intro_card_duration_seconds": (2.5, 8.0, False),
+    "intro_card_start_seconds": (0.0, math.inf, False),
+    "code_card_start_seconds": (0.0, math.inf, False),
+    "code_card_duration_seconds": (0.0, math.inf, False),
 }
 _ALLOWED_RECIPE_KEYS = frozenset(
     {"story_mood", "voice_profile", "target_video_count", "production_settings"}
@@ -112,12 +115,17 @@ _ALLOWED_PRODUCTION_SETTING_KEYS = frozenset(
         "outro_card_preset",
         "subtitle_animation",
         "intro_animation",
+        "intro_card_enabled",
+        "intro_card_start_seconds",
         "max_episode_minutes",
         "cover_animation",
         "cover_outro_enabled",
         "color_grade",
         "end_card_seconds",
         "intro_card_duration_seconds",
+        "code_card_enabled",
+        "code_card_start_seconds",
+        "code_card_duration_seconds",
         "render_mode",
         "video_template",
     }
@@ -371,7 +379,12 @@ def validate_production_preset(value: Mapping[str, Any], *, existing_id: str = "
         normalized_settings = normalize_retired_subtitle_settings(
             production_settings
         )
-        for boolean_key in ("export_narration_audio", "cover_outro_enabled"):
+        for boolean_key in (
+            "export_narration_audio",
+            "cover_outro_enabled",
+            "intro_card_enabled",
+            "code_card_enabled",
+        ):
             if boolean_key in normalized_settings and not isinstance(
                 normalized_settings[boolean_key], bool
             ):

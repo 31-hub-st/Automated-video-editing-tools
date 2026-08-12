@@ -37,7 +37,10 @@ if (-not (Test-Path -LiteralPath $DataPath -PathType Container)) {
     throw "StoryForge data directory not found: $DataPath"
 }
 
+$env:STORYFORGE_DEPLOYMENT_ROLE = "Hub"
 $env:STORYFORGE_DATA_DIR = $DataPath
+Remove-Item Env:STORYFORGE_FROZEN_HUB_DATA_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:STORYFORGE_PORTABLE_MODE -ErrorAction SilentlyContinue
 Push-Location -LiteralPath $InstallPath
 try {
     & $executable --web --web-host 0.0.0.0 --web-port $Port

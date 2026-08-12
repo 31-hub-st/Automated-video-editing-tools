@@ -16,6 +16,8 @@ from urllib.request import urlopen
 PORTABLE_DATA_DIRECTORY = "StoryForgeData"
 MIGRATION_MARKER = ".legacy-appdata-migration-v1.json"
 MIGRATION_LOCK = ".legacy-appdata-migration.lock"
+_FROZEN_HUB_DATA_ROOT_ENV = "STORYFORGE_FROZEN_HUB_DATA_ROOT"
+_DEPLOYMENT_ROLE_ENV = "STORYFORGE_DEPLOYMENT_ROLE"
 
 # These folders contain disposable process state. Copying an old update marker
 # can reinstall the release that just performed the migration, while copying a
@@ -88,31 +90,61 @@ def _has_employee_connection_profile(install_root: Path) -> bool:
     return (install_root / "storyforge-connection.json").is_file()
 
 
-def _legacy_mode_is_client() -> bool:
-    """Read only enough legacy state to identify an enrolled workstation.
+def _has_authorized_frozen_hub_data_root() -> bool:
+    """Return whether run.py authorized the exact explicit Hub DataRoot."""
+
+    configured = str(os.environ.get("STORYFORGE_DATA_DIR") or "").strip()
+    authorized = str(os.environ.get(_FROZEN_HUB_DATA_ROOT_ENV) or "").strip()
+    role = str(os.environ.get(_DEPLOYMENT_ROLE_ENV) or "").strip().casefold()
+    if role != "hub" or not configured or not authorized:
+        return False
+    return (
+        Path(configured).expanduser().resolve(strict=False)
+        == Path(authorized).expanduser().resolve(strict=False)
+    )
+
+
+def _settings_hub_mode(path: Path) -> str:
+    """Read only enough settings state to classify its Hub role.
 
     Very old settings files can contain text written by a broken Windows code
     page and are not always valid JSON. A narrow textual fallback therefore
     follows the normal JSON read.
     """
 
-    path = _legacy_roaming_data_dir() / "settings.json"
     try:
         content = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
-        return False
+        return ""
     try:
         raw = json.loads(content)
         settings = raw.get("settings") if isinstance(raw, dict) else None
         hub = settings.get("hub") if isinstance(settings, dict) else None
-        return bool(
-            isinstance(hub, dict)
-            and str(hub.get("mode") or "").strip().casefold() == "client"
+        mode = (
+            str(hub.get("mode") or "").strip().casefold()
+            if isinstance(hub, dict)
+            else ""
         )
+        return mode if mode in {"client", "host", "local"} else ""
     except (AttributeError, json.JSONDecodeError):
         compact = "".join(content.split()).casefold()
         hub_index = compact.find('"hub":{')
-        return hub_index >= 0 and '"mode":"client"' in compact[hub_index : hub_index + 3000]
+        if hub_index < 0:
+            return ""
+        hub_section = compact[hub_index : hub_index + 3000]
+        for mode in ("host", "client", "local"):
+            if f'"mode":"{mode}"' in hub_section:
+                return mode
+        return ""
+
+
+def _legacy_mode_is_client() -> bool:
+    """Return whether the old roaming profile is an enrolled workstation."""
+
+    return (
+        _settings_hub_mode(_legacy_roaming_data_dir() / "settings.json")
+        == "client"
+    )
 
 
 def should_use_portable_data(
@@ -149,6 +181,12 @@ def _is_employee_portable_runtime(
         return False
     if "--local-worker" in arguments:
         return True
+    # The same frozen bundle contains an employee connection profile even when
+    # installed as the Hub. run.py records this process-local authorization
+    # before portable setup; only an exact match lets the ordinary Hub desktop
+    # avoid employee migration and portable-mode restrictions.
+    if _has_authorized_frozen_hub_data_root():
+        return False
     root = portable_install_root(executable)
     return _has_employee_connection_profile(root) or _legacy_mode_is_client()
 
@@ -574,6 +612,7 @@ def migrate_legacy_employee_data(
             return result
 
         target_resolved = root.resolve(strict=False)
+        legacy_roots: list[Path] = []
         for legacy in (_legacy_roaming_data_dir(), _legacy_local_data_dir()):
             try:
                 legacy_resolved = legacy.resolve(strict=False)
@@ -581,6 +620,42 @@ def migrate_legacy_employee_data(
                 continue
             if legacy_resolved == target_resolved or not legacy_resolved.is_dir():
                 continue
+            legacy_roots.append(legacy_resolved)
+
+        # A packaged employee runtime must never clone a Hub installation into
+        # its EXE-adjacent data root. Roaming and Local AppData are two halves
+        # of one legacy installation, so classify and migrate them as a group.
+        # A catalog is copied only when settings prove the old role was client
+        # or standalone local. Host, missing, damaged and unknown roles all
+        # fail closed and preserve the complete group for an administrator.
+        legacy_modes = {
+            str(legacy): _settings_hub_mode(legacy / "settings.json")
+            for legacy in legacy_roots
+        }
+        legacy_host_detected = "host" in legacy_modes.values()
+        legacy_catalog_detected = any(
+            (legacy / "storyforge-catalog.sqlite3").is_file()
+            for legacy in legacy_roots
+        )
+        proven_employee_role = any(
+            mode in {"client", "local"} for mode in legacy_modes.values()
+        )
+        legacy_skip_reason = ""
+        if legacy_host_detected:
+            legacy_skip_reason = "host_role"
+        elif legacy_catalog_detected and not proven_employee_role:
+            legacy_skip_reason = "unclassified_catalog_role"
+        skipped_legacy_roots = (
+            [str(legacy) for legacy in legacy_roots]
+            if legacy_skip_reason
+            else []
+        )
+        skipped_legacy_host_roots = (
+            [str(legacy) for legacy in legacy_roots]
+            if legacy_host_detected
+            else []
+        )
+        for legacy_resolved in (() if legacy_skip_reason else legacy_roots):
             sources.append(str(legacy_resolved))
             for source, relative in _iter_legacy_files(legacy_resolved):
                 destination = root / relative
@@ -597,6 +672,9 @@ def migrate_legacy_employee_data(
             "copied_file_count": len(copied),
             "copied_files": sorted(set(copied), key=str.casefold),
             "skipped_transient_roots": sorted(_TRANSIENT_LEGACY_ROOTS),
+            "legacy_skip_reason": legacy_skip_reason,
+            "skipped_legacy_roots": skipped_legacy_roots,
+            "skipped_legacy_host_roots": skipped_legacy_host_roots,
             "legacy_preserved": True,
             "errors": errors,
         }

@@ -1011,6 +1011,22 @@ if (
     def test_legacy_ops_task_migrates_to_modern_launchers_without_touching_data(
         self,
     ) -> None:
+        self._assert_legacy_ops_task_migrates_without_touching_data(
+            argument_mode="full_quoted"
+        )
+
+    def test_simplified_legacy_ops_task_migrates_without_touching_data(
+        self,
+    ) -> None:
+        self._assert_legacy_ops_task_migrates_without_touching_data(
+            argument_mode="simplified_unquoted"
+        )
+
+    def _assert_legacy_ops_task_migrates_without_touching_data(
+        self,
+        *,
+        argument_mode: str,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve(strict=True)
             hub_root = root / "ManagedHub"
@@ -1046,10 +1062,19 @@ if (
                 "STORYFORGE_TEST_TARGET_APP": str(target_app),
                 "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
                 "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
+                "STORYFORGE_TEST_ARGUMENT_MODE": argument_mode,
             }
             harness = r"""
 $ErrorActionPreference = 'Stop'
-$legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765"
+if ($env:STORYFORGE_TEST_ARGUMENT_MODE -eq 'full_quoted') {
+    $legacyArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:STORYFORGE_TEST_LEGACY_WRAPPER`" -InstallPath `"$env:STORYFORGE_TEST_LEGACY_APP`" -DataPath `"$env:STORYFORGE_TEST_DATA_ROOT`" -Port 8765"
+}
+elseif ($env:STORYFORGE_TEST_ARGUMENT_MODE -eq 'simplified_unquoted') {
+    $legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765"
+}
+else {
+    throw 'Unknown isolated legacy argument mode.'
+}
 $global:StoryForgeSetCount = 0
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @([PSCustomObject]@{
@@ -1142,6 +1167,29 @@ if (
     ) -> None:
         for case in (
             "malformed_action",
+            "missing_no_logo",
+            "missing_no_profile",
+            "missing_non_interactive",
+            "missing_window_style",
+            "missing_execution_policy",
+            "missing_file",
+            "missing_install_path",
+            "missing_data_path",
+            "missing_port",
+            "extra_switch",
+            "duplicate_switch",
+            "hybrid_full_unquoted",
+            "hybrid_simplified_quoted",
+            "simplified_trailing_argument",
+            "simplified_wrong_argument_order",
+            "simplified_wrong_data_path",
+            "simplified_wrong_port",
+            "wrong_argument_order",
+            "wrong_window_style",
+            "wrong_wrapper_path",
+            "wrong_install_path",
+            "wrong_data_path",
+            "wrong_port",
             "partial_modern_state",
             "tampered_target",
             "foreign_principal",
@@ -1177,6 +1225,109 @@ if (
                     for path in hub_root.rglob("*")
                     if path.is_file()
                 }
+                wrapper_text = str(legacy_wrapper)
+                previous_app_text = str(previous_app)
+                data_root_text = str(data_root)
+                full_quoted_arguments = (
+                    "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden "
+                    "-ExecutionPolicy Bypass "
+                    f'-File "{wrapper_text}" '
+                    f'-InstallPath "{previous_app_text}" '
+                    f'-DataPath "{data_root_text}" -Port 8765'
+                )
+                simplified_unquoted_arguments = (
+                    "-NoProfile -ExecutionPolicy Bypass "
+                    f"-File {wrapper_text} "
+                    f"-InstallPath {previous_app_text} "
+                    f"-DataPath {data_root_text} -Port 8765"
+                )
+                legacy_argument_variants = {
+                    "malformed_action": full_quoted_arguments + " -Unexpected",
+                    "missing_no_logo": full_quoted_arguments.replace(
+                        "-NoLogo ", "", 1
+                    ),
+                    "missing_no_profile": full_quoted_arguments.replace(
+                        "-NoProfile ", "", 1
+                    ),
+                    "missing_non_interactive": full_quoted_arguments.replace(
+                        "-NonInteractive ", "", 1
+                    ),
+                    "missing_window_style": full_quoted_arguments.replace(
+                        "-WindowStyle Hidden ", "", 1
+                    ),
+                    "missing_execution_policy": full_quoted_arguments.replace(
+                        "-ExecutionPolicy Bypass ", "", 1
+                    ),
+                    "missing_file": full_quoted_arguments.replace(
+                        f'-File "{wrapper_text}" ', "", 1
+                    ),
+                    "missing_install_path": full_quoted_arguments.replace(
+                        f'-InstallPath "{previous_app_text}" ', "", 1
+                    ),
+                    "missing_data_path": full_quoted_arguments.replace(
+                        f'-DataPath "{data_root_text}" ', "", 1
+                    ),
+                    "missing_port": full_quoted_arguments.replace(
+                        " -Port 8765", "", 1
+                    ),
+                    "extra_switch": full_quoted_arguments + " -NoExit",
+                    "duplicate_switch": full_quoted_arguments.replace(
+                        "-NoLogo ", "-NoLogo -NoLogo ", 1
+                    ),
+                    "hybrid_full_unquoted": (
+                        "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden "
+                        "-ExecutionPolicy Bypass "
+                        f"-File {wrapper_text} "
+                        f"-InstallPath {previous_app_text} "
+                        f"-DataPath {data_root_text} -Port 8765"
+                    ),
+                    "hybrid_simplified_quoted": (
+                        "-NoProfile -ExecutionPolicy Bypass "
+                        f'-File "{wrapper_text}" '
+                        f'-InstallPath "{previous_app_text}" '
+                        f'-DataPath "{data_root_text}" -Port 8765'
+                    ),
+                    "simplified_trailing_argument": (
+                        simplified_unquoted_arguments + " -Unexpected"
+                    ),
+                    "simplified_wrong_argument_order": (
+                        simplified_unquoted_arguments.replace(
+                            "-NoProfile -ExecutionPolicy Bypass",
+                            "-ExecutionPolicy Bypass -NoProfile",
+                            1,
+                        )
+                    ),
+                    "simplified_wrong_data_path": (
+                        simplified_unquoted_arguments.replace(
+                            data_root_text, data_root_text + ".other", 1
+                        )
+                    ),
+                    "simplified_wrong_port": (
+                        simplified_unquoted_arguments.replace(
+                            "-Port 8765", "-Port 8766", 1
+                        )
+                    ),
+                    "wrong_argument_order": full_quoted_arguments.replace(
+                        "-NoLogo -NoProfile", "-NoProfile -NoLogo", 1
+                    ),
+                    "wrong_window_style": full_quoted_arguments.replace(
+                        "-WindowStyle Hidden", "-WindowStyle Normal", 1
+                    ),
+                    "wrong_wrapper_path": full_quoted_arguments.replace(
+                        f'"{wrapper_text}"', f'"{wrapper_text}.other"', 1
+                    ),
+                    "wrong_install_path": full_quoted_arguments.replace(
+                        f'"{previous_app_text}"',
+                        f'"{previous_app_text}.other"',
+                        1,
+                    ),
+                    "wrong_data_path": full_quoted_arguments.replace(
+                        f'"{data_root_text}"', f'"{data_root_text}.other"', 1
+                    ),
+                    "wrong_port": full_quoted_arguments.replace(
+                        "-Port 8765", "-Port 8766", 1
+                    ),
+                }
                 environment_updates = {
                     "STORYFORGE_REPAIR_SCRIPT": str(
                         self.project
@@ -1188,8 +1339,8 @@ if (
                     "STORYFORGE_TEST_TARGET_APP": str(target_app),
                     "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
                     "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
-                    "STORYFORGE_TEST_EXTRA_ARGUMENT": (
-                        " -Unexpected" if case == "malformed_action" else ""
+                    "STORYFORGE_TEST_LEGACY_ARGUMENTS": (
+                        legacy_argument_variants.get(case, full_quoted_arguments)
                     ),
                     "STORYFORGE_TEST_TASK_USER": (
                         "S-1-5-18"
@@ -1203,7 +1354,7 @@ if (
                 }
                 harness = r"""
 $ErrorActionPreference = 'Stop'
-$legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765$env:STORYFORGE_TEST_EXTRA_ARGUMENT"
+$legacyArguments = [string]$env:STORYFORGE_TEST_LEGACY_ARGUMENTS
 $global:StoryForgeSetCount = 0
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @([PSCustomObject]@{ Execute = 'powershell.exe'; Arguments = $legacyArguments; WorkingDirectory = '' })
@@ -1285,7 +1436,7 @@ if (-not $caught -or $global:StoryForgeSetCount -ne 0) {
             }
             harness = r"""
 $ErrorActionPreference = 'Stop'
-$legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765"
+$legacyArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:STORYFORGE_TEST_LEGACY_WRAPPER`" -InstallPath `"$env:STORYFORGE_TEST_LEGACY_APP`" -DataPath `"$env:STORYFORGE_TEST_DATA_ROOT`" -Port 8765"
 $legacyAction = [PSCustomObject]@{ Execute = 'powershell.exe'; Arguments = $legacyArguments; WorkingDirectory = '' }
 $global:StoryForgeSetCount = 0
 $global:StoryForgeFakeTask = [PSCustomObject]@{

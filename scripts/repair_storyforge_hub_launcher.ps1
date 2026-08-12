@@ -455,15 +455,44 @@ function Assert-LegacyOpsTaskIdentity {
         -Label 'The legacy task principal'
 
     $arguments = [string]$action.Arguments
-    $prefix = "-NoProfile -ExecutionPolicy Bypass -File $LegacyLauncherPath -InstallPath "
-    $suffix = " -DataPath $ExpectedDataRoot -Port $ExpectedPort"
-    if (
-        -not $arguments.StartsWith($prefix, [System.StringComparison]::Ordinal) -or
-        -not $arguments.EndsWith($suffix, [System.StringComparison]::Ordinal) -or
-        $arguments.Length -le ($prefix.Length + $suffix.Length)
-    ) {
+    $argumentTemplates = @(
+        [PSCustomObject]@{
+            Prefix = (
+                "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden " +
+                "-ExecutionPolicy Bypass -File `"$LegacyLauncherPath`" -InstallPath `""
+            )
+            Suffix = "`" -DataPath `"$ExpectedDataRoot`" -Port $ExpectedPort"
+        },
+        [PSCustomObject]@{
+            Prefix = "-NoProfile -ExecutionPolicy Bypass -File $LegacyLauncherPath -InstallPath "
+            Suffix = " -DataPath $ExpectedDataRoot -Port $ExpectedPort"
+        }
+    )
+    $matchingTemplates = @(
+        foreach ($template in $argumentTemplates) {
+            if (
+                $arguments.StartsWith(
+                    [string]$template.Prefix,
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $arguments.EndsWith(
+                    [string]$template.Suffix,
+                    [System.StringComparison]::Ordinal
+                ) -and
+                $arguments.Length -gt (
+                    ([string]$template.Prefix).Length +
+                    ([string]$template.Suffix).Length
+                )
+            ) {
+                $template
+            }
+        }
+    )
+    if ($matchingTemplates.Count -ne 1) {
         throw 'The legacy task arguments do not match the exact supported parameterized ops action.'
     }
+    $prefix = [string]$matchingTemplates[0].Prefix
+    $suffix = [string]$matchingTemplates[0].Suffix
     $previousValue = $arguments.Substring(
         $prefix.Length,
         $arguments.Length - $prefix.Length - $suffix.Length
@@ -477,10 +506,7 @@ function Assert-LegacyOpsTaskIdentity {
     if ($previousAppDirectory -ne (Join-Path $ExpectedHubRoot "App-$previousVersion")) {
         throw 'The legacy InstallPath is outside the exact HubRoot App-version directory.'
     }
-    $expectedLegacyTaskArguments = (
-        "-NoProfile -ExecutionPolicy Bypass -File $LegacyLauncherPath " +
-        "-InstallPath $previousAppDirectory -DataPath $ExpectedDataRoot -Port $ExpectedPort"
-    )
+    $expectedLegacyTaskArguments = $prefix + $previousAppDirectory + $suffix
     if ($arguments -cne $expectedLegacyTaskArguments) {
         throw 'The legacy task arguments contain unsupported quoting or extra parameters.'
     }

@@ -141,6 +141,8 @@ _FILE_CONTENT_TYPES = {
 
 DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 UPLOAD_SHA256_HEADER = "X-Content-SHA256"
+_UPLOAD_CLEANUP_ATTEMPTS = 4
+_UPLOAD_CLEANUP_RETRY_SECONDS = 0.025
 
 # Permissions are evaluated from CatalogRepository.get_effective_permissions
 # for every RPC call.  Tuples mean "any one of" so an administrator can grant
@@ -1218,6 +1220,23 @@ class _HubRequestHandler(BaseHTTPRequestHandler):
             unquote(encoded_relative, errors="strict"),
         )
 
+    def _discard_temporary_upload(self, path: Path) -> None:
+        for attempt in range(_UPLOAD_CLEANUP_ATTEMPTS):
+            try:
+                path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                retryable = isinstance(error, PermissionError) or (
+                    getattr(error, "winerror", None) == 32
+                )
+                if retryable and attempt + 1 < _UPLOAD_CLEANUP_ATTEMPTS:
+                    time.sleep(_UPLOAD_CLEANUP_RETRY_SECONDS * (attempt + 1))
+                    continue
+                self.owner._record_error(error)
+                return
+
     def _receive_upload(self, request_path: str) -> None:
         content_type = (
             self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
@@ -1302,6 +1321,7 @@ class _HubRequestHandler(BaseHTTPRequestHandler):
 
         replaced_existing = destination.exists()
         temporary_path: Path | None = None
+        failure: _HubHTTPError | None = None
         try:
             handle, temporary_name = tempfile.mkstemp(
                 prefix=f".{destination.name}.",
@@ -1354,22 +1374,21 @@ class _HubRequestHandler(BaseHTTPRequestHandler):
             os.replace(temporary_path, confirmed_destination)
             temporary_path = None
         except _HubHTTPError as error:
-            self._send_failure(error.status, error.code, error.message)
-            return
+            failure = error
         except OSError as error:
             self.owner._record_error(error)
-            self._send_failure(
+            failure = _HubHTTPError(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "upload_failed",
                 "Hub could not store the uploaded file",
             )
-            return
         finally:
             if temporary_path is not None:
-                try:
-                    temporary_path.unlink()
-                except OSError:
-                    pass
+                self._discard_temporary_upload(temporary_path)
+
+        if failure is not None:
+            self._send_failure(failure.status, failure.code, failure.message)
+            return
 
         root = self.owner.download_roots[alias]
         stored_relative = destination.relative_to(root).as_posix()

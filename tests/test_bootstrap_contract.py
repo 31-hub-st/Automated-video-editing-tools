@@ -34,6 +34,114 @@ class BootstrapContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     @staticmethod
+    def _windows_powershell_environment(
+        updates: dict[str, str] | None = None,
+        *,
+        inherited_environment: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        environment = dict(
+            os.environ
+            if inherited_environment is None
+            else inherited_environment
+        )
+        if updates:
+            environment.update(updates)
+        # A Windows PowerShell 5.1 child started by pwsh can inherit PowerShell
+        # 7 module paths first. Remove the variable entirely so 5.1 rebuilds
+        # its own WindowsPowerShell-only module search path.
+        for name in tuple(environment):
+            if name.casefold() == "psmodulepath":
+                del environment[name]
+        return environment
+
+    @staticmethod
+    def _windows_powershell_executable(environment: dict[str, str]) -> str:
+        system_root = next(
+            (
+                value
+                for name, value in environment.items()
+                if name.casefold() == "systemroot"
+            ),
+            "",
+        )
+        if not system_root:
+            raise AssertionError("SystemRoot is required for Windows PowerShell tests.")
+        executable = (
+            Path(system_root)
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        if not executable.is_file():
+            raise AssertionError(f"Windows PowerShell 5.1 is missing: {executable}")
+        return str(executable)
+
+    @classmethod
+    def _run_windows_powershell(
+        cls,
+        *arguments: str,
+        environment_updates: dict[str, str] | None = None,
+        inherited_environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment = cls._windows_powershell_environment(
+            environment_updates,
+            inherited_environment=inherited_environment,
+        )
+        return subprocess.run(
+            [
+                cls._windows_powershell_executable(environment),
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                *arguments,
+            ],
+            cwd=cls.project,
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_windows_powershell_child_discards_inherited_pwsh_module_path(
+        self,
+    ) -> None:
+        inherited = os.environ.copy()
+        inherited["pSmOdUlEpAtH"] = (
+            r"C:\Program Files\PowerShell\7\Modules;"
+            r"C:\Program Files\WindowsPowerShell\Modules"
+        )
+        environment = self._windows_powershell_environment(
+            inherited_environment=inherited
+        )
+        self.assertFalse(
+            any(name.casefold() == "psmodulepath" for name in environment)
+        )
+
+        result = self._run_windows_powershell(
+            "-Command",
+            r"""
+$ErrorActionPreference = 'Stop'
+if (
+    $PSVersionTable.PSEdition -ne 'Desktop' -or
+    $PSVersionTable.PSVersion.Major -ne 5
+) {
+    throw 'The contract harness did not start Windows PowerShell 5.1.'
+}
+$command = Get-Command Get-FileHash -ErrorAction Stop
+if ([string]$command.Source -ne 'Microsoft.PowerShell.Utility') {
+    throw 'Windows PowerShell did not rebuild its Utility module path.'
+}
+[void](Get-FileHash -LiteralPath $PSHOME\powershell.exe -Algorithm SHA256)
+""",
+            inherited_environment=inherited,
+        )
+        output = (result.stdout + result.stderr).decode(
+            "utf-8", errors="replace"
+        )
+        self.assertEqual(result.returncode, 0, output)
+
+    @staticmethod
     def _write_verified_target_app(app: Path, version: str) -> Path:
         app.mkdir(parents=True)
         entrypoint = app / "StoryForge Studio.exe"
@@ -408,28 +516,14 @@ foreach ($mode in @('task', 'listener', 'process')) {
                 + "\n",
                 encoding="ascii",
             )
-            environment = os.environ.copy()
-            environment.update(
-                {
+            result = self._run_windows_powershell(
+                "-File",
+                str(harness),
+                environment_updates={
                     "STORYFORGE_FRESH_FUNCTIONS": str(function_file),
                     "STORYFORGE_TEST_INSTALL": str(install_root),
                     "STORYFORGE_TEST_DATA": str(data_root),
-                }
-            )
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(harness),
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+                },
             )
             output = (result.stdout + result.stderr).decode(
                 "utf-8", errors="replace"
@@ -635,14 +729,11 @@ foreach ($mode in @('task', 'listener', 'process')) {
                 isolated_enable_script,
             )
 
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "STORYFORGE_ENABLE_SCRIPT": str(isolated_enable_script),
-                    "STORYFORGE_TEST_EXE": str(executable),
-                    "STORYFORGE_TEST_DATA_ROOT": str(data_root),
-                }
-            )
+            environment_updates = {
+                "STORYFORGE_ENABLE_SCRIPT": str(isolated_enable_script),
+                "STORYFORGE_TEST_EXE": str(executable),
+                "STORYFORGE_TEST_DATA_ROOT": str(data_root),
+            }
             harness = r"""
 $ErrorActionPreference = 'Stop'
 $global:StoryForgeListenerCalls = 0
@@ -758,20 +849,10 @@ if (
     throw 'The isolated first-enable rollback contract was not observed.'
 }
 """
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+            result = self._run_windows_powershell(
+                "-Command",
+                harness,
+                environment_updates=environment_updates,
             )
             output = (result.stdout + result.stderr).decode(
                 "utf-8", errors="replace"
@@ -883,19 +964,16 @@ if (
                 for path in hub_root.rglob("*")
                 if path.is_file()
             }
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "STORYFORGE_REPAIR_SCRIPT": str(
-                        self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
-                    ),
-                    "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
-                    "STORYFORGE_TEST_DATA_ROOT": str(data_root),
-                    "STORYFORGE_TEST_TARGET_APP": str(target_app),
-                    "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
-                    "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
-                }
-            )
+            environment_updates = {
+                "STORYFORGE_REPAIR_SCRIPT": str(
+                    self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
+                ),
+                "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
+                "STORYFORGE_TEST_DATA_ROOT": str(data_root),
+                "STORYFORGE_TEST_TARGET_APP": str(target_app),
+                "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
+                "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
+            }
             harness = r"""
 $ErrorActionPreference = 'Stop'
 $legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765"
@@ -956,20 +1034,10 @@ if (
     throw 'The isolated legacy task was not switched to the exact modern action.'
 }
 """
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+            result = self._run_windows_powershell(
+                "-Command",
+                harness,
+                environment_updates=environment_updates,
             )
             output = (result.stdout + result.stderr).decode(
                 "utf-8", errors="replace"
@@ -1033,24 +1101,21 @@ if (
                     for path in hub_root.rglob("*")
                     if path.is_file()
                 }
-                environment = os.environ.copy()
-                environment.update(
-                    {
-                        "STORYFORGE_REPAIR_SCRIPT": str(
-                            self.project
-                            / "scripts"
-                            / "repair_storyforge_hub_launcher.ps1"
-                        ),
-                        "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
-                        "STORYFORGE_TEST_DATA_ROOT": str(data_root),
-                        "STORYFORGE_TEST_TARGET_APP": str(target_app),
-                        "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
-                        "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
-                        "STORYFORGE_TEST_EXTRA_ARGUMENT": (
-                            " -Unexpected" if case == "malformed_action" else ""
-                        ),
-                    }
-                )
+                environment_updates = {
+                    "STORYFORGE_REPAIR_SCRIPT": str(
+                        self.project
+                        / "scripts"
+                        / "repair_storyforge_hub_launcher.ps1"
+                    ),
+                    "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
+                    "STORYFORGE_TEST_DATA_ROOT": str(data_root),
+                    "STORYFORGE_TEST_TARGET_APP": str(target_app),
+                    "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
+                    "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
+                    "STORYFORGE_TEST_EXTRA_ARGUMENT": (
+                        " -Unexpected" if case == "malformed_action" else ""
+                    ),
+                }
                 harness = r"""
 $ErrorActionPreference = 'Stop'
 $legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765$env:STORYFORGE_TEST_EXTRA_ARGUMENT"
@@ -1082,20 +1147,10 @@ if (-not $caught -or $global:StoryForgeSetCount -ne 0) {
     throw 'Ambiguous legacy state did not fail closed before task mutation.'
 }
 """
-                result = subprocess.run(
-                    [
-                        "powershell.exe",
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        harness,
-                    ],
-                    cwd=self.project,
-                    env=environment,
-                    capture_output=True,
-                    check=False,
+                result = self._run_windows_powershell(
+                    "-Command",
+                    harness,
+                    environment_updates=environment_updates,
                 )
                 output = (result.stdout + result.stderr).decode(
                     "utf-8", errors="replace"
@@ -1132,19 +1187,16 @@ if (-not $caught -or $global:StoryForgeSetCount -ne 0) {
                 for path in hub_root.rglob("*")
                 if path.is_file()
             }
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "STORYFORGE_REPAIR_SCRIPT": str(
-                        self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
-                    ),
-                    "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
-                    "STORYFORGE_TEST_DATA_ROOT": str(data_root),
-                    "STORYFORGE_TEST_TARGET_APP": str(target_app),
-                    "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
-                    "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
-                }
-            )
+            environment_updates = {
+                "STORYFORGE_REPAIR_SCRIPT": str(
+                    self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
+                ),
+                "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
+                "STORYFORGE_TEST_DATA_ROOT": str(data_root),
+                "STORYFORGE_TEST_TARGET_APP": str(target_app),
+                "STORYFORGE_TEST_LEGACY_APP": str(previous_app),
+                "STORYFORGE_TEST_LEGACY_WRAPPER": str(legacy_wrapper),
+            }
             harness = r"""
 $ErrorActionPreference = 'Stop'
 $legacyArguments = "-NoProfile -ExecutionPolicy Bypass -File $env:STORYFORGE_TEST_LEGACY_WRAPPER -InstallPath $env:STORYFORGE_TEST_LEGACY_APP -DataPath $env:STORYFORGE_TEST_DATA_ROOT -Port 8765"
@@ -1196,20 +1248,10 @@ if (
     throw 'The legacy task rollback contract was not observed.'
 }
 """
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+            result = self._run_windows_powershell(
+                "-Command",
+                harness,
+                environment_updates=environment_updates,
             )
             output = (result.stdout + result.stderr).decode(
                 "utf-8", errors="replace"
@@ -1316,21 +1358,19 @@ if (
                 previous_exe: previous_exe.read_bytes(),
                 current_exe: current_exe.read_bytes(),
             }
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "STORYFORGE_REPAIR_SCRIPT": str(
-                        self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
-                    ),
-                    "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
-                    "STORYFORGE_TEST_DATA_ROOT": str(data_root),
-                    "STORYFORGE_TEST_LAUNCHER": str(launcher_path),
-                }
-            )
+            environment_updates = {
+                "STORYFORGE_REPAIR_SCRIPT": str(
+                    self.project / "scripts" / "repair_storyforge_hub_launcher.ps1"
+                ),
+                "STORYFORGE_TEST_HUB_ROOT": str(hub_root),
+                "STORYFORGE_TEST_DATA_ROOT": str(data_root),
+                "STORYFORGE_TEST_LAUNCHER": str(launcher_path),
+            }
             harness = r"""
 $ErrorActionPreference = 'Stop'
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:STORYFORGE_TEST_LAUNCHER`""
+$expectedUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $global:StoryForgeFakeTask = [PSCustomObject]@{
     Actions = @([PSCustomObject]@{
         Execute = $powerShell
@@ -1338,7 +1378,7 @@ $global:StoryForgeFakeTask = [PSCustomObject]@{
         WorkingDirectory = $env:STORYFORGE_TEST_HUB_ROOT
     })
     Principal = [PSCustomObject]@{
-        UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        UserId = $expectedUser
         LogonType = 'Interactive'
         RunLevel = 'Limited'
     }
@@ -1351,24 +1391,36 @@ function Get-ScheduledTask {
     )
     return $global:StoryForgeFakeTask
 }
-& $env:STORYFORGE_REPAIR_SCRIPT `
-    -HubRoot $env:STORYFORGE_TEST_HUB_ROOT `
-    -DataRoot $env:STORYFORGE_TEST_DATA_ROOT
+try {
+    & $env:STORYFORGE_REPAIR_SCRIPT `
+        -HubRoot $env:STORYFORGE_TEST_HUB_ROOT `
+        -DataRoot $env:STORYFORGE_TEST_DATA_ROOT
+}
+catch {
+    $actualAction = @($global:StoryForgeFakeTask.Actions)[0]
+    $actualPrincipal = $global:StoryForgeFakeTask.Principal
+    $diagnostic = @(
+        "repair_error=$($_.Exception.Message)",
+        "execute.expected=$powerShell",
+        "execute.actual=$([string]$actualAction.Execute)",
+        "arguments.expected=$arguments",
+        "arguments.actual=$([string]$actualAction.Arguments)",
+        "working_directory.expected=$env:STORYFORGE_TEST_HUB_ROOT",
+        "working_directory.actual=$([string]$actualAction.WorkingDirectory)",
+        "user.expected=$expectedUser",
+        "user.actual=$([string]$actualPrincipal.UserId)",
+        'logon_type.expected=Interactive',
+        "logon_type.actual=$([string]$actualPrincipal.LogonType)",
+        'run_level.expected=Limited',
+        "run_level.actual=$([string]$actualPrincipal.RunLevel)"
+    )
+    throw ($diagnostic -join "`n")
+}
 """
-            result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+            result = self._run_windows_powershell(
+                "-Command",
+                harness,
+                environment_updates=environment_updates,
             )
             output = (result.stdout + result.stderr).decode(
                 "utf-8", errors="replace"
@@ -1399,20 +1451,10 @@ function Get-ScheduledTask {
                     f'start "" "{previous_exe}" %*\r\n'
                 ).encode("ascii")
             )
-            second_result = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    harness,
-                ],
-                cwd=self.project,
-                env=environment,
-                capture_output=True,
-                check=False,
+            second_result = self._run_windows_powershell(
+                "-Command",
+                harness,
+                environment_updates=environment_updates,
             )
             second_output = (second_result.stdout + second_result.stderr).decode(
                 "utf-8", errors="replace"

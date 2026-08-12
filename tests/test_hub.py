@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -26,6 +27,7 @@ from storyforge.hub import (
     HubServer,
     HubServerStateError,
     HubTextProvider,
+    _HubRequestHandler,
     _device_capabilities,
     _render_client_version_is_supported,
 )
@@ -2163,6 +2165,141 @@ class SecureUploadTests(HubTestCase):
         self.assertTrue(result["replaced"])
         self.assertEqual(destination.read_bytes(), self.sample_source.read_bytes())
         self.assertEqual(list(destination.parent.glob(".*.upload")), [])
+
+    def test_hash_mismatch_response_waits_for_temporary_cleanup(self) -> None:
+        destination = self.data_root / "previews" / "sample.mp4"
+        destination.parent.mkdir()
+        destination.write_bytes(b"old-complete-file")
+        cleanup_entered = threading.Event()
+        allow_cleanup = threading.Event()
+        response_started = threading.Event()
+        request_errors: list[BaseException] = []
+        original_unlink = Path.unlink
+        original_send_failure = _HubRequestHandler._send_failure
+
+        def gated_unlink(path: Path, *args, **kwargs):
+            if path.name.endswith(".upload"):
+                cleanup_entered.set()
+                if not allow_cleanup.wait(3):
+                    raise TimeoutError("test did not release upload cleanup")
+            return original_unlink(path, *args, **kwargs)
+
+        def observed_send_failure(handler, *args, **kwargs):
+            response_started.set()
+            return original_send_failure(handler, *args, **kwargs)
+
+        def upload_bad_digest() -> None:
+            try:
+                self.client.upload_file(
+                    "data",
+                    "previews/sample.mp4",
+                    self.sample_source,
+                    sha256="0" * 64,
+                )
+            except BaseException as error:
+                request_errors.append(error)
+
+        with (
+            patch.object(Path, "unlink", new=gated_unlink),
+            patch.object(
+                _HubRequestHandler,
+                "_send_failure",
+                new=observed_send_failure,
+            ),
+        ):
+            request_thread = threading.Thread(target=upload_bad_digest, daemon=True)
+            request_thread.start()
+            try:
+                self.assertTrue(
+                    cleanup_entered.wait(2),
+                    "Hub did not begin removing the rejected upload",
+                )
+                self.assertFalse(
+                    response_started.is_set(),
+                    "Hub started its reply before rejected-upload cleanup completed",
+                )
+            finally:
+                allow_cleanup.set()
+                request_thread.join(3)
+
+        self.assertFalse(request_thread.is_alive())
+        self.assertTrue(response_started.is_set())
+        self.assertEqual(len(request_errors), 1)
+        mismatch = request_errors[0]
+        self.assertIsInstance(mismatch, HubRemoteError)
+        self.assertEqual(mismatch.status, 422)  # type: ignore[attr-defined]
+        self.assertEqual(mismatch.code, "sha256_mismatch")  # type: ignore[attr-defined]
+        self.assertEqual(destination.read_bytes(), b"old-complete-file")
+        self.assertEqual(list(destination.parent.glob(".*.upload")), [])
+
+    def test_upload_cleanup_retries_a_transient_windows_sharing_violation(self) -> None:
+        original_unlink = Path.unlink
+        winerror_32 = OSError("synthetic Windows sharing violation")
+        winerror_32.winerror = 32  # type: ignore[attr-defined]
+        for filename, first_error in (
+            (
+                "permission-error.mp4",
+                PermissionError("synthetic Windows permission lock"),
+            ),
+            ("winerror-32.mp4", winerror_32),
+        ):
+            with self.subTest(filename=filename):
+                destination = self.data_root / "previews" / filename
+                destination.parent.mkdir(exist_ok=True)
+                destination.write_bytes(b"old-complete-file")
+                upload_unlink_attempts = 0
+
+                def flaky_unlink(path: Path, *args, **kwargs):
+                    nonlocal upload_unlink_attempts
+                    if path.name.endswith(".upload"):
+                        upload_unlink_attempts += 1
+                        if upload_unlink_attempts == 1:
+                            raise first_error
+                    return original_unlink(path, *args, **kwargs)
+
+                with patch.object(Path, "unlink", new=flaky_unlink):
+                    with self.assertRaises(HubRemoteError) as mismatch:
+                        self.client.upload_file(
+                            "data",
+                            f"previews/{filename}",
+                            self.sample_source,
+                            sha256="0" * 64,
+                        )
+
+                self.assertEqual(mismatch.exception.status, 422)
+                self.assertEqual(upload_unlink_attempts, 2)
+                self.assertEqual(destination.read_bytes(), b"old-complete-file")
+                self.assertEqual(list(destination.parent.glob(".*.upload")), [])
+        self.assertEqual(self.server.last_error, "")
+
+    def test_upload_cleanup_records_a_persistent_windows_sharing_violation(self) -> None:
+        destination = self.data_root / "previews" / "sample.mp4"
+        destination.parent.mkdir()
+        destination.write_bytes(b"old-complete-file")
+        original_unlink = Path.unlink
+        upload_unlink_attempts = 0
+
+        def locked_unlink(path: Path, *args, **kwargs):
+            nonlocal upload_unlink_attempts
+            if path.name.endswith(".upload"):
+                upload_unlink_attempts += 1
+                raise PermissionError("synthetic persistent Windows sharing violation")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=locked_unlink):
+            with self.assertRaises(HubRemoteError) as mismatch:
+                self.client.upload_file(
+                    "data",
+                    "previews/sample.mp4",
+                    self.sample_source,
+                    sha256="0" * 64,
+                )
+
+        self.assertEqual(mismatch.exception.status, 422)
+        self.assertGreater(upload_unlink_attempts, 1)
+        self.assertLess(upload_unlink_attempts, 10)
+        self.assertIn("PermissionError", self.server.last_error)
+        self.assertIn("persistent Windows sharing violation", self.server.last_error)
 
     def test_upload_reuses_root_extension_and_traversal_guards(self) -> None:
         outside = self.root / "escaped.mp4"

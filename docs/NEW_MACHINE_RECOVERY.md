@@ -4,7 +4,7 @@
 
 ## GitHub 中保存什么
 
-- 正式程序：最新稳定版 Release 中的 `StoryForge-<版本>-update.zip` 与同名 manifest。
+- 正式程序：最新稳定版 Release 中的 `StoryForge-<版本>-update.zip` 与同名 manifest。普通用户下载正式更新 ZIP，不下载 GitHub 自动生成的 Source code/源码 ZIP；正式更新 ZIP 根目录直接包含一键恢复入口和它复用的脚本。
 - Hub 固定资料：预发布标签 `hub-state-latest` 中仅保留：
   - `StoryForge-Hub-Latest.sfbak`
   - `StoryForge-Hub-Latest.manifest.json`
@@ -38,7 +38,7 @@ Set-Location 'C:\path\to\Automated-video-editing-tools'
 
 ### 推荐：全新 Hub 一键恢复
 
-仓库根目录提供醒目的中文入口：
+正式更新 ZIP 完整解压后的根目录提供醒目的中文入口：
 
 ```text
 一键恢复StoryForge-Hub.cmd

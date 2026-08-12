@@ -2524,10 +2524,12 @@ class StoryForgeWebApplication:
             self._send_static(handler, path.lstrip("/"))
             return True
         if path == "/web/api/health":
-            backup_status_getter = getattr(self.api, "_backup_status_value", None)
+            backup_status_getter = getattr(
+                self.api, "_backup_health_status_value", None
+            )
             if callable(backup_status_getter):
                 try:
-                    backup_status = backup_status_getter(include_error=False)
+                    backup_status = backup_status_getter()
                 except (OSError, RuntimeError, TypeError, ValueError):
                     backup_status = {
                         "available": False,
@@ -2535,6 +2537,8 @@ class StoryForgeWebApplication:
                         "running": False,
                         "state": "error",
                         "has_error": True,
+                        "ready": False,
+                        "operational": False,
                     }
             else:
                 backup_status = {
@@ -2543,6 +2547,8 @@ class StoryForgeWebApplication:
                     "running": False,
                     "state": "unavailable",
                     "has_error": False,
+                    "ready": False,
+                    "operational": False,
                 }
             self._send_json(
                 handler,

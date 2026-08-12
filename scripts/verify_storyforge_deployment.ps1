@@ -106,22 +106,54 @@ if ($Role -eq 'Hub') {
     }
     Add-Check -Name 'private_firewall' -Ok $firewallOk -Detail $firewallDetail
 
-    $healthUrl = "http://127.0.0.1:$Port/web/api/health"
+    $webHealthUrl = "http://127.0.0.1:$Port/web/api/health"
+    $healthOk = $false
+    $healthDetail = 'waiting for first verified Hub backup'
+    $backupReadyWait = [Diagnostics.Stopwatch]::StartNew()
+    while ($backupReadyWait.Elapsed.TotalMinutes -lt 10) {
+        try {
+            $health = Invoke-RestMethod -Uri $webHealthUrl -TimeoutSec 5
+            $healthOk = (
+                [bool]$health.ok -and
+                [string]$health.data.service -eq 'storyforge-web' -and
+                [string]$health.data.version -eq $pointerVersion -and
+                [bool]$health.data.backup.available -and
+                [bool]$health.data.backup.enabled -and
+                [bool]$health.data.backup.running -and
+                [bool]$health.data.backup.ready -and
+                [bool]$health.data.backup.operational -and
+                -not [bool]$health.data.backup.has_error
+            )
+            $healthDetail = "$webHealthUrl; version=$($health.data.version); backup=$($health.data.backup.state); ready=$([bool]$health.data.backup.ready); operational=$([bool]$health.data.backup.operational)"
+            if ($healthOk -or [bool]$health.data.backup.has_error) {
+                break
+            }
+        }
+        catch {
+            $healthDetail = $_.Exception.Message
+        }
+        if ($backupReadyWait.Elapsed.TotalMinutes -lt 10) {
+            Start-Sleep -Seconds 1
+        }
+    }
+    Add-Check -Name 'hub_web_health' -Ok $healthOk -Detail $healthDetail
+
+    $hubHealthUrl = "http://127.0.0.1:$Port/health"
     try {
-        $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 5
-        $healthOk = (
-            [bool]$health.ok -and
-            [string]$health.data.service -eq 'storyforge-web' -and
-            [string]$health.data.version -eq $pointerVersion -and
-            [bool]$health.data.backup.available -and
-            [bool]$health.data.backup.enabled -and
-            [bool]$health.data.backup.running -and
-            -not [bool]$health.data.backup.has_error
+        $hubHealth = Invoke-RestMethod -Uri $hubHealthUrl -TimeoutSec 5
+        $hubHealthOk = (
+            [bool]$hubHealth.ok -and
+            [string]$hubHealth.service -eq 'storyforge-hub' -and
+            [string]$hubHealth.app_version -eq $pointerVersion -and
+            [int]$hubHealth.protocol_version -gt 0 -and
+            [int]$hubHealth.schema_version -gt 0 -and
+            [string]$hubHealth.site.id -and
+            @($hubHealth.device_capability_fields) -contains 'device_config_sync'
         )
-        Add-Check -Name 'hub_health' -Ok $healthOk -Detail "$healthUrl; version=$($health.data.version); backup=$($health.data.backup.state)"
+        Add-Check -Name 'hub_rpc_health' -Ok $hubHealthOk -Detail "$hubHealthUrl; version=$($hubHealth.app_version); protocol=$($hubHealth.protocol_version); schema=$($hubHealth.schema_version)"
     }
     catch {
-        Add-Check -Name 'hub_health' -Ok $false -Detail $_.Exception.Message
+        Add-Check -Name 'hub_rpc_health' -Ok $false -Detail $_.Exception.Message
     }
 
     try {

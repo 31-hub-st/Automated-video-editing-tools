@@ -791,12 +791,17 @@ try {
         $hubFirewallRuleCreated = $true
 
         Start-ScheduledTask -TaskName $TaskName
-        $healthUrl = "http://127.0.0.1:$Port/web/api/health"
+        $webHealthUrl = "http://127.0.0.1:$Port/web/api/health"
+        $hubHealthUrl = "http://127.0.0.1:$Port/health"
         $healthy = $false
-        for ($attempt = 0; $attempt -lt 90; $attempt += 1) {
+        $lastHealthDetail = 'waiting for first verified Hub backup'
+        $backupReadyWait = [Diagnostics.Stopwatch]::StartNew()
+        while ($backupReadyWait.Elapsed.TotalMinutes -lt 10) {
             Start-Sleep -Seconds 1
             try {
-                $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 3
+                $health = Invoke-RestMethod -Uri $webHealthUrl -TimeoutSec 3
+                $hubHealth = Invoke-RestMethod -Uri $hubHealthUrl -TimeoutSec 3
+                $lastHealthDetail = "backup=$($health.data.backup.state); ready=$([bool]$health.data.backup.ready); operational=$([bool]$health.data.backup.operational)"
                 if (
                     [bool]$health.ok -and
                     [string]$health.data.service -eq 'storyforge-web' -and
@@ -804,18 +809,30 @@ try {
                     [bool]$health.data.backup.available -and
                     [bool]$health.data.backup.enabled -and
                     [bool]$health.data.backup.running -and
-                    -not [bool]$health.data.backup.has_error
+                    [bool]$health.data.backup.ready -and
+                    [bool]$health.data.backup.operational -and
+                    -not [bool]$health.data.backup.has_error -and
+                    [bool]$hubHealth.ok -and
+                    [string]$hubHealth.service -eq 'storyforge-hub' -and
+                    [string]$hubHealth.app_version -eq $version -and
+                    [int]$hubHealth.protocol_version -gt 0 -and
+                    [int]$hubHealth.schema_version -gt 0 -and
+                    [string]$hubHealth.site.id -and
+                    @($hubHealth.device_capability_fields) -contains 'device_config_sync'
                 ) {
                     $healthy = $true
                     break
                 }
+                if ([bool]$health.data.backup.has_error) {
+                    break
+                }
             }
             catch {
-                # The first frozen launch can take several seconds.
+                $lastHealthDetail = $_.Exception.Message
             }
         }
         if (-not $healthy) {
-            throw "StoryForge Hub did not pass health verification: $healthUrl"
+            throw "StoryForge Hub did not pass web, RPC and verified-backup health verification: $webHealthUrl; $hubHealthUrl; $lastHealthDetail"
         }
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop)
         $listenerPids = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)

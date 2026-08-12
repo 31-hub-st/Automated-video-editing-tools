@@ -150,7 +150,7 @@ class OneClickHubRecoveryContractTests(unittest.TestCase):
             self.assertIn("仅下载最新程序不能恢复业务数据", text)
 
         required_flow = (
-            "下载仓库 ZIP",
+            "下载正式更新 ZIP",
             "解压",
             "双击",
             "浏览器授权",

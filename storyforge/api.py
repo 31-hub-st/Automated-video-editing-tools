@@ -1299,6 +1299,18 @@ class StoryForgeApi:
             status["running"] = False
         return status
 
+    def _backup_health_status_value(self) -> dict[str, Any]:
+        """Return the bounded public backup probe used by web health."""
+
+        status = self._backup_manager.health_status()
+        status["available"] = self._runtime_hub_mode == "host"
+        if self._runtime_hub_mode != "host":
+            status["enabled"] = False
+            status["running"] = False
+            status["ready"] = False
+            status["operational"] = False
+        return status
+
     @staticmethod
     def _backup_snapshot_value(value: Mapping[str, Any]) -> dict[str, Any]:
         """Remove host filesystem paths before a backup result enters RPC."""

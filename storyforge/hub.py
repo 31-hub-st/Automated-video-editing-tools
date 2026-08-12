@@ -53,6 +53,7 @@ from .rpc_contract import (
     CATALOG_READ_METHODS,
     CATALOG_RPC_METHODS,
     CATALOG_WRITE_METHODS,
+    CONNECTION_IDENTITY_RPC_METHOD,
     DEVICE_CAPABILITY_FIELDS,
     DEVICE_ADMIN_RPC_METHODS,
     DEVICE_CLIENT_RPC_METHODS,
@@ -2070,7 +2071,7 @@ class HubServer:
         }
 
     def health(self) -> dict[str, Any]:
-        summary = self.catalog.bootstrap_summary()
+        identity = self.catalog.connection_identity()
         return {
             "ok": True,
             "service": "storyforge-hub",
@@ -2084,8 +2085,8 @@ class HubServer:
                 | {TEXT_POLISH_RPC_METHOD}
             ),
             "device_capability_fields": sorted(DEVICE_CAPABILITY_FIELDS),
-            "schema_version": summary["schema_version"],
-            "site": summary["site"],
+            "schema_version": identity["schema_version"],
+            "site": identity["site"],
             "time": _utc_now(),
         }
 
@@ -2250,7 +2251,7 @@ class HubServer:
                 "anonymous Hub tokens cannot call this RPC method",
             )
         access = self._actor_access(actor_user_id)
-        if method == "bootstrap_summary":
+        if method in {"bootstrap_summary", CONNECTION_IDENTITY_RPC_METHOD}:
             return access
         if method == "get_effective_permissions":
             target_user_id = str(arguments.get("user_id") or "")
@@ -3483,7 +3484,26 @@ class HubClient:
             raise HubConnectionError(
                 "this StoryForge workstation is too old for the Hub; update it before connecting"
             )
-        identity = self.call("bootstrap_summary")
+        identity_method = (
+            CONNECTION_IDENTITY_RPC_METHOD
+            if self._server_rpc_methods is not None
+            and CONNECTION_IDENTITY_RPC_METHOD in self._server_rpc_methods
+            else "bootstrap_summary"
+        )
+        identity = self.call(identity_method)
+        raw_site = identity.get("site")
+        try:
+            schema_version = int(identity.get("schema_version"))
+        except (TypeError, ValueError) as error:
+            raise HubConnectionError("Hub identity response is invalid") from error
+        if (
+            isinstance(identity.get("schema_version"), bool)
+            or schema_version <= 0
+            or not isinstance(raw_site, Mapping)
+            or not str(raw_site.get("id") or "").strip()
+            or not str(raw_site.get("name") or "").strip()
+        ):
+            raise HubConnectionError("Hub identity response is invalid")
         compatibility: dict[str, Any] = {
             "server_protocol_version": server_protocol,
             "minimum_client_protocol_version": minimum_client,

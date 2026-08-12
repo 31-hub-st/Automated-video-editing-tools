@@ -302,6 +302,26 @@ if ($WithLocalAI) {
     Write-Host "Bundled offline Kokoro assets: $kokoroTarget"
 }
 
+# Keep the ordinary-user replacement-Hub entry in the same verified artifact
+# as the application. Build_exe.ps1 must remain ASCII for Windows PowerShell
+# 5.1, so construct the Chinese launcher name from Unicode code points.
+$chineseRecoveryLauncherName = -join @(
+    [char]0x4E00, [char]0x952E, [char]0x6062, [char]0x590D,
+    'StoryForge-Hub.cmd'
+)
+Copy-Item -LiteralPath (Join-Path $projectRoot $chineseRecoveryLauncherName) `
+    -Destination (Join-Path $bundleRoot $chineseRecoveryLauncherName) -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'Restore-StoryForge-Hub.cmd') `
+    -Destination (Join-Path $bundleRoot 'Restore-StoryForge-Hub.cmd') -Force
+$recoveryScriptsTarget = Join-Path $bundleRoot 'scripts'
+[System.IO.Directory]::CreateDirectory($recoveryScriptsTarget) | Out-Null
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\restore_storyforge_hub_new_machine.ps1') `
+    -Destination (Join-Path $recoveryScriptsTarget 'restore_storyforge_hub_new_machine.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\bootstrap_storyforge.ps1') `
+    -Destination (Join-Path $recoveryScriptsTarget 'bootstrap_storyforge.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\verify_storyforge_deployment.ps1') `
+    -Destination (Join-Path $recoveryScriptsTarget 'verify_storyforge_deployment.ps1') -Force
+
 $adminToolsTarget = Join-Path $bundleRoot 'admin-tools'
 [System.IO.Directory]::CreateDirectory($adminToolsTarget) | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\diagnose_storyforge.ps1') `

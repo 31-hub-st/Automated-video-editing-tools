@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,27 @@ class ReleaseBuildContractTests(unittest.TestCase):
             script.index("write_release_validation"),
             script.index("scripts\\package_smoke.py"),
         )
+
+    def test_release_build_copies_one_click_hub_recovery_payload_before_attestation(
+        self,
+    ) -> None:
+        script = (ROOT / "scripts" / "build_exe.ps1").read_text(encoding="utf-8")
+        attestation = script.index("write_release_validation")
+
+        required_copy_contract = (
+            "[char]0x4E00, [char]0x952E, [char]0x6062, [char]0x590D",
+            "Join-Path $projectRoot $chineseRecoveryLauncherName",
+            "Join-Path $bundleRoot $chineseRecoveryLauncherName",
+            "Join-Path $projectRoot 'Restore-StoryForge-Hub.cmd'",
+            "Join-Path $bundleRoot 'scripts'",
+            "Join-Path $projectRoot 'scripts\\restore_storyforge_hub_new_machine.ps1'",
+            "Join-Path $projectRoot 'scripts\\bootstrap_storyforge.ps1'",
+            "Join-Path $recoveryScriptsTarget 'verify_storyforge_deployment.ps1'",
+        )
+        for fragment in required_copy_contract:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+                self.assertLess(script.index(fragment), attestation)
 
     def test_stable_report_validator_survives_windows_powershell_quoting(self) -> None:
         script = (ROOT / "scripts" / "build_exe.ps1").read_text(encoding="utf-8")
@@ -90,6 +112,14 @@ class ReleaseBuildContractTests(unittest.TestCase):
 
 class PackageSmokeTests(unittest.TestCase):
     @staticmethod
+    def _copy_recovery_payload(root: Path) -> None:
+        for relative in package_smoke.RECOVERY_PAYLOAD_FILES:
+            source = ROOT / Path(relative)
+            target = root / Path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+
+    @staticmethod
     def _make_package(root: Path) -> tuple[Path, Path]:
         entrypoint = root / "StoryForge Studio.exe"
         entrypoint.write_bytes(b"MZ-frozen-storyforge")
@@ -108,6 +138,7 @@ class PackageSmokeTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        PackageSmokeTests._copy_recovery_payload(root)
         write_release_validation(
             root,
             entrypoint=entrypoint.name,
@@ -129,6 +160,32 @@ class PackageSmokeTests(unittest.TestCase):
             with self.assertRaises(package_smoke.PackageSmokeError):
                 package_smoke._find_ui_root(root)
 
+    def test_recovery_payload_requires_every_launcher_and_delegated_script(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._copy_recovery_payload(root)
+            missing = root / "scripts" / "bootstrap_storyforge.ps1"
+            missing.unlink()
+
+            with self.assertRaisesRegex(
+                package_smoke.PackageSmokeError,
+                "bootstrap_storyforge.ps1",
+            ):
+                package_smoke._validate_recovery_payload(root)
+
+    def test_recovery_payload_validates_encoding_and_delegation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._copy_recovery_payload(root)
+
+            files = package_smoke._validate_recovery_payload(root)
+
+        self.assertEqual(
+            [item["name"] for item in files],
+            list(package_smoke.RECOVERY_PAYLOAD_FILES),
+        )
+        self.assertTrue(all(int(item["bytes"]) > 0 for item in files))
+
     def test_metadata_smoke_records_explicit_runtime_and_ffmpeg_skip_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -147,6 +204,7 @@ class PackageSmokeTests(unittest.TestCase):
         self.assertEqual(report["runtime"]["ffmpeg"]["status"], "skipped")
         self.assertIn("unit test", report["runtime"]["ffmpeg"]["reason"])
         self.assertEqual(report["runtime"]["ui"]["root"], str(ui_root.resolve()))
+        self.assertEqual(report["recovery"]["status"], "passed")
 
     def test_runtime_smoke_does_not_inherit_hub_or_portable_identity(self) -> None:
         captured_environment: dict[str, str] = {}

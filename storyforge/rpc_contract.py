@@ -19,6 +19,7 @@ RPC_CONTRACT_VERSION = 1
 TEXT_POLISH_RPC_METHOD = "text_polish"
 ACCOUNT_PASSWORD_VERIFY_RPC_METHOD = "account_password_verify"
 LOCAL_WORKER_TICKET_RPC_METHOD = "local_worker_ticket_redeem"
+CONNECTION_IDENTITY_RPC_METHOD = "connection_identity"
 
 
 # Device capability payloads are intentionally versioned by field name rather
@@ -73,6 +74,7 @@ DEVICE_SERVICE_RPC_METHODS = DEVICE_ADMIN_RPC_METHODS | DEVICE_CLIENT_RPC_METHOD
 CATALOG_READ_METHODS = frozenset(
     {
         "bootstrap_summary",
+        CONNECTION_IDENTITY_RPC_METHOD,
         "list_novels",
         "get_novel",
         "list_platforms",
@@ -387,7 +389,14 @@ def validate_rpc_contract() -> tuple[str, ...]:
 
     errors: list[str] = []
     missing_hub_permissions = sorted(
-        (CATALOG_RPC_METHODS - {"bootstrap_summary", "get_effective_permissions"})
+        (
+            CATALOG_RPC_METHODS
+            - {
+                "bootstrap_summary",
+                CONNECTION_IDENTITY_RPC_METHOD,
+                "get_effective_permissions",
+            }
+        )
         - HUB_RPC_PERMISSION_ANY.keys()
     )
     if missing_hub_permissions:
@@ -443,6 +452,7 @@ __all__ = [
     "CATALOG_RPC_METHODS",
     "CATALOG_WRITE_METHODS",
     "CLIENT_LOCAL_MEDIA_METHODS",
+    "CONNECTION_IDENTITY_RPC_METHOD",
     "DEVICE_CAPABILITY_FIELDS",
     "DEVICE_ADMIN_RPC_METHODS",
     "DEVICE_CLIENT_RPC_METHODS",

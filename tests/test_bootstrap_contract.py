@@ -555,11 +555,65 @@ foreach ($mode in @('task', 'listener', 'process')) {
         self.assertIn("$health.data.version -eq $version", self.bootstrap)
         self.assertIn("$health.data.backup.available", self.bootstrap)
         self.assertIn("$health.data.backup.running", self.bootstrap)
+        self.assertIn("$health.data.backup.ready", self.bootstrap)
+        self.assertIn("$health.data.backup.operational", self.bootstrap)
+        self.assertIn("$backupReadyWait = [Diagnostics.Stopwatch]::StartNew()", self.bootstrap)
+        self.assertIn("$backupReadyWait.Elapsed.TotalMinutes -lt 10", self.bootstrap)
+        self.assertIn(
+            '$hubHealthUrl = "http://127.0.0.1:$Port/health"',
+            self.bootstrap,
+        )
+        self.assertIn(
+            "[string]$hubHealth.service -eq 'storyforge-hub'",
+            self.bootstrap,
+        )
+        self.assertIn(
+            "[string]$hubHealth.app_version -eq $version",
+            self.bootstrap,
+        )
+        self.assertIn("[int]$hubHealth.protocol_version -gt 0", self.bootstrap)
+        self.assertIn("[int]$hubHealth.schema_version -gt 0", self.bootstrap)
+        self.assertIn("[string]$hubHealth.site.id", self.bootstrap)
+        self.assertIn(
+            "@($hubHealth.device_capability_fields) -contains 'device_config_sync'",
+            self.bootstrap,
+        )
         self.assertIn("$listenerProcess.ExecutablePath", self.bootstrap)
         self.assertIn("New-TimeSpan -Minutes 2", self.bootstrap)
         self.assertIn(
             "'$env:STORYFORGE_DEPLOYMENT_ROLE = ''Hub'''",
             self.bootstrap,
+        )
+
+    def test_deployment_verifier_checks_web_and_rpc_health(self) -> None:
+        self.assertIn(
+            '$webHealthUrl = "http://127.0.0.1:$Port/web/api/health"',
+            self.verify,
+        )
+        self.assertIn(
+            '$hubHealthUrl = "http://127.0.0.1:$Port/health"',
+            self.verify,
+        )
+        self.assertIn("Add-Check -Name 'hub_web_health'", self.verify)
+        self.assertIn("Add-Check -Name 'hub_rpc_health'", self.verify)
+        self.assertIn("$health.data.backup.ready", self.verify)
+        self.assertIn("$health.data.backup.operational", self.verify)
+        self.assertIn("$backupReadyWait = [Diagnostics.Stopwatch]::StartNew()", self.verify)
+        self.assertIn("$backupReadyWait.Elapsed.TotalMinutes -lt 10", self.verify)
+        self.assertIn(
+            "[string]$hubHealth.service -eq 'storyforge-hub'",
+            self.verify,
+        )
+        self.assertIn(
+            "[string]$hubHealth.app_version -eq $pointerVersion",
+            self.verify,
+        )
+        self.assertIn("[int]$hubHealth.protocol_version -gt 0", self.verify)
+        self.assertIn("[int]$hubHealth.schema_version -gt 0", self.verify)
+        self.assertIn("[string]$hubHealth.site.id", self.verify)
+        self.assertIn(
+            "@($hubHealth.device_capability_fields) -contains 'device_config_sync'",
+            self.verify,
         )
 
     def test_hub_preflight_refuses_existing_task_and_firewall(self) -> None:

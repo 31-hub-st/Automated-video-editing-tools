@@ -13,7 +13,11 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from storyforge.catalog import CatalogRepository, CatalogValidationError
+from storyforge.catalog import (
+    SCHEMA_VERSION,
+    CatalogRepository,
+    CatalogValidationError,
+)
 from storyforge.credentials import hash_password
 from storyforge.hub import (
     CATALOG_RPC_METHODS,
@@ -36,6 +40,7 @@ from storyforge.models import AppSettings
 from storyforge.providers.base import ProviderConfig, ProviderError
 from storyforge.providers.text import TextRequest, TextResult
 from storyforge.rpc_contract import (
+    CONNECTION_IDENTITY_RPC_METHOD,
     DEVICE_CAPABILITY_FIELDS,
     LEGACY_DEVICE_CAPABILITY_FIELDS,
     RPC_CONTRACT_VERSION,
@@ -209,7 +214,14 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
             producer_client.call("list_novels")
 
     def test_health_is_small_public_probe_and_rpc_requires_bearer(self) -> None:
-        health = self.client.health()
+        with patch.object(
+            self.catalog,
+            "bootstrap_summary",
+            side_effect=AssertionError(
+                "public health must not scan business-table counts"
+            ),
+        ):
+            health = self.client.health()
 
         self.assertTrue(health["ok"])
         self.assertEqual(health["service"], "storyforge-hub")
@@ -220,10 +232,13 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
             set(health["device_capability_fields"]), DEVICE_CAPABILITY_FIELDS
         )
         self.assertIn("bootstrap_summary", health["rpc_methods"])
+        self.assertIn(CONNECTION_IDENTITY_RPC_METHOD, health["rpc_methods"])
         self.assertIn("device_heartbeat", health["rpc_methods"])
         self.assertIn("text_polish", health["rpc_methods"])
         self.assertTrue(health["app_version"])
+        self.assertEqual(health["schema_version"], SCHEMA_VERSION)
         self.assertEqual(health["site"]["id"], "hub-test-site")
+        self.assertEqual(health["site"]["name"], "Hub Test")
         with urlopen(self.server.base_url + "/health", timeout=3) as response:
             public_health = json.loads(response.read().decode("utf-8"))
         self.assertTrue(public_health["ok"])
@@ -234,9 +249,20 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
         self.assertFalse(self.server.authenticate("Bearer 中文无效令牌").authenticated)
 
     def test_identity_handshake_exposes_optional_rpc_capabilities(self) -> None:
-        identity = self.client.verify_identity()
+        with patch.object(
+            self.catalog,
+            "bootstrap_summary",
+            side_effect=AssertionError(
+                "current identity handshake must not scan business-table counts"
+            ),
+        ):
+            identity = self.client.verify_identity()
         compatibility = identity["hub_compatibility"]
 
+        self.assertNotIn("counts", identity)
+        self.assertNotIn("journal_mode", identity)
+        self.assertEqual(identity["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(identity["site"]["id"], "hub-test-site")
         self.assertEqual(
             compatibility["rpc_contract_version"], RPC_CONTRACT_VERSION
         )
@@ -245,6 +271,40 @@ class HealthLifecycleAndAuthenticationTests(HubTestCase):
             DEVICE_CAPABILITY_FIELDS,
         )
         self.assertIn("bootstrap_summary", compatibility["rpc_methods"])
+        self.assertIn(
+            CONNECTION_IDENTITY_RPC_METHOD,
+            compatibility["rpc_methods"],
+        )
+
+    def test_identity_handshake_falls_back_for_an_old_hub(self) -> None:
+        client = HubClient("http://127.0.0.1:1", TOKEN)
+        old_health = {
+            "ok": True,
+            "service": "storyforge-hub",
+            "app_version": "1.0.3",
+            "protocol_version": 1,
+            "minimum_client_protocol_version": 1,
+            "rpc_methods": ["bootstrap_summary"],
+        }
+        old_identity = {
+            "schema_version": SCHEMA_VERSION,
+            "site": {"id": "legacy", "name": "Legacy Hub"},
+            "counts": {},
+        }
+        for health in (old_health, {key: value for key, value in old_health.items() if key != "rpc_methods"}):
+            with self.subTest(rpc_manifest="rpc_methods" in health):
+                with (
+                    patch.object(client, "health", return_value=health),
+                    patch.object(
+                        client,
+                        "call",
+                        return_value=old_identity,
+                    ) as call,
+                ):
+                    identity = client.verify_identity()
+
+                call.assert_called_once_with("bootstrap_summary")
+                self.assertEqual(identity["site"]["id"], "legacy")
 
     def test_old_hub_without_capability_manifest_receives_legacy_fields(self) -> None:
         client = HubClient("http://127.0.0.1:1", TOKEN)

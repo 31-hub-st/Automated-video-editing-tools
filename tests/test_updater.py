@@ -337,6 +337,61 @@ class UpdatePackageTests(unittest.TestCase):
                 len(validation["bundle_files"]),
             )
 
+    def test_update_zip_preserves_the_complete_one_click_recovery_payload(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        recovery_files = (
+            "一键恢复StoryForge-Hub.cmd",
+            "Restore-StoryForge-Hub.cmd",
+            "scripts/restore_storyforge_hub_new_machine.ps1",
+            "scripts/bootstrap_storyforge.ps1",
+            "scripts/verify_storyforge_deployment.ps1",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build = root / "build"
+            build.mkdir()
+            (build / "StoryForge.exe").write_bytes(b"built application")
+            (build / "BUILD_STARTUP_VALIDATION.json").write_text(
+                json.dumps(
+                    {"ok": True, "frozen": True, "app_version": __version__}
+                ),
+                encoding="utf-8",
+            )
+            for relative in recovery_files:
+                source = project / Path(relative)
+                target = build / Path(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            write_release_validation(
+                build,
+                entrypoint="StoryForge.exe",
+                requested_version=__version__,
+                with_local_ai=False,
+            )
+            output = root / "release" / "update.zip"
+
+            build_package(
+                build,
+                output_path=output,
+                entrypoint="StoryForge.exe",
+                version=__version__,
+            )
+
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+                for relative in recovery_files:
+                    with self.subTest(relative=relative):
+                        self.assertIn(relative, names)
+                        if not relative.isascii():
+                            self.assertTrue(
+                                archive.getinfo(relative).flag_bits & 0x800,
+                                "non-ASCII recovery filename must carry the ZIP UTF-8 flag",
+                            )
+                        self.assertEqual(
+                            archive.read(relative),
+                            (project / Path(relative)).read_bytes(),
+                        )
+
     def test_release_validation_rejects_tampered_managed_file_list(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

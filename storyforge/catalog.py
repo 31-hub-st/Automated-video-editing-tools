@@ -3107,6 +3107,20 @@ class CatalogRepository:
                 "counts": counts,
             }
 
+    def connection_identity(self) -> dict[str, Any]:
+        """Return the bounded identity established when the catalog opened.
+
+        Construction already validates and migrates the catalog before the Hub
+        can listen.  A public liveness probe must not repeat business-table
+        counts: those scans grow with production history and can make device
+        enrollment time out while the Hub is otherwise serving requests.
+        """
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "site": {"id": self.site_id, "name": self.site_name},
+        }
+
     def _can_manage_all_production_presets(
         self, actor_user_id: str | None
     ) -> bool:

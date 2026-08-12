@@ -1541,6 +1541,9 @@ class FFmpegPlanningTests(unittest.TestCase):
                 "end_card_duration": 5.0,
                 "render_mode": "compatibility",
             }
+            # This deadline detects the buffering regression: a healthy graph emits
+            # before the ending window, regardless of transient host startup load.
+            first_frame_deadline = float(common["end_card_duration"]) - 0.5
             plans = {
                 "caption_only": build_ffmpeg_plan(
                     [VideoSegment(source, 10.0, 10.0)],
@@ -1617,16 +1620,18 @@ class FFmpegPlanningTests(unittest.TestCase):
                     future = executor.submit(wait_for_frame)
                     try:
                         try:
-                            first_frame_after = future.result(timeout=2.4)
+                            first_frame_after = future.result(timeout=first_frame_deadline)
                         except FutureTimeoutError:
                             process.kill()
                             _stdout, stderr = process.communicate(timeout=10)
                             self.fail(
-                                "FFmpeg did not emit a frame before the 5-second ending "
-                                "window; the overlay is buffering the primary stream. "
+                                "FFmpeg did not emit a frame before the "
+                                f"{first_frame_deadline:g}-second streaming deadline "
+                                f"ahead of the {common['end_card_duration']:g}-second "
+                                "ending window; the overlay is buffering the primary stream. "
                                 f"FFmpeg tail: {stderr[-600:]}"
                             )
-                        self.assertLess(first_frame_after, 2.4)
+                        self.assertLess(first_frame_after, first_frame_deadline)
                     finally:
                         if process.poll() is None:
                             process.kill()

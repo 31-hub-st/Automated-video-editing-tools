@@ -26,6 +26,13 @@ from storyforge import __version__  # noqa: E402
 
 UI_FILES = ("index.html", "app.js", "styles.css", "studio-theme.css")
 STABLE_ACCEPTANCE_REPORT = "BUILD_STABILITY_ACCEPTANCE.json"
+RECOVERY_PAYLOAD_FILES = (
+    "一键恢复StoryForge-Hub.cmd",
+    "Restore-StoryForge-Hub.cmd",
+    "scripts/restore_storyforge_hub_new_machine.ps1",
+    "scripts/bootstrap_storyforge.ps1",
+    "scripts/verify_storyforge_deployment.ps1",
+)
 
 
 class PackageSmokeError(RuntimeError):
@@ -72,6 +79,65 @@ def _validate_ui_files(ui_root: Path, package_root: Path) -> list[dict[str, Any]
         if not path.is_file() or path.stat().st_size <= 0:
             raise PackageSmokeError(f"Packaged UI asset is missing or empty: {path}")
         files.append({"name": name, "bytes": path.stat().st_size})
+    return files
+
+
+def _validate_recovery_payload(package_root: Path) -> list[dict[str, Any]]:
+    payload: dict[str, bytes] = {}
+    files: list[dict[str, Any]] = []
+    for relative in RECOVERY_PAYLOAD_FILES:
+        path = package_root / Path(relative)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise PackageSmokeError(
+                f"One-click Hub recovery payload is missing or empty: {path}"
+            )
+        raw = path.read_bytes()
+        payload[relative] = raw
+        files.append({"name": relative, "bytes": len(raw)})
+
+    chinese_name, stable_name, restore_name, bootstrap_name, verify_name = (
+        RECOVERY_PAYLOAD_FILES
+    )
+    try:
+        chinese_launcher = payload[chinese_name].decode("ascii")
+        stable_launcher = payload[stable_name].decode("ascii")
+        payload[bootstrap_name].decode("ascii")
+        payload[verify_name].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise PackageSmokeError(
+            "Recovery launchers and ASCII PowerShell helpers must be ASCII-safe."
+        ) from error
+
+    if 'Restore-StoryForge-Hub.cmd' not in chinese_launcher:
+        raise PackageSmokeError(
+            "Chinese recovery launcher does not delegate to the stable ASCII launcher."
+        )
+    for required in (
+        "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "-ExecutionPolicy Bypass",
+        "%~dp0scripts\\restore_storyforge_hub_new_machine.ps1",
+    ):
+        if required not in stable_launcher:
+            raise PackageSmokeError(
+                "Stable recovery launcher is missing its PowerShell 5.1 delegation contract."
+            )
+
+    restore_raw = payload[restore_name]
+    if not restore_raw.startswith(b"\xef\xbb\xbf"):
+        raise PackageSmokeError(
+            "Chinese recovery PowerShell script must use a UTF-8 BOM for Windows PowerShell 5.1."
+        )
+    try:
+        restore_script = restore_raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise PackageSmokeError(
+            "Chinese recovery PowerShell script is not valid UTF-8."
+        ) from error
+    for dependency in ("bootstrap_storyforge.ps1", "verify_storyforge_deployment.ps1"):
+        if dependency not in restore_script:
+            raise PackageSmokeError(
+                f"Recovery PowerShell script does not delegate to {dependency}."
+            )
     return files
 
 
@@ -222,6 +288,7 @@ def run_package_smoke(
 
     ui_root = _find_ui_root(root)
     packaged_ui = _validate_ui_files(ui_root, root)
+    recovery_payload = _validate_recovery_payload(root)
     startup_validation = _read_json(
         root / FROZEN_BUILD_VALIDATION,
         label="Build startup validation",
@@ -345,6 +412,7 @@ def run_package_smoke(
             "status": "passed",
             "path": str(root / FROZEN_RELEASE_VALIDATION),
         },
+        "recovery": {"status": "passed", "files": recovery_payload},
         "stable_acceptance": stable,
         "runtime": runtime,
     }

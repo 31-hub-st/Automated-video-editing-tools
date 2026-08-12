@@ -2,7 +2,7 @@
 
 ## 新电脑一键恢复 Hub
 
-普通用户不需要 Codex，也不用输入 PowerShell 命令：在浏览器登录有私有仓库权限的 GitHub 账号，下载仓库 ZIP、解压，然后双击根目录的：
+普通用户不需要 Codex，也不用输入 PowerShell 命令：在浏览器登录有私有仓库权限的 GitHub 账号，从最新稳定 Release 下载正式 `StoryForge-<版本>-update.zip`（不要下载 GitHub 的 Source code/源码 ZIP），完整解压后双击解压目录根部的：
 
 ```text
 一键恢复StoryForge-Hub.cmd
@@ -14,7 +14,7 @@
 
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
-当前正式版本：`v1.0.3`
+当前源码候选版本：`v1.0.4`。在 [v1.0.4 发布交付报告](docs/V1.0.4_RELEASE.md) 的测试、哈希和远程门禁 TODO 全部由真实结果替换前，稳定 Release 仍以 GitHub 标记的 latest 为准，不得把候选源码当成已交付程序。
 
 ## 先看这三份文档
 
@@ -22,7 +22,7 @@ StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制�
 - [Windows 部署与多电脑协同](docs/DEPLOYMENT_WINDOWS.md)：主机、员工制作电脑、数据目录、登录和故障处理。
 - [员工快速使用说明](docs/EMPLOYEE_QUICK_START.md)：最短生产流程。
 
-发布证据、包体哈希和验收结果见 [v1.0.3 正式版交付报告](docs/V1.0.3_RELEASE.md)。
+`v1.0.4` 的发布阻断项和待填写证据见 [v1.0.4 发布交付报告](docs/V1.0.4_RELEASE.md)；[v1.0.3 正式版交付报告](docs/V1.0.3_RELEASE.md) 作为历史发布记录保留。
 
 ## 产品能力
 
@@ -113,12 +113,12 @@ git diff --check
   -RequireStableAcceptance `
   -WithLocalAI `
   -StableStressSeconds 600 `
-  -OutputDirectory 'D:\StoryForgeRelease\1.0.3\dist' `
-  -WorkDirectory 'D:\StoryForgeRelease\1.0.3\work' `
+  -OutputDirectory 'D:\StoryForgeRelease\1.0.4\dist' `
+  -WorkDirectory 'D:\StoryForgeRelease\1.0.4\work' `
   -HubEndpoint 'http://<Hub-IP>:8765'
 ```
 
-随后使用 `scripts/build_update_package.py` 从已验收目录生成统一 ZIP。该 ZIP 既可用于新安装，也可供管理员手动发给员工更新。仅把 ZIP 上传 GitHub Release 不会自动下发到员工端；只有管理员在正在运行的 Hub 内主动发布更新清单时，客户端才会发现该版本。
+随后使用 `scripts/build_update_package.py` 从已验收目录生成统一 ZIP。正式 ZIP 根目录必须直接包含 `一键恢复StoryForge-Hub.cmd`、`Restore-StoryForge-Hub.cmd` 和它们复用的恢复脚本；包体冒烟缺少任一文件都必须失败。该 ZIP 既可用于新安装和全新 Hub 换机恢复，也可供管理员手动发给员工更新。仅把 ZIP 上传 GitHub Release 不会自动下发到员工端；只有管理员在正在运行的 Hub 内主动发布更新清单时，客户端才会发现该版本。
 
 ## 当前权限模型
 

@@ -428,6 +428,11 @@ class HubBackupManager:
         self._daily_date = ""
         self._daily_snapshot_id = ""
         self._daily_snapshot_path = ""
+        # Process-local evidence that at least one complete snapshot has
+        # passed archive, digest and SQLite validation.  It deliberately stays
+        # true while a later periodic check is in progress, but is never set by
+        # scheduler startup alone.
+        self._verified_snapshot_ready = False
         self._status: dict[str, Any] = {
             "state": "idle",
             "last_backup_id": "",
@@ -466,9 +471,33 @@ class HubBackupManager:
         return result
 
     def health_status(self) -> dict[str, Any]:
-        """Return the non-sensitive subset suitable for unauthenticated health."""
+        """Return a small public status without waiting for backup file I/O."""
 
-        return self.status(include_error=False)
+        acquired = self._lock.acquire(blocking=False)
+        try:
+            thread = self._daily_thread
+            ready = bool(self._verified_snapshot_ready)
+            enabled = bool(self._daily_enabled)
+            running = bool(thread is not None and thread.is_alive())
+            has_error = bool(self._status.get("last_error", ""))
+            return {
+                "enabled": enabled,
+                "running": running,
+                # A held lock can mean a large snapshot is being validated.
+                # Public health must stay responsive and report that work
+                # conservatively instead of waiting behind the validation.
+                "state": (
+                    str(self._status.get("state") or "idle")
+                    if acquired
+                    else "checking"
+                ),
+                "has_error": has_error,
+                "ready": ready,
+                "operational": bool(enabled and running and ready and not has_error),
+            }
+        finally:
+            if acquired:
+                self._lock.release()
 
     def _record_snapshot_success(
         self,
@@ -480,6 +509,7 @@ class HubBackupManager:
         reason = str(snapshot.get("reason") or "")
         snapshot_id = str(snapshot.get("id") or "")
         with self._lock:
+            self._verified_snapshot_ready = True
             if update_recent:
                 self._status.update(
                     {
@@ -768,6 +798,7 @@ class HubBackupManager:
                                             "deduplicated backup was removed during cleanup"
                                         )
                                 with self._lock:
+                                    self._verified_snapshot_ready = True
                                     self._status["last_deduplicated_at"] = _iso_utc(
                                         created_at
                                     )
@@ -1534,6 +1565,7 @@ class HubBackupManager:
         with self._lock:
             path = self._resolve_snapshot(value)
             result = self._validate_path(path)
+            self._verified_snapshot_ready = True
             result["path"] = str(path)
             result["archive_size_bytes"] = path.stat().st_size
             return result
@@ -1549,6 +1581,7 @@ class HubBackupManager:
                 try:
                     if validate:
                         item = self._validate_path(path)
+                        self._verified_snapshot_ready = True
                     else:
                         _ensure_regular_source(path)
                         with zipfile.ZipFile(path, "r") as archive:

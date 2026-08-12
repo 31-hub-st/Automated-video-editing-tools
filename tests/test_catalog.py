@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from storyforge.catalog import (
     CatalogConflictError,
@@ -526,6 +527,24 @@ class DeviceManagementTests(CatalogTestCase):
 
 
 class SchemaAndNovelTests(CatalogTestCase):
+    def test_connection_identity_is_bounded_and_does_not_open_sqlite(self) -> None:
+        with patch.object(
+            self.catalog,
+            "_read_connection",
+            side_effect=AssertionError("health identity must not open SQLite"),
+        ):
+            identity = self.catalog.connection_identity()
+
+        self.assertEqual(
+            identity,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "site": {"id": "test-site", "name": "Test Studio"},
+            },
+        )
+        self.assertNotIn("counts", identity)
+        self.assertNotIn("journal_mode", identity)
+
     def test_schema_uses_wal_foreign_keys_busy_timeout_and_summary(self) -> None:
         summary = self.catalog.bootstrap_summary()
 

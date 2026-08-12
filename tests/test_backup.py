@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -664,6 +665,104 @@ class HubBackupTests(unittest.TestCase):
         self.assertEqual(stopped["state"], "stopped")
         self.assertNotIn("last_error", stopped)
         self.assertIn("has_error", stopped)
+        self.assertTrue(stopped["ready"])
+        self.assertFalse(stopped["operational"])
+
+    def test_public_health_requires_one_verified_snapshot_before_ready(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+
+        with self.manager._lock:
+            self.manager._daily_enabled = True
+            self.manager._daily_thread = threading.current_thread()
+            self.manager._status["state"] = "checking"
+
+        initial = self.manager.health_status()
+        self.assertFalse(initial["ready"])
+        self.assertFalse(initial["operational"])
+        self.assertFalse(initial["has_error"])
+
+        self.manager._record_scheduler_error(RuntimeError("first validation failed"))
+        failed = self.manager.health_status()
+        self.assertFalse(failed["ready"])
+        self.assertFalse(failed["operational"])
+        self.assertTrue(failed["has_error"])
+
+        snapshot = self.manager.create_snapshot("daily")
+        self.assertTrue(snapshot["valid"])
+        with self.manager._lock:
+            self.manager._status["state"] = "checking"
+
+        rechecking = self.manager.health_status()
+        self.assertTrue(rechecking["ready"])
+        self.assertTrue(rechecking["operational"])
+        self.assertFalse(rechecking["has_error"])
+
+    def test_public_health_does_not_wait_for_snapshot_validation_lock(self) -> None:
+        connection = self.create_catalog()
+        connection.close()
+        self.manager.create_snapshot("daily")
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+        health_reader_started = threading.Event()
+        health_finished = threading.Event()
+        strict_status_finished = threading.Event()
+        observed: dict[str, object] = {}
+
+        def hold_snapshot_validation_lock() -> None:
+            with self.manager._lock:
+                self.manager._daily_enabled = True
+                self.manager._daily_thread = threading.current_thread()
+                self.manager._status["state"] = "checking"
+                lock_held.set()
+                release_lock.wait(5)
+
+        def read_public_health() -> None:
+            health_reader_started.set()
+            observed.update(self.manager.health_status())
+            health_finished.set()
+
+        def read_strict_status() -> None:
+            self.manager.status()
+            strict_status_finished.set()
+
+        holder = threading.Thread(target=hold_snapshot_validation_lock)
+        reader = threading.Thread(target=read_public_health)
+        strict_reader = threading.Thread(target=read_strict_status)
+        holder.start()
+        self.assertTrue(lock_held.wait(2), "backup lock was not acquired")
+        reader.start()
+        strict_reader.start()
+        try:
+            self.assertTrue(
+                health_reader_started.wait(2),
+                "public health reader was not scheduled",
+            )
+            responsive = health_finished.wait(1.0)
+            strict_status_waited = not strict_status_finished.wait(0.05)
+        finally:
+            release_lock.set()
+            holder.join(2)
+            reader.join(2)
+            strict_reader.join(2)
+
+        self.assertTrue(responsive, "public backup health waited for validation")
+        self.assertTrue(
+            strict_status_waited,
+            "management backup status unexpectedly bypassed synchronization",
+        )
+        self.assertTrue(strict_status_finished.is_set())
+        self.assertEqual(
+            observed,
+            {
+                "enabled": True,
+                "running": True,
+                "state": "checking",
+                "has_error": False,
+                "ready": True,
+                "operational": True,
+            },
+        )
 
 
 if __name__ == "__main__":

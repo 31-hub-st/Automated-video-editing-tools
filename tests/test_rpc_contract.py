@@ -6,6 +6,7 @@ from storyforge.api import StoryForgeApi
 from storyforge.rpc_contract import (
     CATALOG_RPC_METHODS,
     CLIENT_LOCAL_MEDIA_METHODS,
+    CONNECTION_IDENTITY_RPC_METHOD,
     DEVICE_CAPABILITY_FIELDS,
     HUB_RPC_PERMISSION_ANY,
     LEGACY_DEVICE_CAPABILITY_FIELDS,
@@ -30,11 +31,19 @@ class RpcContractTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_hub_permission_rules_cover_catalog_surface(self) -> None:
-        permission_free = {"bootstrap_summary", "get_effective_permissions"}
+        permission_free = {
+            "bootstrap_summary",
+            CONNECTION_IDENTITY_RPC_METHOD,
+            "get_effective_permissions",
+        }
         self.assertEqual(
             CATALOG_RPC_METHODS - permission_free - HUB_RPC_PERMISSION_ANY.keys(),
             set(),
         )
+
+    def test_connection_identity_is_an_explicit_hub_rpc(self) -> None:
+        self.assertIn(CONNECTION_IDENTITY_RPC_METHOD, CATALOG_RPC_METHODS)
+        self.assertNotIn(CONNECTION_IDENTITY_RPC_METHOD, HUB_RPC_PERMISSION_ANY)
 
     def test_local_worker_private_methods_are_explicit(self) -> None:
         private = LOCAL_WORKER_RPC_PERMISSIONS.keys() - WEB_RPC_PERMISSIONS.keys()

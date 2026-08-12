@@ -111,6 +111,17 @@ class _ApiStub:
             status["has_error"] = False
         return status
 
+    def _backup_health_status_value(self) -> dict:
+        return {
+            "available": True,
+            "enabled": True,
+            "running": True,
+            "state": "ready",
+            "has_error": False,
+            "ready": True,
+            "operational": True,
+        }
+
     def get_hub_backup_status(self) -> dict:
         return {"ok": True, "data": self._backup_status_value(include_error=True)}
 
@@ -1035,9 +1046,18 @@ class WebApplicationTests(unittest.TestCase):
     def test_backup_health_is_safe_and_backup_rpc_requires_hub_manage(self) -> None:
         with self._request("/web/api/health") as response:
             health = self._json(response)["data"]["backup"]
-        self.assertTrue(health["available"])
-        self.assertEqual(health["state"], "ready")
-        self.assertNotIn("last_error", health)
+        self.assertEqual(
+            health,
+            {
+                "available": True,
+                "enabled": True,
+                "running": True,
+                "state": "ready",
+                "has_error": False,
+                "ready": True,
+                "operational": True,
+            },
+        )
 
         employee_cookie, employee_csrf, _ = self._login(
             "worker", self.producer_password

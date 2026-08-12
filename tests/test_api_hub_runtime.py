@@ -45,6 +45,28 @@ class ApiHubRuntimeTests(unittest.TestCase):
             self.host_api._shutdown()
         self.temporary.cleanup()
 
+    def test_non_host_public_backup_health_cannot_claim_readiness(self) -> None:
+        api = object.__new__(StoryForgeApi)
+        api._runtime_hub_mode = "local"
+        api._backup_manager = SimpleNamespace(
+            health_status=lambda: {
+                "enabled": True,
+                "running": True,
+                "state": "ready",
+                "has_error": False,
+                "ready": True,
+                "operational": True,
+            }
+        )
+
+        status = api._backup_health_status_value()
+
+        self.assertFalse(status["available"])
+        self.assertFalse(status["enabled"])
+        self.assertFalse(status["running"])
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["operational"])
+
     def test_employee_portable_host_settings_fail_before_hub_server_construction(
         self,
     ) -> None:

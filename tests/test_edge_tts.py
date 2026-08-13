@@ -68,7 +68,7 @@ class EdgeVoiceCatalogTests(unittest.TestCase):
         self.assertEqual(normalize_tts_language("ko-KR"), "ko")
         self.assertEqual(female_voice_candidates("local_kokoro", "de"), ())
 
-    def test_dynamic_catalog_returns_only_real_upstream_female_voices_up_to_three(self) -> None:
+    def test_dynamic_catalog_returns_every_real_upstream_female_voice(self) -> None:
         locale_by_language = {
             "en": "en-US",
             "ja": "ja-JP",
@@ -115,11 +115,40 @@ class EdgeVoiceCatalogTests(unittest.TestCase):
             for language, locale in locale_by_language.items():
                 with self.subTest(language=language):
                     voices = edge_female_voice_candidates(language, refresh=True)
-                    self.assertEqual(len(voices), 3)
+                    self.assertEqual(len(voices), 4)
                     self.assertTrue(
                         all(item.voice_id.startswith(locale + "-") for item in voices)
                     )
-                    self.assertEqual(len({item.voice_id for item in voices}), 3)
+                    self.assertEqual(len({item.voice_id for item in voices}), 4)
+
+    def test_american_english_catalog_does_not_mix_other_regional_voices(self) -> None:
+        rows = [
+            {
+                "ShortName": f"en-US-{name}Neural",
+                "LocalName": name,
+                "Locale": "en-US",
+                "Gender": "Female",
+            }
+            for name in ("Ana", "Aria", "Ava", "Emma")
+        ] + [
+            {
+                "ShortName": f"en-GB-{name}Neural",
+                "LocalName": name,
+                "Locale": "en-GB",
+                "Gender": "Female",
+            }
+            for name in ("Libby", "Maisie", "Sonia")
+        ]
+        with (
+            patch(
+                "storyforge.providers.tts.edge_tts_runtime_available",
+                return_value=True,
+            ),
+            patch("storyforge.providers.tts._query_edge_voices", return_value=rows),
+        ):
+            voices = edge_female_voice_candidates("en", refresh=True)
+        self.assertEqual(len(voices), 4)
+        self.assertTrue(all(item.voice_id.startswith("en-US-") for item in voices))
 
     def test_missing_component_never_returns_static_or_invented_candidates(self) -> None:
         with (

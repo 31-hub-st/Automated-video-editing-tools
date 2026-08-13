@@ -573,6 +573,53 @@ class DeviceEnrollmentTests(HubTestCase):
             value["password_hash"] = hash_password(self.PASSWORD)
         return self.catalog.save_user(value)
 
+    def _production_contract_context(
+        self, suffix: str, production_contract: int
+    ) -> tuple[dict, dict, HubClient]:
+        member = self._save_member(f"contract-{suffix}")
+        enrolled = HubClient.enroll_device(
+            self.server.base_url,
+            member["username"],
+            self.PASSWORD,
+            f"Contract {suffix} PC",
+            installation_id=str(uuid4()),
+            app_version="1.0.6" if production_contract == 1 else "1.0.7",
+            capabilities={"production_contract": production_contract},
+            timeout_seconds=5,
+        )
+        novel = self.catalog.import_novel(
+            {
+                "title": f"Contract story {suffix}",
+                "body": f"Production contract fixture {suffix}.",
+                "episodes": [{"ordinal": 1, "title": "Opening"}],
+            }
+        )["novel"]
+        binding = self.catalog.save_novel_binding(
+            {
+                "novel_id": novel["id"],
+                "platform_name": "GoodNovel",
+                "platform_title": novel["title"],
+            }
+        )
+        code = self.catalog.add_promo_code(
+            {"binding_id": binding["id"], "code": f"CODE{suffix.upper()}"}
+        )
+        draft = self.catalog.save_draft(
+            {
+                "novel_id": novel["id"],
+                "binding_id": binding["id"],
+                "promo_code_id": code["id"],
+                "creative_line_count": 1,
+                "episode_ids": [novel["current_revision"]["episodes"][0]["id"]],
+            },
+            actor_user_id=member["id"],
+        )
+        return (
+            member,
+            draft,
+            HubClient(self.server.base_url, enrolled["token"], timeout_seconds=5),
+        )
+
     def test_password_enrollment_verifies_and_revocation_is_immediate(self) -> None:
         member = self._save_member("password-renderer")
 
@@ -799,6 +846,236 @@ class DeviceEnrollmentTests(HubTestCase):
         self.assertEqual(outdated.exception.code, "client_update_required")
         self.assertIn("版本过旧，请更新", outdated.exception.message)
         self.assertIn(MINIMUM_RENDER_CLIENT_VERSION, outdated.exception.message)
+
+    def test_old_production_contract_can_finish_legacy_work_but_not_claim_new_recipes(self) -> None:
+        member = self._save_member("rolling-renderer")
+        enrolled = HubClient.enroll_device(
+            self.server.base_url,
+            member["username"],
+            self.PASSWORD,
+            "Rolling Render PC",
+            installation_id=str(uuid4()),
+            app_version="1.0.6",
+            capabilities={"production_contract": 1},
+            timeout_seconds=5,
+        )
+        novel = self.catalog.import_novel(
+            {"title": "Rolling contract", "body": "Legacy work remains valid."}
+        )["novel"]
+        binding = self.catalog.save_novel_binding(
+            {
+                "novel_id": novel["id"],
+                "platform_name": "GoodNovel",
+                "platform_title": novel["title"],
+            }
+        )
+        common = {
+            "novel_id": novel["id"],
+            "binding_id": binding["id"],
+            "promo_code_snapshot": "ROLLING",
+        }
+        legacy = self.catalog.save_production_record(
+            {**common, "job_id": "legacy-render-contract", "metadata": {}},
+            actor_user_id=member["id"],
+        )
+        current = self.catalog.save_production_record(
+            {
+                **common,
+                "job_id": "current-render-contract",
+                "metadata": {"required_production_contract": 2},
+            },
+            actor_user_id=member["id"],
+        )
+        client = HubClient(self.server.base_url, enrolled["token"], timeout_seconds=5)
+
+        claimed = client.call(
+            "claim_record_lease",
+            {"record_id": legacy["id"], "device_id": enrolled["device_id"]},
+        )
+        self.assertTrue(claimed["claimed"])
+        with self.assertRaises(HubRemoteError) as outdated:
+            client.call(
+                "claim_record_lease",
+                {"record_id": current["id"], "device_id": enrolled["device_id"]},
+            )
+
+        self.assertEqual(outdated.exception.status, 426)
+        self.assertEqual(outdated.exception.code, "production_contract_update_required")
+        self.assertIn("制作合同", outdated.exception.message)
+
+    def test_old_production_contract_cannot_create_single_or_bulk_new_work(self) -> None:
+        _member, draft, client = self._production_contract_context("old-create", 1)
+        before_total = self.catalog.list_records()["total"]
+
+        with self.assertRaises(HubRemoteError) as single:
+            client.call(
+                "save_production_record",
+                {
+                    "value": {
+                        "draft_id": draft["id"],
+                        "job_id": "old-contract-new-single",
+                        "metadata": {},
+                    }
+                },
+            )
+        with self.assertRaises(HubRemoteError) as bulk:
+            client.call(
+                "save_production_records_bulk",
+                {
+                    "values": [
+                        {
+                            "draft_id": draft["id"],
+                            "job_id": "old-contract-new-bulk-1",
+                            "metadata": {"required_production_contract": 2},
+                        },
+                        {
+                            "draft_id": draft["id"],
+                            "job_id": "old-contract-new-bulk-2",
+                            "metadata": {"required_production_contract": 2},
+                        },
+                    ]
+                },
+            )
+
+        for caught in (single, bulk):
+            self.assertEqual(caught.exception.status, 426)
+            self.assertEqual(
+                caught.exception.code, "production_contract_update_required"
+            )
+        self.assertEqual(self.catalog.list_records()["total"], before_total)
+
+    def test_old_production_contract_can_update_an_existing_legacy_record(self) -> None:
+        member, draft, client = self._production_contract_context("old-update", 1)
+        legacy = self.catalog.save_production_record(
+            {
+                "draft_id": draft["id"],
+                "job_id": "old-contract-existing",
+                "metadata": {},
+            },
+            actor_user_id=member["id"],
+        )
+        claimed = client.call(
+            "claim_record_lease", {"record_id": legacy["id"]}
+        )
+
+        updated = client.call(
+            "save_production_record",
+            {
+                "value": {
+                    "id": legacy["id"],
+                    "status": "running",
+                    "expected_lease_generation": claimed["record"][
+                        "lease_generation"
+                    ],
+                }
+            },
+        )
+
+        self.assertEqual(updated["status"], "running")
+        self.assertEqual(updated["metadata"].get("required_production_contract"), None)
+
+        bulk_updated = client.call(
+            "save_production_records_bulk",
+            {
+                "values": [
+                    {
+                        "id": legacy["id"],
+                        "status": "running",
+                        "progress": 0.25,
+                        "expected_lease_generation": claimed["record"][
+                            "lease_generation"
+                        ],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(bulk_updated["count"], 1)
+        self.assertEqual(bulk_updated["items"][0]["status"], "running")
+
+    def test_current_contract_requires_bounded_contract_for_single_and_bulk_new_work(self) -> None:
+        _member, draft, client = self._production_contract_context("current-create", 2)
+        before_total = self.catalog.list_records()["total"]
+
+        for job_id, metadata in (
+            ("missing-contract", {}),
+            ("legacy-contract", {"required_production_contract": 1}),
+            ("future-contract", {"required_production_contract": 3}),
+        ):
+            with self.subTest(job_id=job_id):
+                with self.assertRaises(HubRemoteError) as rejected:
+                    client.call(
+                        "save_production_record",
+                        {
+                            "value": {
+                                "draft_id": draft["id"],
+                                "job_id": job_id,
+                                "metadata": metadata,
+                            }
+                        },
+                    )
+                self.assertEqual(rejected.exception.status, 426)
+                self.assertEqual(
+                    rejected.exception.code, "production_contract_update_required"
+                )
+        self.assertEqual(self.catalog.list_records()["total"], before_total)
+
+        accepted = client.call(
+            "save_production_record",
+            {
+                "value": {
+                    "draft_id": draft["id"],
+                    "job_id": "current-contract-single",
+                    "metadata": {"required_production_contract": 2},
+                }
+            },
+        )
+        self.assertEqual(
+            accepted["metadata"]["required_production_contract"], 2
+        )
+
+        before_mixed_bulk = self.catalog.list_records()["total"]
+        with self.assertRaises(HubRemoteError) as mixed_bulk:
+            client.call(
+                "save_production_records_bulk",
+                {
+                    "values": [
+                        {
+                            "draft_id": draft["id"],
+                            "job_id": "mixed-bulk-valid",
+                            "metadata": {"required_production_contract": 2},
+                        },
+                        {
+                            "draft_id": draft["id"],
+                            "job_id": "mixed-bulk-invalid",
+                            "metadata": {},
+                        },
+                    ]
+                },
+            )
+        self.assertEqual(mixed_bulk.exception.status, 426)
+        self.assertEqual(self.catalog.list_records()["total"], before_mixed_bulk)
+
+        accepted_bulk = client.call(
+            "save_production_records_bulk",
+            {
+                "values": [
+                    {
+                        "draft_id": draft["id"],
+                        "job_id": f"current-contract-bulk-{index}",
+                        "metadata": {"required_production_contract": 2},
+                    }
+                    for index in range(2)
+                ]
+            },
+        )
+        self.assertEqual(accepted_bulk["count"], 2)
+        self.assertEqual(
+            {
+                item["metadata"]["required_production_contract"]
+                for item in accepted_bulk["items"]
+            },
+            {2},
+        )
 
     def test_current_and_future_render_clients_are_not_version_blocked(self) -> None:
         supported = (
@@ -1029,6 +1306,31 @@ class RpcTests(HubTestCase):
 
 
 class CatalogProxyTests(HubTestCase):
+    def test_proxy_feature_detects_optional_catalog_methods(self) -> None:
+        proxy = HubCatalogProxy(self.client)
+        self.client._server_rpc_methods = frozenset(
+            {"get_novel", "list_voice_preferences"}
+        )
+        self.client._server_capability_manifest_known = True
+
+        self.assertTrue(proxy.supports_rpc_method("list_voice_preferences"))
+        self.assertFalse(proxy.supports_rpc_method("save_voice_preference"))
+
+    def test_old_hub_optional_method_probe_reads_health_only_once(self) -> None:
+        proxy = HubCatalogProxy(self.client)
+        self.client._server_capability_manifest_known = False
+
+        def old_health() -> dict:
+            payload = {"ok": True, "service": "storyforge-hub"}
+            self.client._remember_server_contract(payload)
+            return payload
+
+        with patch.object(self.client, "health", side_effect=old_health) as health:
+            self.assertFalse(proxy.supports_rpc_method("list_voice_preferences"))
+            self.assertFalse(proxy.supports_rpc_method("list_voice_preferences"))
+
+        health.assert_called_once_with()
+
     def test_proxy_binds_repository_positional_arguments_into_rpc_params(self) -> None:
         proxy = HubCatalogProxy(self.client)
         imported = proxy.import_novel(
@@ -1341,6 +1643,7 @@ class PermissionEnforcementTests(HubTestCase):
             "publishing_accounts.manage",
             "users.manage",
             "permissions.manage",
+            "hub.manage",
         ):
             self.catalog.set_user_permission(
                 producer["id"], permission, True, actor_user_id=self.actor["id"]
@@ -1352,12 +1655,46 @@ class PermissionEnforcementTests(HubTestCase):
             )["status"],
             "inactive",
         )
-        self.assertEqual(
-            producer_client.call(
-                "save_platform", {"value": {"name": "Granted Platform"}}
-            )["name"],
-            "Granted Platform",
+        granted_platform = producer_client.call(
+            "save_platform", {"value": {"name": "Granted Platform"}}
         )
+        self.assertEqual(granted_platform["name"], "Granted Platform")
+        non_template_edit = producer_client.call(
+            "save_platform",
+            {
+                "value": {
+                    "id": granted_platform["id"],
+                    "name": "Granted Platform Renamed",
+                    "brand_color": "#334455",
+                    "expected_version": granted_platform["row_version"],
+                }
+            },
+        )
+        self.assertEqual(non_template_edit["brand_color"], "#334455")
+        with self.assertRaises(HubRemoteError) as template_denied:
+            producer_client.call(
+                "save_platform",
+                {
+                    "value": {
+                        "id": granted_platform["id"],
+                        "name": "Granted Platform Renamed",
+                        "search_template": "Forged {platform}: {code}",
+                        "expected_version": non_template_edit["row_version"],
+                    }
+                },
+            )
+        self.assertEqual(template_denied.exception.status, 403)
+        with self.assertRaises(HubRemoteError) as team_voice_denied:
+            producer_client.call(
+                "set_team_voice_disabled",
+                {
+                    "provider": "local_kokoro",
+                    "language": "en",
+                    "voice_id": "af_bella",
+                    "disabled": True,
+                },
+            )
+        self.assertEqual(team_voice_denied.exception.status, 403)
         self.assertEqual(
             producer_client.call(
                 "save_publishing_account",

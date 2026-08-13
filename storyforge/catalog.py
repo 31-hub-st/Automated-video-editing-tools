@@ -34,7 +34,7 @@ from .services.text_processing import count_words
 from .production_presets import ProductionPresetStore
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 
 ROLE_ADMIN = "admin"
@@ -195,6 +195,14 @@ PORTABLE_CONFIG_SCALAR_ENUMS: dict[str, frozenset[str]] = {
     "color_grade": COLOR_GRADES,
     "render_mode": frozenset({"speed", "quality", "compatibility"}),
     "video_template": frozenset({"classic", "platform_story_card"}),
+    "intro_card_start_mode": frozenset({"seconds", "body_percent"}),
+    "intro_card_display_mode": frozenset(
+        {"seconds", "body_percent", "body_end"}
+    ),
+    "code_card_start_mode": frozenset({"seconds", "body_percent"}),
+    "code_card_display_mode": frozenset(
+        {"seconds", "body_percent", "body_end"}
+    ),
 }
 PORTABLE_CONFIG_NUMBER_RANGES: dict[str, tuple[float, float, bool]] = {
     "retention_min": (0.50, 1.0, False),
@@ -210,6 +218,11 @@ PORTABLE_CONFIG_NUMBER_RANGES: dict[str, tuple[float, float, bool]] = {
     "intro_card_start_seconds": (0.0, float("inf"), False),
     "code_card_start_seconds": (0.0, float("inf"), False),
     "code_card_duration_seconds": (0.0, float("inf"), False),
+    "card_timeline_schema_version": (0, 1, True),
+    "intro_card_start_value": (0.0, 100000.0, False),
+    "intro_card_display_value": (0.0, 100000.0, False),
+    "code_card_start_value": (0.0, 100000.0, False),
+    "code_card_display_value": (0.0, 100000.0, False),
     "max_episode_minutes": (1.0, 60.0, False),
     "end_card_seconds": (5.0, 7.0, False),
 }
@@ -880,6 +893,29 @@ CREATE TABLE IF NOT EXISTS user_permissions (
     PRIMARY KEY(user_id, permission)
 );
 
+CREATE TABLE IF NOT EXISTS voice_user_preferences (
+    site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES software_users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    language TEXT NOT NULL,
+    voice_id TEXT NOT NULL,
+    favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1)),
+    hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(site_id, user_id, provider, language, voice_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_team_status (
+    site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    language TEXT NOT NULL,
+    voice_id TEXT NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    updated_by_user_id TEXT REFERENCES software_users(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(site_id, provider, language, voice_id)
+);
+
 CREATE TABLE IF NOT EXISTS hub_devices (
     id TEXT PRIMARY KEY,
     site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -1456,6 +1492,7 @@ class CatalogRepository:
             # after every earlier structural migration instead of trusting a
             # copied version-14 marker.
             CatalogRepository._migrate_lease_fencing_schema(connection)
+            CatalogRepository._migrate_voice_catalog_schema(connection)
             return
 
         # Version 3 temporarily introduced a supervisor role. Version 4 folds
@@ -1565,6 +1602,47 @@ class CatalogRepository:
         CatalogRepository._migrate_authored_episode_choices(connection)
         CatalogRepository._migrate_soft_delete_schema(connection)
         CatalogRepository._migrate_lease_fencing_schema(connection)
+        CatalogRepository._migrate_voice_catalog_schema(connection)
+
+    @staticmethod
+    def _migrate_voice_catalog_schema(connection: sqlite3.Connection) -> None:
+        """Create lightweight account/team state for workstation voice catalogs."""
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS voice_user_preferences (
+                    site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES software_users(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    voice_id TEXT NOT NULL,
+                    favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1)),
+                    hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(site_id, user_id, provider, language, voice_id)
+                );
+                CREATE TABLE IF NOT EXISTS voice_team_status (
+                    site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    voice_id TEXT NOT NULL,
+                    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+                    updated_by_user_id TEXT REFERENCES software_users(id) ON DELETE SET NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(site_id, provider, language, voice_id)
+                );
+                """
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (15, utc_now()),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     @staticmethod
     def _migrate_lease_fencing_schema(connection: sqlite3.Connection) -> None:
@@ -3135,6 +3213,187 @@ class CatalogRepository:
         effective = dict(permissions.get("effective") or {})
         return bool(effective.get("hub.manage"))
 
+    @staticmethod
+    def _voice_identity(
+        provider: object, language: object, voice_id: object
+    ) -> tuple[str, str, str]:
+        normalized_provider = _required_text(
+            provider, "provider", maximum=80
+        ).casefold().replace("-", "_")
+        normalized_language = _required_text(
+            language, "language", maximum=32
+        ).casefold().replace("_", "-")
+        normalized_voice_id = _required_text(voice_id, "voice_id", maximum=180)
+        return normalized_provider, normalized_language, normalized_voice_id
+
+    def list_voice_preferences(
+        self, *, actor_user_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return only the actor's personal flags plus shared team status."""
+
+        actor = _required_text(actor_user_id, "actor_user_id", maximum=120)
+        with self._read_connection() as connection:
+            personal_rows = connection.execute(
+                """
+                SELECT provider, language, voice_id, favorite, hidden, updated_at
+                FROM voice_user_preferences
+                WHERE site_id = ? AND user_id = ?
+                ORDER BY provider, language, voice_id
+                """,
+                (self.site_id, actor),
+            ).fetchall()
+            team_rows = connection.execute(
+                """
+                SELECT provider, language, voice_id, disabled,
+                       updated_by_user_id, updated_at
+                FROM voice_team_status
+                WHERE site_id = ?
+                ORDER BY provider, language, voice_id
+                """,
+                (self.site_id,),
+            ).fetchall()
+        return {
+            "personal": [
+                {
+                    **dict(row),
+                    "favorite": bool(row["favorite"]),
+                    "hidden": bool(row["hidden"]),
+                }
+                for row in personal_rows
+            ],
+            "team": [
+                {**dict(row), "disabled": bool(row["disabled"])}
+                for row in team_rows
+            ],
+        }
+
+    def save_voice_preference(
+        self,
+        provider: object,
+        language: object,
+        voice_id: object,
+        *,
+        favorite: bool = False,
+        hidden: bool = False,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert one authenticated user's lightweight voice preference."""
+
+        actor = _required_text(actor_user_id, "actor_user_id", maximum=120)
+        identity = self._voice_identity(provider, language, voice_id)
+        now = utc_now()
+        with self._write_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO voice_user_preferences(
+                    site_id, user_id, provider, language, voice_id,
+                    favorite, hidden, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(site_id, user_id, provider, language, voice_id)
+                DO UPDATE SET favorite = excluded.favorite,
+                              hidden = excluded.hidden,
+                              updated_at = excluded.updated_at
+                """,
+                (
+                    self.site_id,
+                    actor,
+                    *identity,
+                    int(bool(favorite)),
+                    int(bool(hidden)),
+                    now,
+                ),
+            )
+            self._audit(
+                connection,
+                action="save",
+                entity_type="voice_user_preference",
+                entity_id="|".join((actor, *identity)),
+                actor_user_id=actor,
+                after={
+                    "provider": identity[0],
+                    "language": identity[1],
+                    "voice_id": identity[2],
+                    "favorite": bool(favorite),
+                    "hidden": bool(hidden),
+                },
+            )
+        return {
+            "provider": identity[0],
+            "language": identity[1],
+            "voice_id": identity[2],
+            "favorite": bool(favorite),
+            "hidden": bool(hidden),
+            "updated_at": now,
+        }
+
+    def set_team_voice_disabled(
+        self,
+        provider: object,
+        language: object,
+        voice_id: object,
+        *,
+        disabled: bool,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Let an administrator disable or restore one real catalog voice."""
+
+        actor = _required_text(actor_user_id, "actor_user_id", maximum=120)
+        identity = self._voice_identity(provider, language, voice_id)
+        now = utc_now()
+        with self._write_connection() as connection:
+            actor_row = connection.execute(
+                "SELECT role, active FROM software_users WHERE id = ? AND site_id = ?",
+                (actor, self.site_id),
+            ).fetchone()
+            if not (
+                actor_row is not None
+                and bool(actor_row["active"])
+                and str(actor_row["role"]) == ROLE_ADMIN
+            ):
+                raise CatalogPermissionError(
+                    "team voices can be disabled only by an administrator"
+                )
+            connection.execute(
+                """
+                INSERT INTO voice_team_status(
+                    site_id, provider, language, voice_id, disabled,
+                    updated_by_user_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(site_id, provider, language, voice_id)
+                DO UPDATE SET disabled = excluded.disabled,
+                              updated_by_user_id = excluded.updated_by_user_id,
+                              updated_at = excluded.updated_at
+                """,
+                (
+                    self.site_id,
+                    *identity,
+                    int(bool(disabled)),
+                    actor,
+                    now,
+                ),
+            )
+            self._audit(
+                connection,
+                action="disable" if disabled else "restore",
+                entity_type="voice_team_status",
+                entity_id="|".join(identity),
+                actor_user_id=actor,
+                after={
+                    "provider": identity[0],
+                    "language": identity[1],
+                    "voice_id": identity[2],
+                    "disabled": bool(disabled),
+                },
+            )
+        return {
+            "provider": identity[0],
+            "language": identity[1],
+            "voice_id": identity[2],
+            "disabled": bool(disabled),
+            "updated_by_user_id": actor,
+            "updated_at": now,
+        }
+
     def list_production_presets(
         self, *, actor_user_id: str | None = None
     ) -> dict[str, Any]:
@@ -4447,9 +4706,25 @@ class CatalogRepository:
             raise CatalogValidationError("platform payload must be an object")
         platform_id = _optional_text(value.get("id"), maximum=120)
         name = _required_text(value.get("name"), "platform name", maximum=300)
+        default_search_template = "Search {platform}: {code}"
+        default_ending_template = (
+            "Download {platform} and search code {code} to continue reading."
+        )
         now = utc_now()
         try:
             with self._write_connection() as connection:
+                template_editor_is_admin = not actor_user_id
+                if actor_user_id:
+                    actor = connection.execute(
+                        "SELECT role, active FROM software_users "
+                        "WHERE id = ? AND site_id = ?",
+                        (str(actor_user_id), self.site_id),
+                    ).fetchone()
+                    template_editor_is_admin = bool(
+                        actor is not None
+                        and bool(actor["active"])
+                        and str(actor["role"]) == ROLE_ADMIN
+                    )
                 row: sqlite3.Row | None = None
                 if platform_id:
                     row = connection.execute(
@@ -4464,6 +4739,21 @@ class CatalogRepository:
                     if row is not None:
                         platform_id = str(row["id"])
                 if row is None:
+                    search_template = (
+                        _optional_text(value.get("search_template"), maximum=2000)
+                        or default_search_template
+                    )
+                    ending_template = (
+                        _optional_text(value.get("ending_template"), maximum=2000)
+                        or default_ending_template
+                    )
+                    if not template_editor_is_admin and (
+                        search_template != default_search_template
+                        or ending_template != default_ending_template
+                    ):
+                        raise CatalogPermissionError(
+                            "platform templates can be changed only by an administrator"
+                        )
                     platform_id = platform_id or _new_id()
                     connection.execute(
                         """
@@ -4478,10 +4768,8 @@ class CatalogRepository:
                             self.site_id,
                             name,
                             _normalized_key(name),
-                            _optional_text(value.get("search_template"), maximum=2000)
-                            or "Search {platform}: {code}",
-                            _optional_text(value.get("ending_template"), maximum=2000)
-                            or "Download {platform} and search code {code} to continue reading.",
+                            search_template,
+                            ending_template,
                             _optional_text(value.get("logo_path"), maximum=2000),
                             _optional_text(value.get("brand_color"), maximum=64),
                             int(bool(value.get("archived", False))),
@@ -4494,6 +4782,21 @@ class CatalogRepository:
                     action = "platform.created"
                 else:
                     self._check_version(row, self._expected_version(value))
+                    search_template = _optional_text(
+                        value.get("search_template", row["search_template"]),
+                        maximum=2000,
+                    )
+                    ending_template = _optional_text(
+                        value.get("ending_template", row["ending_template"]),
+                        maximum=2000,
+                    )
+                    if not template_editor_is_admin and (
+                        search_template != str(row["search_template"])
+                        or ending_template != str(row["ending_template"])
+                    ):
+                        raise CatalogPermissionError(
+                            "platform templates can be changed only by an administrator"
+                        )
                     before = {
                         "name": row["name"],
                         "search_template": row["search_template"],
@@ -4513,8 +4816,8 @@ class CatalogRepository:
                         (
                             name,
                             _normalized_key(name),
-                            _optional_text(value.get("search_template", row["search_template"]), maximum=2000),
-                            _optional_text(value.get("ending_template", row["ending_template"]), maximum=2000),
+                            search_template,
+                            ending_template,
                             _optional_text(value.get("logo_path", row["logo_path"]), maximum=2000),
                             _optional_text(value.get("brand_color", row["brand_color"]), maximum=64),
                             int(bool(value.get("archived", bool(row["archived"])))),

@@ -862,7 +862,13 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             repository = SettingsRepository(root / "state")
             queue = JobQueue(lambda *_: "")
             api = StoryForgeApi(repository=repository, queue=queue)
-            saved_platform = api.save_platform({"name": "Archive Platform"})
+            saved_platform = api.save_platform(
+                {
+                    "name": "Archive Platform",
+                    "search_template": "Frozen search {platform}: {code}",
+                    "ending_template": "Frozen ending {platform}: {code}",
+                }
+            )
             self.assertTrue(saved_platform["ok"], saved_platform)
             platform = api._state.platforms[0]
             imported = api._catalog.import_novel(
@@ -910,6 +916,21 @@ class ApplicationStateAndApiTests(unittest.TestCase):
                 status=JobStatus.FAILED,
                 message="synthetic failure",
                 production_record_id=record["id"],
+                required_production_contract=2,
+                promo_code_snapshot="ARC001",
+                platform_copy_schema_version=2,
+                platform_name_snapshot="Archive Platform",
+                platform_search_template_snapshot=(
+                    "Frozen search {platform}: {code}"
+                ),
+                platform_ending_template_snapshot=(
+                    "Frozen ending {platform}: {code}"
+                ),
+                platform_search_text="Frozen search Archive Platform: ARC001",
+                platform_ending_text="Frozen ending Archive Platform: ARC001",
+                platform_authoritative_ending_text=(
+                    "Frozen ending Archive Platform: ARC001"
+                ),
             )
             queue.enqueue_jobs([job], platform)
 
@@ -933,6 +954,9 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             self.assertEqual(bootstrap["archived_jobs"][0]["id"], job.id)
             reopened = type(api._catalog)(api._catalog.database_path)
             self.assertEqual(reopened.get_archived_job(job.id)["message"], "synthetic failure")
+            api._catalog.delete_platform(platform.id)
+            api._state.platforms = []
+            self.assertEqual(api._catalog.list_platforms()["items"], [])
 
             restored = api.restore_job(job.id)
 
@@ -942,6 +966,17 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             self.assertEqual(queue.list_jobs()[0]["batch_id"], record["batch_id"])
             self.assertEqual(queue.list_jobs()[0]["message"], "synthetic failure")
             self.assertEqual(api.get_archived_jobs()["data"], [])
+            self.assertEqual(api._state.platforms, [])
+            restored_platform = queue._platforms[platform.id]
+            self.assertEqual(restored_platform.name, "Archive Platform")
+            self.assertEqual(
+                restored_platform.search_template,
+                "Frozen search {platform}: {code}",
+            )
+            self.assertEqual(
+                restored_platform.ending_template,
+                "Frozen ending {platform}: {code}",
+            )
 
     def test_api_archives_and_restores_a_complete_batch_without_partial_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -949,7 +984,13 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             repository = SettingsRepository(root / "state")
             queue = JobQueue(lambda *_: "")
             api = StoryForgeApi(repository=repository, queue=queue)
-            saved_platform = api.save_platform({"name": "Batch Archive Platform"})
+            saved_platform = api.save_platform(
+                {
+                    "name": "Batch Archive Platform",
+                    "search_template": "Batch search {platform}: {code}",
+                    "ending_template": "Batch ending {platform}: {code}",
+                }
+            )
             self.assertTrue(saved_platform["ok"], saved_platform)
             platform = api._state.platforms[0]
             imported = api._catalog.import_novel(
@@ -1008,6 +1049,25 @@ class ApplicationStateAndApiTests(unittest.TestCase):
                     output_folder=str(root),
                     status=JobStatus(str(record["status"])),
                     production_record_id=str(record["id"]),
+                    required_production_contract=2,
+                    promo_code_snapshot="BAT001",
+                    platform_copy_schema_version=2,
+                    platform_name_snapshot="Batch Archive Platform",
+                    platform_search_template_snapshot=(
+                        "Batch search {platform}: {code}"
+                    ),
+                    platform_ending_template_snapshot=(
+                        "Batch ending {platform}: {code}"
+                    ),
+                    platform_search_text=(
+                        "Batch search Batch Archive Platform: BAT001"
+                    ),
+                    platform_ending_text=(
+                        "Batch ending Batch Archive Platform: BAT001"
+                    ),
+                    platform_authoritative_ending_text=(
+                        "Batch ending Batch Archive Platform: BAT001"
+                    ),
                 )
                 for record in records
             ]
@@ -1020,6 +1080,9 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             repeated = api.archive_batch(batch_id)
             self.assertTrue(repeated["ok"], repeated)
             self.assertTrue(repeated["data"]["already_archived"])
+            api._catalog.delete_platform(platform.id)
+            api._state.platforms = []
+            self.assertEqual(api._catalog.list_platforms()["items"], [])
 
             restored = api.restore_batch(batch_id)
             self.assertTrue(restored["ok"], restored)
@@ -1032,6 +1095,55 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             self.assertTrue(repeated_restore["ok"], repeated_restore)
             self.assertTrue(repeated_restore["data"]["already_restored"])
             self.assertEqual(len(queue.list_jobs()), 2)
+            self.assertEqual(api._state.platforms, [])
+            restored_platform = queue._platforms[platform.id]
+            self.assertEqual(restored_platform.name, "Batch Archive Platform")
+            self.assertEqual(
+                restored_platform.search_template,
+                "Batch search {platform}: {code}",
+            )
+            self.assertEqual(
+                restored_platform.ending_template,
+                "Batch ending {platform}: {code}",
+            )
+
+    def test_legacy_archived_job_still_requires_an_active_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queue = JobQueue(lambda *_: "")
+            api = StoryForgeApi(
+                repository=SettingsRepository(root / "state"),
+                queue=queue,
+            )
+            self.addCleanup(api._shutdown)
+            legacy = RenderJob(
+                id="legacy-missing-platform",
+                batch_id="legacy-batch",
+                platform_id="removed-platform",
+                source_file=str(root / "story.txt"),
+                title="Legacy platform history",
+                code="OLD001",
+                video_folder=str(root),
+                music_folder=str(root),
+                output_folder=str(root),
+                status=JobStatus.FAILED,
+                production_record_id="legacy-record",
+                platform_copy_schema_version=0,
+            ).to_dict()
+            with (
+                mock.patch.object(
+                    api._catalog,
+                    "get_archived_job",
+                    return_value=legacy,
+                ),
+                mock.patch.object(api, "_require_job_record_access"),
+                mock.patch.object(queue, "restore_archived") as restore_archived,
+            ):
+                result = api.restore_job("legacy-missing-platform")
+
+            self.assertFalse(result["ok"], result)
+            self.assertIn("平台已经不存在", result["error"])
+            restore_archived.assert_not_called()
 
     def test_api_rejects_archiving_queued_or_rendering_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1302,6 +1414,55 @@ class ApplicationStateAndApiTests(unittest.TestCase):
             self.assertEqual(platform["logo_path"], "")
             self.assertEqual(platform["logo_uri"], "")
             self.assertEqual(platform["brand_color"], "#E94B5F")
+
+    def test_direct_api_cannot_bypass_admin_only_platform_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = SettingsRepository(Path(temp) / "state")
+            api = StoryForgeApi(repository=repository, queue=JobQueue(lambda *_: ""))
+            admin = api._catalog.save_user(
+                {"username": "template-admin", "role": "admin"}
+            )
+            producer = api._catalog.save_user(
+                {"username": "platform-editor", "role": "producer"}
+            )
+            api._catalog.set_user_permission(
+                producer["id"],
+                "platforms.manage",
+                True,
+                actor_user_id=admin["id"],
+            )
+            saved = api.save_platform(
+                {
+                    "id": "direct-platform",
+                    "name": "Direct Platform",
+                    "search_template": "Search {platform}: {code}",
+                    "ending_template": "Continue on {platform} with {code}.",
+                }
+            )
+            self.assertTrue(saved["ok"], saved)
+            catalog_platform = api._catalog.list_platforms()["items"][0]
+
+            with api._web_actor_scope(producer["id"]):
+                denied = api.save_platform(
+                    {
+                        "id": catalog_platform["id"],
+                        "name": catalog_platform["name"],
+                        "search_template": "Forged {platform}: {code}",
+                        "ending_template": catalog_platform["ending_template"],
+                        "row_version": catalog_platform["row_version"],
+                    }
+                )
+
+            self.assertFalse(denied["ok"], denied)
+            self.assertIn("administrator", denied["error"])
+            persisted = api._catalog.list_platforms()["items"][0]
+            self.assertEqual(
+                persisted["search_template"], catalog_platform["search_template"]
+            )
+            self.assertEqual(
+                api._state.platform_by_id(catalog_platform["id"]).search_template,
+                catalog_platform["search_template"],
+            )
 
     def test_nested_setting_updates_merge_and_invalid_retention_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

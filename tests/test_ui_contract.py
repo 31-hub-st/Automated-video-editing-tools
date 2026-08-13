@@ -213,7 +213,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("function paintOutroCover(container, novel", javascript)
         for control_id in (
             "production-intro-card-enabled",
-            "production-intro-card-duration",
+            "production-intro-card-display-mode",
+            "production-intro-card-display-value",
             "production-intro-card-copy",
             "production-intro-card-preset",
             "production-code-card-preset",
@@ -301,6 +302,17 @@ class StyleSettingsContractTests(unittest.TestCase):
             self.assertIn(f'data-production-jump="{section}"', html)
             self.assertIn(f'data-production-jump-status="{section}"', html)
         self.assertIn("function productionMissingDescriptors(novel, draft)", javascript)
+        missing_start = javascript.index("function productionMissingDescriptors")
+        missing_end = javascript.index("function productionMissingItems", missing_start)
+        self.assertNotIn("if (forQueue)", javascript[missing_start:missing_end])
+        workbench_start = javascript.index("function renderProductionWorkbench()")
+        workbench_end = javascript.index("function syncProductionDraftFromControls", workbench_start)
+        self.assertIn(
+            "window.queueMicrotask(() => void loadProductionVoiceCatalog())",
+            javascript[workbench_start:workbench_end],
+        )
+        self.assertIn("const platformSearchText = String(platformCopyDefaults.search)", javascript)
+        self.assertIn("const platformEndingText = String(platformCopyDefaults.ending)", javascript)
         self.assertIn("function focusProductionSection(section, selector", javascript)
         self.assertIn("function updateProductionJumpbar", javascript)
         self.assertIn("data-production-missing=", javascript)
@@ -614,9 +626,9 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('["it", "意大利语"]', javascript)
         self.assertIn('["hi", "印地语"]', javascript)
         self.assertIn('new Set(["en", "ja", "es", "fr", "hi", "it", "pt", "zh"])', javascript)
-        self.assertIn('hi: "hi-IN"', javascript)
-        self.assertIn('it: "it-IT"', javascript)
-        self.assertIn('languageInfo.key === "en" ? "American female" : `${languageInfo.label}女声`', javascript)
+        self.assertIn('checkedCall("get_voice_catalog", novel.id', javascript)
+        self.assertIn("candidate.language", javascript)
+        self.assertNotIn("speechSynthesis", javascript)
         self.assertIn("已支持${escapeHtml(info.label)}免费本地配音", javascript)
         self.assertIn("先确认这部小说的语种", javascript)
         self.assertIn(".language-filter-options", css)
@@ -679,6 +691,8 @@ class StyleSettingsContractTests(unittest.TestCase):
             "save_publishing_account",
             "save_production_draft",
             "generate_voice_candidates",
+            "preview_voice",
+            "preview_voice_speed",
             "queue_production_draft",
             "approve_preview",
             "regenerate_preview",
@@ -744,9 +758,14 @@ class StyleSettingsContractTests(unittest.TestCase):
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 
-        self.assertIn("voice_candidates) ? novel.voice_candidates.slice(0, 3)", javascript)
-        self.assertIn("<audio controls preload=", javascript)
-        self.assertIn('checkedCall("generate_voice_candidates", novel.id, mood)', javascript)
+        self.assertIn("function voiceCatalogItems", javascript)
+        self.assertNotIn("novel.voice_candidates.slice(0, 3)", javascript)
+        self.assertIn('checkedCall("get_voice_catalog", novel.id, Boolean(refresh))', javascript)
+        self.assertIn(
+            'checkedCall("preview_voice", novel.id, candidate.provider, candidate.voice_id',
+            javascript,
+        )
+        self.assertNotIn("speechSynthesis", javascript)
         self.assertIn('name="production-voice"', javascript)
         self.assertIn("draft.voice = { provider: candidate.provider", javascript)
         self.assertIn('"worker_runtime_snapshot"', javascript)
@@ -761,8 +780,26 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("function localTtsRuntimeSnapshot", javascript)
         self.assertIn("effectiveTtsProviders().tts_provider", javascript)
         self.assertIn("ttsProviderLabel(candidate.provider)", javascript)
-        self.assertIn("已使用 ${ttsProviderLabel(actualProvider)}", javascript)
-        self.assertIn("试听后选择一个；本批所有分集保持同一声音。", javascript)
+        self.assertIn("function canonicalTtsProvider(value)", javascript)
+        self.assertIn("function sameVoiceIdentity(candidate, voice)", javascript)
+        self.assertIn(
+            "const selected = sameVoiceIdentity(candidate, draft.voice)", javascript
+        )
+        self.assertIn(
+            "nextHidden && sameVoiceIdentity(candidate, activeDraft(novel).voice)",
+            javascript,
+        )
+        self.assertIn(
+            "!candidate.team_disabled && sameVoiceIdentity(candidate, activeDraft(novel).voice)",
+            javascript,
+        )
+        self.assertIn("目录与试听分离", javascript)
+        self.assertIn("data-toggle-hidden-voices", javascript)
+        self.assertIn("data-disable-team-voice", javascript)
+        self.assertIn(
+            'const canManageTeam = normalizeSoftwareRole(state.webSession?.user?.role) === "admin"',
+            javascript,
+        )
         for key in ("video_folder", "music_folder", "output_folder"):
             self.assertIn(f"{key}: {{", javascript)
             self.assertIn(f"{key}: draft.{key}", javascript)
@@ -1047,9 +1084,41 @@ class StyleSettingsContractTests(unittest.TestCase):
 
         self.assertIn("const PRODUCTION_WPM_PRESETS = [220, 240, 260, 280]", javascript)
         self.assertIn('id="production-wpm-custom" type="number" min="200" max="280"', javascript)
-        self.assertIn('checkedCall("generate_voice_candidates", novel.id, mood, wpm)', javascript)
+        self.assertIn(
+            'checkedCall("preview_voice_speed", novel.id, voice.provider, voice.voice_id, Number(wpm))',
+            javascript,
+        )
         self.assertIn("function stopProductionWpmPreview", javascript)
-        self.assertIn("不会播放模拟声音", javascript)
+        self.assertIn("rpcMethods: Array.isArray(connection.data.rpc_methods)", javascript)
+        self.assertIn("advertisedWorkerRpcMethods.has(method)", javascript)
+        self.assertIn("该制作功能需要升级当前员工电脑上的 StoryForge", javascript)
+        self.assertIn("完成后将自动试听", javascript)
+        self.assertIn("语速设置仍已保存，不会回滚", javascript)
+        self.assertIn('error?.name === "NotAllowedError"', javascript)
+        self.assertIn('error?.name === "NotSupportedError"', javascript)
+        self.assertIn('? "真实试听播放失败"', javascript)
+        self.assertIn(
+            "!sameVoiceIdentity(voice, activeDraft(novel).voice)",
+            javascript,
+        )
+        self.assertIn("if (pending !== null) {", javascript)
+
+        voice_change_start = javascript.index(
+            "if (event.target.closest(\"#production-workbench-content\")"
+        )
+        voice_change_end = javascript.index("document.addEventListener(\"input\"", voice_change_start)
+        voice_change_handler = javascript[voice_change_start:voice_change_end]
+        self.assertIn(
+            "const voiceChanged = event.target.matches('input[name=\"production-voice\"]')",
+            voice_change_handler,
+        )
+        self.assertIn("const resumeWpmPreview = voiceChanged && Boolean(", voice_change_handler)
+        self.assertIn("if (resumeWpmPreview) scheduleProductionWpmPreview()", voice_change_handler)
+
+        advertised_start = javascript.index("const advertisedWorkerRpcMethods")
+        advertised_end = javascript.index("]);", advertised_start)
+        advertised_methods = javascript[advertised_start:advertised_end]
+        self.assertIn('"queue_production_draft"', advertised_methods)
 
         self.assertIn("const PRODUCTION_VIDEO_SPEED_PRESETS = [1.0, 1.1, 1.25, 1.4, 1.5]", javascript)
         self.assertIn('id="production-video-speed-custom" type="number" min="0.8" max="3.0"', javascript)
@@ -1086,6 +1155,65 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertNotIn("解压视频素材", html + javascript + css)
         self.assertNotIn("智能速度", html + javascript + css)
 
+    def test_voice_and_wpm_previews_share_one_frontend_generation_coordinator(self) -> None:
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("voicePreviewInFlight: false", javascript)
+        self.assertIn("function resumePendingProductionWpmPreview()", javascript)
+
+        wpm_preview = javascript[
+            javascript.index("async function previewProductionWpm") :
+            javascript.index("function scheduleProductionWpmPreview")
+        ]
+        self.assertIn(
+            "if (state.voicePreviewInFlight || state.wpmPreviewInFlight)",
+            wpm_preview,
+        )
+        self.assertIn("state.wpmPreviewPending = Number(wpm)", wpm_preview)
+        self.assertIn("resumePendingProductionWpmPreview()", wpm_preview)
+
+        wpm_scheduler = javascript[
+            javascript.index("function scheduleProductionWpmPreview") :
+            javascript.index("async function chooseProductionAudioFile")
+        ]
+        self.assertIn(
+            "if (state.voicePreviewInFlight || state.wpmPreviewInFlight)",
+            wpm_scheduler,
+        )
+        self.assertIn("state.wpmPreviewPending = wpm", wpm_scheduler)
+
+        voice_preview = javascript[
+            javascript.index("async function playVoiceCandidate") :
+            javascript.index("async function saveVoiceCatalogPreference")
+        ]
+        self.assertLess(
+            voice_preview.index("state.voicePreviewInFlight = true"),
+            voice_preview.index('checkedCall("preview_voice"'),
+        )
+        self.assertIn("state.voicePreviewInFlight = false", voice_preview)
+        self.assertIn("resumePendingProductionWpmPreview()", voice_preview)
+        self.assertIn("真实音色试听生成失败", voice_preview)
+        self.assertIn("真实音色播放失败", voice_preview)
+
+        voice_change_start = javascript.index(
+            'const resumeWpmPreview = voiceChanged && Boolean('
+        )
+        voice_change_end = javascript.index(");", voice_change_start)
+        self.assertIn(
+            "state.wpmPreviewPending !== null",
+            javascript[voice_change_start:voice_change_end],
+        )
+
+        wpm_change_start = javascript.index(
+            "if (event.target.matches('input[name=\"production-wpm-preset\"]')"
+        )
+        wpm_change_end = javascript.index("return;", wpm_change_start)
+        wpm_change = javascript[wpm_change_start:wpm_change_end]
+        self.assertLess(
+            wpm_change.index("syncProductionDraftFromControls()"),
+            wpm_change.index("scheduleProductionWpmPreview()"),
+        )
+
     def test_video_template_default_and_per_batch_controls_are_wired(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
@@ -1101,9 +1229,10 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn('assignValue("#video-template", settings.video_template', javascript)
         self.assertIn('video_template: $("#video-template").value', javascript)
         self.assertIn('id="production-intro-card-enabled"', javascript)
-        self.assertIn('id="production-intro-card-duration"', javascript)
+        self.assertIn('id="production-intro-card-display-mode"', javascript)
+        self.assertIn('id="production-intro-card-display-value"', javascript)
         self.assertIn('id="production-intro-card-copy"', javascript)
-        self.assertIn("productionSettings.intro_card_duration_seconds = Math.max", javascript)
+        self.assertIn("productionSettings.intro_card_display_mode =", javascript)
         self.assertIn("production_settings: structuredClone(draft.production_settings || {})", javascript)
         self.assertNotIn(
             'productionSettings.video_template = productionSettings.intro_card_enabled ? "platform_story_card" : "classic"',
@@ -1168,49 +1297,72 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("words.slice(0, 20)", javascript)
         self.assertIn(r"\u2e80-\u9fff", javascript)
 
-    def test_employee_batch_card_timeline_and_platform_copy_overrides_are_wired(self) -> None:
+    def test_employee_batch_card_timeline_and_authoritative_platform_copy_are_wired(self) -> None:
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 
         for element_id in (
             "production-intro-card-enabled",
-            "production-intro-card-start",
-            "production-intro-card-duration",
+            "production-intro-card-start-mode",
+            "production-intro-card-start-value",
+            "production-intro-card-display-mode",
+            "production-intro-card-display-value",
             "production-code-card-enabled",
-            "production-code-card-start",
-            "production-code-card-duration",
+            "production-code-card-start-mode",
+            "production-code-card-start-value",
+            "production-code-card-display-mode",
+            "production-code-card-display-value",
             "production-platform-search-text",
             "production-platform-ending-text",
+            "production-platform-ending-prefix",
+            "production-platform-ending-suffix",
         ):
             self.assertIn(f'id="{element_id}"', javascript)
 
         for field in (
             "intro_card_enabled",
-            "intro_card_start_seconds",
-            "intro_card_duration_seconds",
+            "intro_card_start_mode",
+            "intro_card_start_value",
+            "intro_card_display_mode",
+            "intro_card_display_value",
             "code_card_enabled",
-            "code_card_start_seconds",
-            "code_card_duration_seconds",
+            "code_card_start_mode",
+            "code_card_start_value",
+            "code_card_display_mode",
+            "code_card_display_value",
         ):
             self.assertIn(f"productionSettings.{field} =", javascript)
 
-        self.assertIn("0 表示持续到视频结尾", javascript)
-        self.assertIn("只覆盖本批，不修改团队平台模板", javascript)
+        self.assertIn("显示至正文结束", javascript)
+        self.assertIn("平台和口令不可编辑", javascript)
         self.assertIn("function syncDraftPlatformCopyDefaults(novel, draft)", javascript)
-        self.assertIn("draft._platformSearchTextCustomized", javascript)
-        self.assertIn("draft._platformEndingTextCustomized", javascript)
-        self.assertIn("platformSearchInput.value.trim()", javascript)
-        self.assertIn("platformEndingInput.value.trim()", javascript)
-        self.assertIn('event.target.dataset.custom = String(customized)', javascript)
-        self.assertIn("platform_search_text: String(draft.platform_search_text || \"\")", javascript)
-        self.assertIn("platform_ending_text: String(draft.platform_ending_text || \"\")", javascript)
+        self.assertNotIn("_platformSearchTextCustomized", javascript)
+        self.assertNotIn("_platformEndingTextCustomized", javascript)
+        self.assertNotIn("platform_search_text: String(draft.platform_search_text", javascript)
+        self.assertNotIn("platform_ending_text: String(draft.platform_ending_text", javascript)
+        self.assertIn('platform_ending_prefix: String(draft.platform_ending_prefix || "")', javascript)
+        self.assertIn('platform_ending_suffix: String(draft.platform_ending_suffix || "")', javascript)
         self.assertIn("text: outroCopy", javascript)
         self.assertNotIn("`${outroCopy} Search ${code}.`", javascript)
+        self.assertIn(
+            'if (state.voiceCatalogShowHidden ? !item.hidden : item.hidden) return false;',
+            javascript,
+        )
 
         self.assertIn("root.dataset.codeCardEnabled = String(codeCardEnabled)", javascript)
-        self.assertIn("root.dataset.introCardStartSeconds =", javascript)
-        self.assertIn("root.dataset.codeCardStartSeconds =", javascript)
-        self.assertIn('"production-platform-search-text"].includes(id)) return "subtitle"', javascript)
+        self.assertIn("root.dataset.introCardStartMode =", javascript)
+        self.assertIn("root.dataset.codeCardStartMode =", javascript)
+        self.assertIn("function cardTimelineEstimate", javascript)
+        self.assertIn("function updateProductionCardTimelineEstimates()", javascript)
+        self.assertIn('data-card-estimate="intro"', javascript)
+        self.assertIn('data-card-estimate="code"', javascript)
+        self.assertIn("if (cardTimelineValueChanged) updateProductionCardTimelineEstimates()", javascript)
+        self.assertIn('displayMode !== "body_end" && displayValue <= 0', javascript)
+        self.assertIn("持续时间必须大于 0", javascript)
+        self.assertIn('id="production-intro-card-display-value" type="number" min="0.5"', javascript)
+        self.assertIn('id="production-code-card-display-value" type="number" min="0.5"', javascript)
+        self.assertEqual(javascript.count('? "99.5" : "99999"'), 2)
+        self.assertIn('data-card-preset="intro:opening"', javascript)
         self.assertIn('const videoTemplate = settings.video_template || "classic"', javascript)
         self.assertIn("draft.platform_search_text", javascript)
         self.assertIn("draft.platform_ending_text", javascript)
@@ -1238,7 +1390,7 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertNotIn('checkedCall("set_user_permission"', workbench)
         self.assertNotIn("platforms.manage", workbench)
 
-    def test_batch_platform_copy_preserves_custom_text_and_resets_empty_text_to_templates(self) -> None:
+    def test_batch_platform_copy_is_read_only_and_only_plain_prefix_suffix_are_editable(self) -> None:
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
 
         defaults = javascript[
@@ -1250,14 +1402,29 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("safeTemplate(platform.search_template, platform.name, code)", defaults)
         self.assertIn("safeTemplate(platform.ending_template, platform.name, code)", defaults)
 
+        ending_preview = javascript[
+            javascript.index("function draftPlatformEndingPreview(novel, draft)"):
+            javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)")
+        ]
+        self.assertIn('String(draft?.platform_ending_prefix || "").trim()', ending_preview)
+        self.assertIn('String(draft?.platform_ending_suffix || "").trim()', ending_preview)
+        self.assertIn("draftPlatformCopyDefaults(novel, draft).ending", ending_preview)
+        self.assertLess(
+            ending_preview.index("platform_ending_prefix"),
+            ending_preview.index("draftPlatformCopyDefaults(novel, draft).ending"),
+        )
+        self.assertLess(
+            ending_preview.index("draftPlatformCopyDefaults(novel, draft).ending"),
+            ending_preview.index("platform_ending_suffix"),
+        )
+        self.assertIn(".filter(Boolean)", ending_preview)
+        self.assertIn('.join(" ")', ending_preview)
+
         sync_defaults = javascript[
             javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)"):
             javascript.index("function coverToneClass")
         ]
-        self.assertIn('if (!draft._platformSearchTextCustomized) draft.platform_search_text = ""', sync_defaults)
-        self.assertIn('if (!draft._platformEndingTextCustomized) draft.platform_ending_text = ""', sync_defaults)
-        self.assertIn("draft._platformSearchTextCustomized", sync_defaults)
-        self.assertIn("draft._platformEndingTextCustomized", sync_defaults)
+        self.assertNotIn("Customized", sync_defaults)
         self.assertIn("defaults.search", sync_defaults)
         self.assertIn("defaults.ending", sync_defaults)
 
@@ -1265,14 +1432,8 @@ class StyleSettingsContractTests(unittest.TestCase):
             javascript.index("function activeDraft(novel)"):
             javascript.index("function freshProductionDraftForNextBatch")
         ]
-        self.assertIn(
-            "novel.draft._platformSearchTextCustomized = Boolean(novel.draft.platform_search_text.trim())",
-            active_draft,
-        )
-        self.assertIn(
-            "novel.draft._platformEndingTextCustomized = Boolean(novel.draft.platform_ending_text.trim())",
-            active_draft,
-        )
+        self.assertIn('novel.draft.platform_ending_prefix = String', active_draft)
+        self.assertIn('novel.draft.platform_ending_suffix = String', active_draft)
         self.assertNotIn('intro_card_enabled: defaults.intro_card_enabled === true ||', active_draft)
 
         next_batch = javascript[
@@ -1290,29 +1451,74 @@ class StyleSettingsContractTests(unittest.TestCase):
             sync_controls.index('draft.promo_code_id = $("#production-code-select")'),
             sync_controls.index("syncDraftPlatformCopyDefaults(novel, draft)"),
         )
-        self.assertIn('platformSearchInput.dataset.custom === "true"', sync_controls)
-        self.assertIn('platformEndingInput.dataset.custom === "true"', sync_controls)
-        self.assertIn('draft.platform_search_text = draft._platformSearchTextCustomized', sync_controls)
-        self.assertIn('draft.platform_ending_text = draft._platformEndingTextCustomized', sync_controls)
+        self.assertIn('draft.platform_ending_prefix = $("#production-platform-ending-prefix").value.trim()', sync_controls)
+        self.assertIn('draft.platform_ending_suffix = $("#production-platform-ending-suffix").value.trim()', sync_controls)
 
         input_handler = javascript[
             javascript.index('document.addEventListener("input"'):
             javascript.index('document.addEventListener("keydown"')
         ]
-        self.assertIn("const customized = Boolean(event.target.value.trim())", input_handler)
-        self.assertIn("event.target.dataset.custom = String(customized)", input_handler)
-        self.assertIn("if (!customized)", input_handler)
-        self.assertIn("draftPlatformCopyDefaults(state.productionNovel, draft)", input_handler)
+        self.assertNotIn("dataset.custom", input_handler)
 
         platform_change = javascript[
             javascript.index('if (event.target.matches("#production-platform-select"))'):
             javascript.index('if (event.target.matches("#production-local-tts-provider"')
         ]
         self.assertIn("renderProductionWorkbench()", platform_change)
-        self.assertNotIn("_platformSearchTextCustomized = false", platform_change)
-        self.assertNotIn("_platformEndingTextCustomized = false", platform_change)
+        self.assertNotIn("platform_search_text =", platform_change)
+        self.assertNotIn("platform_ending_text =", platform_change)
+
+        live_preview = javascript[
+            javascript.index("function updateProductionPreview()"):
+            javascript.index("function selectedEpisodeText")
+        ]
+        self.assertIn("const outroCopy = draftPlatformEndingPreview(novel, draft)", live_preview)
+        self.assertIn('$("#preview-outro-copy").textContent = outroCopy', live_preview)
+        self.assertIn("text: outroCopy", live_preview)
+
+        workbench_change = javascript[
+            javascript.index('document.addEventListener("change"'):
+            javascript.index('document.addEventListener("input"')
+        ]
+        self.assertIn("#production-platform-select", workbench_change)
+        self.assertIn("renderProductionWorkbench()", workbench_change)
+        self.assertIn("event.target.matches('[data-episode-id]", workbench_change)
+        self.assertIn("select, input[type=\"color\"]", workbench_change)
+        self.assertIn("syncProductionDraftFromControls({ render: voiceChanged })", workbench_change)
+        self.assertIn("updateProductionPreview()", workbench_change)
+
+        provider_change = javascript[
+            javascript.index('if (event.target.matches("#production-local-tts-provider")'):
+            javascript.index('if (event.target.matches("#production-voice-style")')
+        ]
+        self.assertIn(
+            'draft.voice = { provider: "", voice_id: "", label: "", profile: "" }',
+            provider_change,
+        )
+        self.assertIn("旧声音选择已清除", provider_change)
 
         self.assertIn('"web-can-global-queue": ["drafts.create"', javascript)
+
+    def test_platform_templates_are_read_only_for_non_admin_platform_editors(self) -> None:
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+
+        access = javascript[
+            javascript.index("function applyPlatformTemplateAccess()"):
+            javascript.index("function renderPlatformOptions()")
+        ]
+        self.assertIn(
+            'normalizeSoftwareRole(state.webSession?.user?.role) !== "admin"',
+            access,
+        )
+        self.assertIn("control.readOnly = templatesLocked", access)
+        self.assertIn(
+            'control.setAttribute("aria-readonly", String(templatesLocked))',
+            access,
+        )
+        self.assertIn("平台口令卡模板只允许管理员修改", access)
+        self.assertIn('id="platform-search-template-note"', html)
+        self.assertIn('id="platform-ending-template-note"', html)
 
     def test_platform_logo_branding_is_configurable_and_shared_by_previews(self) -> None:
         html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")

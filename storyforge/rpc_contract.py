@@ -36,6 +36,7 @@ LEGACY_DEVICE_CAPABILITY_FIELDS = frozenset(
 )
 DEVICE_CAPABILITY_FIELDS = LEGACY_DEVICE_CAPABILITY_FIELDS | frozenset(
     {
+        "production_contract",
         "worker_state",
         "worker_reason",
         "worker_message",
@@ -99,6 +100,7 @@ CATALOG_READ_METHODS = frozenset(
         "list_media_usage",
         "list_audit_events",
         "list_production_presets",
+        "list_voice_preferences",
     }
 )
 
@@ -141,6 +143,8 @@ CATALOG_WRITE_METHODS = frozenset(
         "record_media_usage",
         "save_production_preset",
         "delete_production_preset",
+        "save_voice_preference",
+        "set_team_voice_disabled",
     }
 )
 
@@ -208,6 +212,9 @@ HUB_RPC_PERMISSION_ANY: dict[str, tuple[str, ...]] = {
     "list_production_presets": ("drafts.create", "hub.manage"),
     "save_production_preset": ("presets.manage_own", "hub.manage"),
     "delete_production_preset": ("presets.manage_own", "hub.manage"),
+    "list_voice_preferences": ("voice.preview", "hub.manage"),
+    "save_voice_preference": ("voice.preview", "hub.manage"),
+    "set_team_voice_disabled": ("hub.manage",),
 }
 
 
@@ -259,6 +266,11 @@ WEB_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "save_production_draft": ("drafts.create", "drafts.manage_all"),
     "queue_production_draft": ("drafts.create", "drafts.manage_all"),
     "generate_voice_candidates": ("voice.preview",),
+    "get_voice_catalog": ("voice.preview",),
+    "preview_voice": ("voice.preview",),
+    "preview_voice_speed": ("voice.preview",),
+    "save_voice_preference": ("voice.preview",),
+    "set_team_voice_disabled": ("hub.manage",),
     "set_local_tts_provider": ("voice.preview",),
     "generate_intro_card_copy": ("text.assist",),
     "classify_novel": ("text.assist",),
@@ -312,6 +324,11 @@ WEB_DESKTOP_ONLY_MEDIA_METHODS = frozenset(
     {
         "queue_production_draft",
         "generate_voice_candidates",
+        "get_voice_catalog",
+        "preview_voice",
+        "preview_voice_speed",
+        "save_voice_preference",
+        "set_team_voice_disabled",
         "set_local_tts_provider",
         "start_queue",
         "cancel_queue",
@@ -347,6 +364,11 @@ CLIENT_LOCAL_MEDIA_METHODS = WEB_DESKTOP_ONLY_MEDIA_METHODS - frozenset(
 LOCAL_WORKER_RPC_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "queue_production_draft": ("drafts.create", "drafts.manage_all", "hub.manage"),
     "generate_voice_candidates": ("voice.preview", "hub.manage"),
+    "get_voice_catalog": ("voice.preview", "hub.manage"),
+    "preview_voice": ("voice.preview", "hub.manage"),
+    "preview_voice_speed": ("voice.preview", "hub.manage"),
+    "save_voice_preference": ("voice.preview", "hub.manage"),
+    "set_team_voice_disabled": ("hub.manage",),
     "set_local_tts_provider": ("voice.preview", "hub.manage"),
     "generate_intro_card_copy": ("text.assist", "hub.manage"),
     "start_queue": ("drafts.create", "drafts.manage_all", "hub.manage"),

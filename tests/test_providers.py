@@ -735,12 +735,123 @@ class TTSProviderTests(unittest.TestCase):
             self.assertEqual(
                 available_female_voice_candidates("local_kokoro", "ja"), ()
             )
-            # An explicit service owns its own language-pack health.
-            self.assertTrue(
+            # A configured service address is not evidence that the service
+            # implements every official Kokoro voice id.
+            self.assertEqual(
                 available_female_voice_candidates(
                     "local_kokoro", "ja", endpoint="http://127.0.0.1:8880"
-                )
+                ),
+                (),
             )
+
+    def test_external_kokoro_catalog_requires_a_verified_voice_list(self) -> None:
+        self.assertEqual(
+            available_female_voice_candidates(
+                "local_kokoro",
+                "en",
+                endpoint="http://127.0.0.1:8880",
+            ),
+            (),
+        )
+        self.assertEqual(
+            available_female_voice_candidates(
+                "local_kokoro",
+                "en",
+                command="kokoro-cli --output {output}",
+            ),
+            (),
+        )
+
+    def test_embedded_kokoro_catalog_contains_only_installed_voice_files(self) -> None:
+        healthy = TTSComponentHealth(
+            component_id="kokoro.language.en",
+            language_code="a",
+            ready=True,
+            issues=(),
+        )
+        with (
+            patch(
+                "storyforge.providers.tts.kokoro_language_component_health",
+                return_value=healthy,
+            ),
+            patch(
+                "storyforge.providers.tts._available_offline_kokoro_voice_ids",
+                return_value=frozenset({"af_bella"}),
+            ),
+        ):
+            voices = available_female_voice_candidates("local_kokoro", "en")
+        self.assertEqual([item.voice_id for item in voices], ["af_bella"])
+
+        with (
+            patch(
+                "storyforge.providers.tts.kokoro_language_component_health",
+                return_value=healthy,
+            ),
+            patch(
+                "storyforge.providers.tts._available_offline_kokoro_voice_ids",
+                return_value=frozenset(),
+            ),
+        ):
+            self.assertEqual(
+                available_female_voice_candidates("local_kokoro", "en"), ()
+            )
+
+    def test_embedded_kokoro_voice_files_require_core_assets_in_the_same_root(self) -> None:
+        healthy = TTSComponentHealth(
+            component_id="kokoro.language.en",
+            language_code="a",
+            ready=True,
+            issues=(),
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            voice_only = root / "voice-only"
+            core_only = root / "core-only"
+            complete = root / "complete"
+            (voice_only / "voices").mkdir(parents=True)
+            (voice_only / "voices" / "af_bella.pt").write_bytes(b"voice")
+            core_only.mkdir()
+            (core_only / "config.json").write_text("{}", encoding="utf-8")
+            (core_only / "kokoro-v1_0.pth").write_bytes(b"model")
+
+            with (
+                patch(
+                    "storyforge.providers.tts.kokoro_language_component_health",
+                    return_value=healthy,
+                ),
+                patch(
+                    "storyforge.providers.tts._kokoro_runtime_roots",
+                    return_value=(voice_only, core_only),
+                ),
+            ):
+                self.assertEqual(
+                    available_female_voice_candidates("local_kokoro", "en"),
+                    (),
+                )
+
+            (complete / "voices").mkdir(parents=True)
+            (complete / "config.json").write_text("{}", encoding="utf-8")
+            (complete / "kokoro-v1_0.pth").write_bytes(b"model")
+            (complete / "voices" / "af_bella.pt").write_bytes(b"voice")
+            with (
+                patch(
+                    "storyforge.providers.tts.kokoro_language_component_health",
+                    return_value=healthy,
+                ),
+                patch(
+                    "storyforge.providers.tts._kokoro_runtime_roots",
+                    return_value=(complete,),
+                ),
+            ):
+                self.assertEqual(
+                    [
+                        item.voice_id
+                        for item in available_female_voice_candidates(
+                            "local_kokoro", "en"
+                        )
+                    ],
+                    ["af_bella"],
+                )
 
     def test_component_error_exposes_machine_readable_recovery_details(self) -> None:
         error = KokoroComponentError(

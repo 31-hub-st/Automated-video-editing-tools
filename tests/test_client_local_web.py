@@ -352,8 +352,9 @@ class ClientLocalWebTests(unittest.TestCase):
         draft = self._owned_draft()
         captured: dict = {}
 
-        def build_jobs(value: dict):
+        def build_jobs(value: dict, *, actor_user_id: str | None = None):
             captured.update(value)
+            captured["actor_user_id"] = actor_user_id
             job = RenderJob(
                 batch_id=draft["id"],
                 platform_id="goodnovel",
@@ -447,6 +448,7 @@ class ClientLocalWebTests(unittest.TestCase):
             self.assertEqual(self.host_api._queue.list_jobs(), [])
             for key, expected in local_paths.items():
                 self.assertEqual(captured[key], expected)
+            self.assertEqual(captured["actor_user_id"], self.member["id"])
 
             worker = self.client_api._queue._worker
             self.assertIsNotNone(worker)

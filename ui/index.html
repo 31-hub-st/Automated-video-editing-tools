@@ -521,8 +521,8 @@
                   <input type="hidden" name="logo_path" id="platform-logo-path" />
                 </div>
                 <label class="field"><span>平台英文名称</span><input name="name" placeholder="例如 GoodNovel" required /></label>
-                <label class="field"><span>屏幕口令模板</span><input name="search_template" value="Search {platform}: {code}" required /><small>可用变量：{platform}、{code}</small></label>
-                <label class="field"><span>结尾旁白模板</span><textarea name="ending_template" rows="4" required>Download {platform} and search code {code} to continue reading.</textarea><small>这段话会由女声朗读，并同步显示字幕。</small></label>
+                <label class="field"><span>屏幕口令模板</span><input name="search_template" value="Search {platform}: {code}" required /><small id="platform-search-template-note">可用变量：{platform}、{code}</small></label>
+                <label class="field"><span>结尾旁白模板</span><textarea name="ending_template" rows="4" required>Download {platform} and search code {code} to continue reading.</textarea><small id="platform-ending-template-note">这段话会由女声朗读，并同步显示字幕。</small></label>
                 <div class="template-proof">
                   <span>实际效果</span>
                   <b id="platform-template-preview">Search Platform: 123456</b>

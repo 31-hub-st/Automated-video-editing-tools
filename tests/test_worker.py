@@ -428,6 +428,7 @@ class LocalWorkerGatewayTests(unittest.TestCase):
             health["minimum_browser_protocol_version"],
             LOCAL_WORKER_MIN_BROWSER_PROTOCOL_VERSION,
         )
+        self.assertIn("preview_voice_speed", health["rpc_methods"])
         connected = self.gateway.connect(
             "valid-ticket",
             "http://10.0.0.225:8765",
@@ -442,6 +443,8 @@ class LocalWorkerGatewayTests(unittest.TestCase):
             connected["negotiated_protocol_version"],
             LOCAL_WORKER_PROTOCOL_VERSION,
         )
+        self.assertEqual(connected["rpc_methods"], health["rpc_methods"])
+        self.assertIn("queue_production_draft", connected["rpc_methods"])
         self.assertIsInstance(runtime["ffmpeg_ready"], bool)
         self.assertEqual(runtime["ffmpeg_label"], "FFmpeg")
         self.assertIsInstance(runtime["encoders"], list)

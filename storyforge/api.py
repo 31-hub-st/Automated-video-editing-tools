@@ -378,6 +378,7 @@ class StoryForgeApi:
         configured.update(
             {
                 "device_config_sync": 1,
+                "production_contract": 2,
                 "local_render": True,
                 "local_tts": True,
                 "local_subtitles": True,
@@ -1089,6 +1090,61 @@ class StoryForgeApi:
         render_profile = PlatformProfile.from_dict(platform.to_dict())
         render_profile.logo_path = str(hydrated.get("logo_path") or "")
         return render_profile
+
+    def _platform_for_restored_job(
+        self, job: RenderJob
+    ) -> PlatformProfile | None:
+        """Resolve a platform for durable work without reviving archived data.
+
+        Legacy tasks intentionally retain their historical dependency on an
+        active platform profile.  Contract-two tasks freeze every authoritative
+        platform/copy field when they are queued, so a later platform archival
+        must not make restart or film-strip restoration depend on the active
+        platform catalog.  The synthesized profile is queue-local only; it is
+        never inserted into ``ApplicationState`` or written back to the catalog.
+        """
+
+        platform_id = str(job.platform_id or "").strip()
+        live_platform = self._state.platform_by_id(platform_id)
+        if live_platform is not None:
+            return self._platform_for_local_render(live_platform)
+        if int(job.platform_copy_schema_version or 0) < 2:
+            return None
+
+        name = str(job.platform_name_snapshot or "").strip()
+        search_template = str(job.platform_search_template_snapshot or "").strip()
+        ending_template = str(job.platform_ending_template_snapshot or "").strip()
+        search_text = str(job.platform_search_text or "").strip()
+        ending_text = str(job.platform_ending_text or "").strip()
+        authoritative_ending = str(
+            job.platform_authoritative_ending_text or ""
+        ).strip()
+        if not all(
+            (
+                platform_id,
+                name,
+                search_template,
+                ending_template,
+                search_text,
+                ending_text,
+                authoritative_ending,
+            )
+        ):
+            return None
+        if any(
+            token not in template
+            for template in (search_template, ending_template)
+            for token in ("{platform}", "{code}")
+        ):
+            return None
+        return self._platform_for_local_render(
+            PlatformProfile(
+                id=platform_id,
+                name=name,
+                search_template=search_template,
+                ending_template=ending_template,
+            )
+        )
 
     def _hydrate_library_payload(self, value: dict[str, Any]) -> dict[str, Any]:
         payload = dict(value)
@@ -3252,6 +3308,7 @@ class StoryForgeApi:
                     "progress": 0,
                     "metadata": {
                         "lease_gate": True,
+                        "required_production_contract": 2,
                         "draft_id": draft_id,
                         "claim_id": claim_id,
                     },
@@ -3513,9 +3570,12 @@ class StoryForgeApi:
             self._require_shared_catalog_online()
             self._refresh_shared_platforms()
             prepared = self._prepare_platform_profile(value)
-            profile = self._state.upsert_platform(prepared.to_dict())
-            self._catalog.save_platform(profile.to_dict())
-            return self._hydrate_platform(profile.to_dict())
+            saved = self._catalog.save_platform(
+                prepared.to_dict(),
+                actor_user_id=self._current_web_actor() or None,
+            )
+            self._state.upsert_platform(saved)
+            return self._hydrate_platform(saved)
 
         return self._guard(operation)
 
@@ -3760,6 +3820,13 @@ class StoryForgeApi:
         def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
             payload = dict(value)
+            # Browser, desktop and host-local callers all share this API.
+            # Ownership must come from the authenticated request/session, not
+            # from a JSON field supplied by the page or a desktop bridge.
+            payload.pop("created_by_user_id", None)
+            actor_user_id = self._current_web_actor()
+            if actor_user_id:
+                payload["created_by_user_id"] = actor_user_id
             local_folders: dict[str, str] = {}
             local_files: dict[str, str] = {}
             if self._runtime_hub_mode == "client":
@@ -3848,6 +3915,11 @@ class StoryForgeApi:
     ) -> dict[str, Any]:
         """Build one bounded, JSON-safe durable task payload."""
 
+        # This release creates scheme-two recipes.  Freeze that requirement on
+        # the job itself before serializing the restart snapshot; later status
+        # projections must preserve the task's original contract rather than
+        # infer it from the Worker version doing the projection.
+        job.required_production_contract = 2
         if self._hub_reference(job.cover_path) is not None:
             job.cover_path = self._resolve_shared_file(job.cover_path, group="covers")
         episode_label = job.episode_label or f"E{max(1, job.episode_number):03d}"
@@ -3855,6 +3927,7 @@ class StoryForgeApi:
             job.episode_ids or ((job.episode_id,) if job.episode_id else ())
         )
         metadata: dict[str, Any] = {
+            "required_production_contract": job.required_production_contract,
             "platform_id": platform_id,
             "episode_label": episode_label,
             "episode_ids": episode_ids,
@@ -3983,9 +4056,14 @@ class StoryForgeApi:
                         if not isinstance(snapshot, dict):
                             continue
                         job = RenderJob.from_dict(snapshot)
+                        metadata = dict(record.get("metadata") or {})
+                        if metadata.get("required_production_contract") is not None:
+                            job.required_production_contract = max(
+                                1,
+                                int(metadata["required_production_contract"] or 1),
+                            )
                         job.production_record_id = str(record["id"])
                         job.batch_id = str(record.get("batch_id") or job.batch_id)
-                        metadata = dict(record.get("metadata") or {})
                         job.batch_total_count = max(
                             int(job.batch_total_count or 0),
                             int(metadata.get("batch_total_count") or total_count),
@@ -4086,7 +4164,10 @@ class StoryForgeApi:
                     platform_id,
                     total_videos,
                     job_iterator,
-                ) = self._library.build_render_job_plan(payload_value)
+                ) = self._library.build_render_job_plan(
+                    payload_value,
+                    actor_user_id=self._current_web_actor() or None,
+                )
                 first_job = next(job_iterator)
                 self._validate_provider_readiness(first_job.settings_snapshot)
                 job_iterator = chain((first_job,), job_iterator)
@@ -4252,6 +4333,117 @@ class StoryForgeApi:
 
         return self._guard(operation)
 
+    def get_voice_catalog(
+        self, novel_id: str, refresh: bool = False
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            return self._library.get_voice_catalog(
+                str(novel_id),
+                actor_user_id=self._current_web_actor() or None,
+                refresh=bool(refresh),
+            )
+
+        return self._guard(operation)
+
+    def _preview_single_voice(
+        self,
+        novel_id: str,
+        provider: str,
+        voice_id: str,
+        narration_wpm: int | None,
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            if self._queue.is_rendering_busy():
+                raise RuntimeError(
+                    "当前正在渲染视频。为保护内存和配音组件，请等待渲染结束后再试听。"
+                )
+            if not self._voice_preview_lock.acquire(blocking=False):
+                raise RuntimeError(
+                    "另一条真实配音试听正在生成；完成后会继续处理最新选择。"
+                )
+            try:
+                if self._queue.is_rendering_busy():
+                    raise RuntimeError(
+                        "当前正在渲染视频，请等待渲染结束后再试听。"
+                    )
+                return self._library.preview_voice(
+                    str(novel_id),
+                    str(provider),
+                    str(voice_id),
+                    narration_wpm=narration_wpm,
+                    actor_user_id=self._current_web_actor() or None,
+                )
+            finally:
+                self._voice_preview_lock.release()
+
+        return self._guard(operation)
+
+    def preview_voice(
+        self,
+        novel_id: str,
+        provider: str,
+        voice_id: str,
+        narration_wpm: int | None = None,
+    ) -> dict[str, Any]:
+        return self._preview_single_voice(novel_id, provider, voice_id, narration_wpm)
+
+    def preview_voice_speed(
+        self,
+        novel_id: str,
+        provider: str,
+        voice_id: str,
+        narration_wpm: int,
+    ) -> dict[str, Any]:
+        return self._preview_single_voice(novel_id, provider, voice_id, narration_wpm)
+
+    def save_voice_preference(
+        self,
+        provider: str,
+        language: str,
+        voice_id: str,
+        favorite: bool = False,
+        hidden: bool = False,
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            actor = self._current_web_actor()
+            if not actor:
+                raise PermissionError("必须登录员工账号后才能保存个人音色偏好。")
+            return self._catalog.save_voice_preference(
+                str(provider),
+                str(language),
+                str(voice_id),
+                favorite=bool(favorite),
+                hidden=bool(hidden),
+                actor_user_id=actor,
+            )
+
+        return self._guard(operation)
+
+    def set_team_voice_disabled(
+        self,
+        provider: str,
+        language: str,
+        voice_id: str,
+        disabled: bool,
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            self._require_shared_catalog_online()
+            actor = self._current_web_actor()
+            if not actor:
+                raise PermissionError("必须登录管理员账号后才能管理团队音色。")
+            return self._catalog.set_team_voice_disabled(
+                str(provider),
+                str(language),
+                str(voice_id),
+                disabled=bool(disabled),
+                actor_user_id=actor,
+            )
+
+        return self._guard(operation)
+
     def generate_intro_card_copy(
         self,
         novel_id: str,
@@ -4283,7 +4475,11 @@ class StoryForgeApi:
         def operation() -> dict[str, Any]:
             self._require_shared_catalog_online()
             return self._hydrate_novel(
-                self._library.lock_voice(str(novel_id), value)
+                self._library.lock_voice(
+                    str(novel_id),
+                    value,
+                    actor_user_id=self._current_web_actor() or None,
+                )
             )
 
         return self._guard(operation)
@@ -4948,13 +5144,13 @@ class StoryForgeApi:
             archived = dict(self._catalog.get_archived_job(str(job_id)))
             record_id = str(archived.get("production_record_id") or "")
             self._require_job_record_access(record_id)
-            platform = self._state.platform_by_id(str(archived.get("platform_id") or ""))
+            platform = self._platform_for_restored_job(RenderJob.from_dict(archived))
             if platform is None:
                 raise ValueError("归档任务对应的平台已经不存在，暂时无法恢复。")
             self._apply_worker_folders(archived, worker_folders)
             restored = self._queue.restore_archived(
                 archived,
-                self._platform_for_local_render(platform),
+                platform,
             )
             actor_user_id = self._current_web_actor() or None
             try:
@@ -4995,13 +5191,14 @@ class StoryForgeApi:
                 platforms: dict[str, PlatformProfile] = {}
                 for snapshot in snapshots:
                     self._apply_worker_folders(snapshot, worker_folders)
-                    platform_id = str(snapshot.get("platform_id") or "")
-                    platform = self._state.platform_by_id(platform_id)
+                    restored_job = RenderJob.from_dict(snapshot)
+                    platform_id = restored_job.platform_id
+                    platform = self._platform_for_restored_job(restored_job)
                     if platform is None:
                         raise ValueError(
                             "归档批次中有任务对应的平台已经不存在，暂时无法恢复。"
                         )
-                    platforms[platform_id] = self._platform_for_local_render(platform)
+                    platforms[platform_id] = platform
                 restored = self._queue.restore_archived_batch(
                     snapshots,
                     platforms,
@@ -5528,6 +5725,9 @@ class StoryForgeApi:
                 "output_path": output_path,
                 "error_message": sanitize_failure_log(job.message),
                 "metadata": {
+                    "required_production_contract": (
+                        job.required_production_contract
+                    ),
                     "platform_id": job.platform_id,
                     "episode_label": episode_label,
                     "episode_ids": episode_ids,
@@ -5549,6 +5749,9 @@ class StoryForgeApi:
                         "adjusted_after_apply": bool(job.production_preset_dirty),
                     },
                     "resolved_production_settings": deepcopy(job.settings_snapshot),
+                    "card_timeline_resolved": deepcopy(
+                        job.card_timeline_resolved
+                    ),
                     "preview_required": job.job_kind == "preview",
                     "preview_file": job.preview_file,
                     "preview_uri": job.preview_uri,
@@ -5779,6 +5982,14 @@ class StoryForgeApi:
                 job = RenderJob.from_dict(snapshot)
             except (TypeError, ValueError):
                 continue
+            if metadata.get("required_production_contract") is not None:
+                try:
+                    job.required_production_contract = max(
+                        1,
+                        int(metadata["required_production_contract"] or 1),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
             job.production_record_id = str(record.get("id") or "")
             job.batch_id = str(record.get("batch_id") or job.batch_id)
             job.status = JobStatus.QUEUED
@@ -5871,7 +6082,7 @@ class StoryForgeApi:
             if status == "queued":
                 recovered = recoverable_by_record_id.get(str(record.get("id") or ""))
                 if recovered is not None and recovered.batch_id not in blocked_batches:
-                    platform = self._state.platform_by_id(recovered.platform_id)
+                    platform = self._platform_for_restored_job(recovered)
                     if platform is not None:
                         try:
                             self._claim_record_lease(recovered.production_record_id)
@@ -5942,12 +6153,12 @@ class StoryForgeApi:
             if lease_generation > 0:
                 self._release_record_lease(record_id)
         for (_batch_id, platform_id), jobs in recovered_by_platform.items():
-            platform = self._state.platform_by_id(platform_id)
+            platform = self._platform_for_restored_job(jobs[0])
             if platform is None:
                 for job in jobs:
                     self._release_record_lease(job.production_record_id)
                 continue
-            self._queue.enqueue_jobs(jobs, self._platform_for_local_render(platform))
+            self._queue.enqueue_jobs(jobs, platform)
             recovered_any = True
         if recovered_any:
             try:

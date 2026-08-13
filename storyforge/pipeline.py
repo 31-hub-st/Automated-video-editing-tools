@@ -88,6 +88,40 @@ _MEDIA_DECODE_CACHE: dict[
 ] = {}
 _MEDIA_DECODE_CACHE_LOCK = threading.RLock()
 _MEDIA_DECODE_SAMPLE_SECONDS = 0.35
+
+
+def _canonical_tts_provider(value: object) -> str:
+    normalized = str(value or "").strip().casefold().replace("-", "_")
+    if normalized in {
+        "kokoro", "local", "local_kokoro", "kokoro_local", "kokoro_http", "kokoro_cli"
+    }:
+        return "local_kokoro"
+    if normalized in {"deepgram", "deepgram_aura", "aura", "aura_2"}:
+        return "deepgram"
+    if normalized in {"edge", "edge_tts", "microsoft_edge", "microsoft_edge_tts"}:
+        return "edge_tts"
+    return normalized
+
+
+def _frozen_platform_for_job(
+    job: RenderJob, live_platform: PlatformProfile
+) -> PlatformProfile:
+    """Use server-frozen identity/copy while retaining non-copy branding."""
+
+    if int(job.platform_copy_schema_version or 0) < 2:
+        return live_platform
+    return PlatformProfile(
+        id=live_platform.id,
+        name=str(job.platform_name_snapshot or live_platform.name),
+        search_template=str(
+            job.platform_search_template_snapshot or live_platform.search_template
+        ),
+        ending_template=str(
+            job.platform_ending_template_snapshot or live_platform.ending_template
+        ),
+        logo_path=live_platform.logo_path,
+        brand_color=live_platform.brand_color,
+    )
 _MEDIA_DECODE_CACHE_LIMIT = 4096
 _MEBIBYTE = 1024**2
 _VIDEO_OUTPUT_BYTES_PER_SECOND = 4 * _MEBIBYTE
@@ -182,11 +216,46 @@ def _platform_ending_copy(
     )
 
 
+def _validate_reused_platform_ending(
+    job: RenderJob,
+    metadata: dict[str, Any],
+    expected_ending: str,
+) -> None:
+    """Allow authoritative copy only when the reused audio already narrates it.
+
+    Older jobs used ``platform_ending_text`` as an unrestricted employee
+    override, so retaining their existing fail-closed behavior avoids silently
+    relabelling old audio.  Schema 2 copy is server-generated; it is safe to
+    reuse only when the embedded StoryForge text index proves an exact match.
+    """
+
+    if not str(job.platform_ending_text or "").strip():
+        return
+    indexed_text = metadata.get("text")
+    indexed_ending = (
+        str(indexed_text.get("ending_cta") or "").strip()
+        if isinstance(indexed_text, dict)
+        else ""
+    )
+    if (
+        int(getattr(job, "platform_copy_schema_version", 0) or 0) >= 2
+        and indexed_ending
+        and indexed_ending == str(expected_ending or "").strip()
+    ):
+        return
+    raise PipelineError(
+        "复用已有旁白时，平台口令卡与结尾引导必须和音频中冻结的权威文案完全一致；"
+        "请重新选择匹配的旁白，或改为重新生成旁白后再制作。"
+    )
+
+
 def _intro_card_opening_silence(
     settings: AppSettings, target_duration: float
 ) -> float:
     """Preserve legacy start-zero previews without delaying later overlays."""
 
+    if int(getattr(settings, "card_timeline_schema_version", 0)) >= 1:
+        return 0.0
     if not settings.intro_card_enabled or settings.intro_card_start_seconds != 0:
         return 0.0
     return max(
@@ -231,6 +300,108 @@ def _card_timeline_manifest(
         "end_seconds": start + display_duration,
         "display_duration_seconds": display_duration,
     }
+
+
+def _resolve_card_timeline(
+    settings: AppSettings,
+    card: str,
+    *,
+    body_duration: float,
+    legacy_target_duration: float,
+    window_duration: float | None = None,
+    allow_outside_body: bool = False,
+) -> dict[str, Any]:
+    """Resolve one frozen card config against actual narration duration."""
+
+    prefix = str(card or "").strip().casefold()
+    if prefix not in {"intro", "code"}:
+        raise ValueError("card must be intro or code")
+    field_prefix = f"{prefix}_card"
+    enabled = bool(getattr(settings, f"{field_prefix}_enabled"))
+    body = float(body_duration)
+    legacy_target = float(legacy_target_duration)
+    if not math.isfinite(body) or body <= 0:
+        raise PipelineError("正文实际配音时长无效，无法解析卡片时间轴。")
+    if int(getattr(settings, "card_timeline_schema_version", 0)) <= 0:
+        timeline = _card_timeline_manifest(
+            enabled=enabled,
+            start_seconds=float(getattr(settings, f"{field_prefix}_start_seconds")),
+            duration_seconds=float(
+                getattr(settings, f"{field_prefix}_duration_seconds")
+            ),
+            target_duration=legacy_target,
+            zero_duration_to_end=prefix == "code",
+        )
+        return {
+            **timeline,
+            "schema_version": 0,
+            "body_duration_seconds": body,
+            "legacy_video_end_semantics": bool(
+                prefix == "code"
+                and float(getattr(settings, "code_card_duration_seconds")) == 0
+            ),
+        }
+
+    start_mode = str(getattr(settings, f"{field_prefix}_start_mode"))
+    start_value = float(getattr(settings, f"{field_prefix}_start_value"))
+    display_mode = str(getattr(settings, f"{field_prefix}_display_mode"))
+    display_value = float(getattr(settings, f"{field_prefix}_display_value"))
+    start = body * start_value / 100.0 if start_mode == "body_percent" else start_value
+    if enabled and start >= body and not allow_outside_body:
+        raise PipelineError(
+            "卡片开始位置达到或超过正文结束，请把开始位置调早后再提交。"
+        )
+    if display_mode == "body_end":
+        configured_duration = max(0.0, body - start)
+    elif display_mode == "body_percent":
+        configured_duration = body * display_value / 100.0
+    else:
+        configured_duration = display_value
+    display_duration = (
+        max(0.0, min(body, start + configured_duration) - start)
+        if enabled and start < body
+        else 0.0
+    )
+    result = {
+        "enabled": enabled,
+        "schema_version": 1,
+        "start_mode": start_mode,
+        "start_value": start_value,
+        "display_mode": display_mode,
+        "display_value": display_value,
+        "start_seconds": start,
+        "duration_seconds": configured_duration,
+        "end_seconds": start + display_duration,
+        "display_duration_seconds": display_duration,
+        "body_duration_seconds": body,
+        "legacy_video_end_semantics": False,
+        "clipped_to_body_end": bool(
+            enabled and start + configured_duration > body
+        ),
+    }
+    if window_duration is not None:
+        window = float(window_duration)
+        if not math.isfinite(window) or window <= 0:
+            raise PipelineError("样片正文时长无效，无法解析卡片预览窗口。")
+        window_end = min(body, window)
+        window_display_duration = (
+            max(0.0, min(window_end, start + display_duration) - start)
+            if enabled and start < window_end
+            else 0.0
+        )
+        result.update(
+            {
+                "window_duration_seconds": window,
+                "window_start_seconds": start,
+                "window_end_seconds": start + window_display_duration,
+                "window_display_duration_seconds": window_display_duration,
+                "visible_in_window": window_display_duration > 0,
+                "clipped_to_window": bool(
+                    display_duration > window_display_duration
+                ),
+            }
+        )
+    return result
 
 
 def _cover_outro_enabled(settings: AppSettings, job: RenderJob) -> bool:
@@ -1041,6 +1212,24 @@ def narration_units(result: TextResult) -> list[NarrationUnit]:
     if not any(not item.is_chapter_break for item in units):
         raise PipelineError("润色结果没有可朗读的句子。")
     return units
+
+
+def _narrated_body_duration(narration: NarrationAssembly, result: TextResult) -> float:
+    """Return spoken hook/body duration without the appended platform CTA."""
+
+    ending_count = len(
+        [
+            sentence
+            for sentence in split_english_sentences(result.ending_cta.strip())
+            if sentence.strip()
+        ]
+    )
+    if ending_count <= 0 or ending_count >= len(narration.cues):
+        return float(narration.duration_seconds)
+    body_cues = narration.cues[:-ending_count]
+    if not body_cues:
+        return float(narration.duration_seconds)
+    return max(0.001, float(body_cues[-1].end))
 
 
 def group_narration_units(
@@ -1898,6 +2087,7 @@ def _intro_card_media_options(
     code: str = "",
     style: AssStyleConfig | None = None,
     intro_duration: float | None = None,
+    intro_start: float | None = None,
 ) -> dict[str, Any]:
     """Resolve one geometry contract shared by full and preview renders."""
 
@@ -1921,7 +2111,11 @@ def _intro_card_media_options(
                 ),
             ),
             "intro_card_cover_path": None,
-            "intro_card_cover_start": float(settings.intro_card_start_seconds),
+            "intro_card_cover_start": (
+                float(settings.intro_card_start_seconds)
+                if intro_start is None
+                else float(intro_start)
+            ),
             "intro_card_cover_duration": (
                 float(settings.intro_card_duration_seconds)
                 if intro_duration is None
@@ -1945,7 +2139,11 @@ def _intro_card_media_options(
         "platform_logo_x_percent": geometry.platform_logo_x_percent,
         "platform_logo_y_percent": geometry.platform_logo_y_percent,
         "intro_card_cover_path": cover_path if enabled else None,
-        "intro_card_cover_start": float(settings.intro_card_start_seconds),
+        "intro_card_cover_start": (
+            float(settings.intro_card_start_seconds)
+            if intro_start is None
+            else float(intro_start)
+        ),
         "intro_card_cover_duration": duration,
         "intro_card_cover_x_percent": geometry.cover_center_x_percent,
         "intro_card_cover_y_percent": geometry.cover_center_y_percent,
@@ -3318,6 +3516,7 @@ class PipelineRunner:
         progress: ProgressCallback,
     ) -> str:
         raise_if_cancelled()
+        platform = _frozen_platform_for_job(job, platform)
         live_settings = self.settings_getter()
         settings = self._settings_for_job(live_settings, job)
         if job.job_kind != "preview":
@@ -3363,7 +3562,11 @@ class PipelineRunner:
             duration_seconds=max(1.0, analysis.estimated_duration_seconds),
         )
         output_mode = production_output_mode(job)
-        if output_mode == "reuse_audio" and job.platform_ending_text:
+        if (
+            output_mode == "reuse_audio"
+            and job.platform_ending_text
+            and int(getattr(job, "platform_copy_schema_version", 0) or 0) < 2
+        ):
             raise PipelineError(
                 "复用已有旁白时不能修改本批平台结尾文案；"
                 "旧音频与字幕时间已经冻结，请改为重新生成旁白后再制作。"
@@ -3383,6 +3586,9 @@ class PipelineRunner:
                 raise PipelineError("请选择员工本机存在的已有配音。")
             reuse_metadata = self._load_narration_metadata(existing_narration_source)
             if reuse_metadata is not None:
+                _validate_reused_platform_ending(
+                    job, reuse_metadata, platform_ending_copy
+                )
                 indexed_code = str(reuse_metadata.get("promo_code") or "")
                 if indexed_code and indexed_code != effective_code:
                     raise PipelineError(
@@ -3527,14 +3733,16 @@ class PipelineRunner:
             )
             progress(JobStatus.NARRATING, 0.27, voice_stage)
             sentences, segment_unit_counts = group_narration_units(units)
-            # The last-used voice is the default, not a permanent novel lock.
-            # Employees may explicitly switch voice providers between batches.
-            requested_locked_voice = (
-                job.locked_voice_id
-                if not job.locked_voice_provider
-                or job.locked_voice_provider == settings.providers.tts_provider
-                else ""
+            configured_provider = _canonical_tts_provider(
+                settings.providers.tts_provider
             )
+            locked_provider = _canonical_tts_provider(job.locked_voice_provider)
+            if locked_provider and locked_provider != configured_provider:
+                raise PipelineError(
+                    "本任务锁定的真实声音与配音服务不匹配；"
+                    "系统不会自动换声，请返回制作台重新选择。"
+                )
+            requested_locked_voice = job.locked_voice_id
             tts_result, actual_tts_provider, actual_voice = self._narrate(
                 sentences,
                 audio_dir,
@@ -3721,20 +3929,6 @@ class PipelineRunner:
         end_card_duration = max(5.0, min(7.0, settings.end_card_seconds))
         story_card_template = settings.video_template == "platform_story_card"
         intro_card_enabled = bool(settings.intro_card_enabled)
-        intro_card_start = float(settings.intro_card_start_seconds)
-        intro_card_duration = (
-            max(2.5, min(8.0, float(settings.intro_card_duration_seconds)))
-            if intro_card_enabled
-            else 0.0
-        )
-        platform_logo_path = self._validated_optional_image(
-            _story_card_platform_logo(
-                platform, story_card_template and intro_card_enabled
-            ),
-            asset_label="平台 Logo",
-            fallback_label="改用无 Logo 的简介卡布局",
-            warnings=warnings,
-        )
         # A full production always reserves a closing cover window.  If an
         # unusually short input cannot fit it, pad the output instead of
         # silently dropping either the intro or narrated call to action.
@@ -3742,25 +3936,46 @@ class PipelineRunner:
             narration.duration_seconds,
             end_card_duration
             + (
-                intro_card_duration + 1.0
+                float(settings.intro_card_duration_seconds) + 1.0
                 if story_card_template
                 and intro_card_enabled
-                and intro_card_start == 0
+                and int(getattr(settings, "card_timeline_schema_version", 0)) == 0
+                and settings.intro_card_start_seconds == 0
                 else 4.0
             ),
         )
-        intro_card_timeline = _card_timeline_manifest(
-            enabled=intro_card_enabled,
-            start_seconds=intro_card_start,
-            duration_seconds=float(settings.intro_card_duration_seconds),
-            target_duration=render_duration,
+        body_duration = _narrated_body_duration(narration, text_result)
+        intro_card_timeline = _resolve_card_timeline(
+            settings,
+            "intro",
+            body_duration=body_duration,
+            legacy_target_duration=render_duration,
         )
-        code_card_timeline = _card_timeline_manifest(
-            enabled=settings.code_card_enabled,
-            start_seconds=settings.code_card_start_seconds,
-            duration_seconds=settings.code_card_duration_seconds,
-            target_duration=render_duration,
-            zero_duration_to_end=True,
+        code_card_timeline = _resolve_card_timeline(
+            settings,
+            "code",
+            body_duration=body_duration,
+            legacy_target_duration=render_duration,
+        )
+        intro_card_start = float(intro_card_timeline["start_seconds"])
+        intro_card_duration = float(
+            intro_card_timeline["display_duration_seconds"]
+        )
+        job.card_timeline_resolved = {
+            "schema_version": int(
+                getattr(settings, "card_timeline_schema_version", 0)
+            ),
+            "body_duration_seconds": body_duration,
+            "intro_card": dict(intro_card_timeline),
+            "code_card": dict(code_card_timeline),
+        }
+        platform_logo_path = self._validated_optional_image(
+            _story_card_platform_logo(
+                platform, story_card_template and intro_card_enabled
+            ),
+            asset_label="平台 Logo",
+            fallback_label="改用无 Logo 的简介卡布局",
+            warnings=warnings,
         )
         intro_card_display_duration = float(
             intro_card_timeline["display_duration_seconds"]
@@ -3801,10 +4016,15 @@ class PipelineRunner:
             intro_headline=text_result.hook,
             intro_card_enabled=intro_card_enabled,
             intro_card_start=intro_card_start,
+            # ASS keeps its historical 2.5–8 second style invariant even when
+            # the card is disabled; the enabled flag and resolved manifest are
+            # authoritative for visibility.
             intro_card_duration=intro_card_duration,
             code_card_enabled=settings.code_card_enabled,
-            code_card_start=settings.code_card_start_seconds,
-            code_card_duration=settings.code_card_duration_seconds,
+            code_card_start=float(code_card_timeline["start_seconds"]),
+            code_card_duration=float(
+                code_card_timeline["display_duration_seconds"]
+            ),
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
             intro_card_cover_present=bool(effective_cover),
@@ -3937,6 +4157,7 @@ class PipelineRunner:
             code=effective_code,
             style=full_subtitle_style,
             intro_duration=intro_card_display_duration,
+            intro_start=intro_card_start,
         )
         effective_cover_outro = bool(
             _cover_outro_enabled(settings, job)
@@ -4729,6 +4950,33 @@ class PipelineRunner:
         snapshot.setdefault("code_card_enabled", True)
         snapshot.setdefault("code_card_start_seconds", 0.0)
         snapshot.setdefault("code_card_duration_seconds", 0.0)
+        if "card_timeline_schema_version" not in snapshot:
+            snapshot["card_timeline_schema_version"] = 0
+        if int(snapshot.get("card_timeline_schema_version") or 0) >= 1:
+            snapshot.setdefault("intro_card_start_mode", "seconds")
+            snapshot.setdefault(
+                "intro_card_start_value",
+                float(snapshot.get("intro_card_start_seconds") or 0.0),
+            )
+            snapshot.setdefault("intro_card_display_mode", "seconds")
+            snapshot.setdefault(
+                "intro_card_display_value",
+                float(snapshot.get("intro_card_duration_seconds") or 0.0),
+            )
+            snapshot.setdefault("code_card_start_mode", "seconds")
+            snapshot.setdefault(
+                "code_card_start_value",
+                float(snapshot.get("code_card_start_seconds") or 0.0),
+            )
+            if float(snapshot.get("code_card_duration_seconds") or 0.0) == 0:
+                snapshot.setdefault("code_card_display_mode", "body_end")
+                snapshot.setdefault("code_card_display_value", 0.0)
+            else:
+                snapshot.setdefault("code_card_display_mode", "seconds")
+                snapshot.setdefault(
+                    "code_card_display_value",
+                    float(snapshot.get("code_card_duration_seconds") or 0.0),
+                )
         provider_snapshot = dict(snapshot.pop("providers", {}) or {})
         for key, value in snapshot.items():
             if key in merged:
@@ -4890,24 +5138,34 @@ class PipelineRunner:
         preview_seconds = float(settings.preview_seconds)
         story_card_template = settings.video_template == "platform_story_card"
         intro_card_enabled = bool(settings.intro_card_enabled)
-        intro_card_start = float(settings.intro_card_start_seconds)
-        configured_intro_duration = float(settings.intro_card_duration_seconds)
-        intro_card_duration = configured_intro_duration if intro_card_enabled else 0.0
-        intro_card_timeline = _card_timeline_manifest(
-            enabled=intro_card_enabled,
-            start_seconds=intro_card_start,
-            duration_seconds=configured_intro_duration,
-            target_duration=preview_seconds,
+        intro_card_timeline = _resolve_card_timeline(
+            settings,
+            "intro",
+            body_duration=preview_seconds,
+            legacy_target_duration=preview_seconds,
+            window_duration=preview_seconds,
+            allow_outside_body=True,
         )
-        code_card_timeline = _card_timeline_manifest(
-            enabled=settings.code_card_enabled,
-            start_seconds=settings.code_card_start_seconds,
-            duration_seconds=settings.code_card_duration_seconds,
-            target_duration=preview_seconds,
-            zero_duration_to_end=True,
+        code_card_timeline = _resolve_card_timeline(
+            settings,
+            "code",
+            body_duration=preview_seconds,
+            legacy_target_duration=preview_seconds,
+            window_duration=preview_seconds,
+            allow_outside_body=True,
+        )
+        intro_card_start = float(intro_card_timeline["start_seconds"])
+        intro_card_duration = float(
+            intro_card_timeline.get(
+                "window_display_duration_seconds",
+                intro_card_timeline["display_duration_seconds"],
+            )
         )
         intro_card_display_duration = float(
-            intro_card_timeline["display_duration_seconds"]
+            intro_card_timeline.get(
+                "window_display_duration_seconds",
+                intro_card_timeline["display_duration_seconds"],
+            )
         )
         # Only the legacy opening window reserved silent narration time. A card
         # placed later on the absolute timeline overlays ongoing narration.
@@ -4943,6 +5201,7 @@ class PipelineRunner:
             code=effective_code,
             style=preview_style,
             intro_duration=intro_card_display_duration,
+            intro_start=intro_card_start,
         )
         preview_dir = job_dir / ".previews"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -5027,10 +5286,14 @@ class PipelineRunner:
         )
         progress(JobStatus.NARRATING, 0.30, voice_stage)
         if (
-            job.locked_voice_provider
-            and job.locked_voice_provider != settings.providers.tts_provider
+            _canonical_tts_provider(job.locked_voice_provider)
+            and _canonical_tts_provider(job.locked_voice_provider)
+            != _canonical_tts_provider(settings.providers.tts_provider)
         ):
-            raise PipelineError("该小说已锁定到另一种配音服务，请恢复原服务后再生成。")
+            raise PipelineError(
+                "本任务锁定的真实声音与配音服务不匹配；"
+                "系统不会自动换声，请返回制作台重新选择。"
+            )
         voice_profile = settings.voice_by_mood.get(mood, "dramatic")
         # Keep one sentence per preview segment so actual voice duration can be
         # fitted at natural sentence boundaries without clipping the CTA.
@@ -5100,6 +5363,62 @@ class PipelineRunner:
         target_duration = preview_seconds
         if target_duration < 3:
             raise PipelineError("样片旁白不足 3 秒，无法有效预览。")
+        body_duration = min(
+            target_duration,
+            _narrated_body_duration(narration, preview_text_result),
+        )
+        estimated_full_body_duration = max(
+            body_duration,
+            float(analysis.estimated_duration_seconds),
+        )
+        intro_card_timeline = _resolve_card_timeline(
+            settings,
+            "intro",
+            body_duration=estimated_full_body_duration,
+            legacy_target_duration=target_duration,
+            window_duration=body_duration,
+            allow_outside_body=True,
+        )
+        code_card_timeline = _resolve_card_timeline(
+            settings,
+            "code",
+            body_duration=estimated_full_body_duration,
+            legacy_target_duration=target_duration,
+            window_duration=body_duration,
+            allow_outside_body=True,
+        )
+        intro_card_start = float(intro_card_timeline["start_seconds"])
+        intro_card_duration = float(
+            intro_card_timeline.get(
+                "window_display_duration_seconds",
+                intro_card_timeline["display_duration_seconds"],
+            )
+        )
+        intro_card_display_duration = intro_card_duration
+        # A percentage-based card can look visible when provisionally resolved
+        # against the short sample, then move outside that window once the full
+        # manuscript estimate is available.  Do not pass a real logo together
+        # with a zero-length overlay to the FFmpeg plan.
+        if intro_card_display_duration <= 0:
+            platform_logo_path = None
+        job.card_timeline_resolved = {
+            "schema_version": int(
+                getattr(settings, "card_timeline_schema_version", 0)
+            ),
+            "body_duration_seconds": body_duration,
+            "estimated_full_body_duration_seconds": estimated_full_body_duration,
+            "intro_card": dict(intro_card_timeline),
+            "code_card": dict(code_card_timeline),
+        }
+        intro_card_media = _intro_card_media_options(
+            settings,
+            preview_cover,
+            intro_card_text=job.intro_card_text,
+            code=effective_code,
+            style=preview_style,
+            intro_duration=intro_card_display_duration,
+            intro_start=intro_card_start,
+        )
         clipped_cues = tuple(
             SubtitleCue(cue.start, min(cue.end, target_duration), cue.text)
             for cue in narration.cues
@@ -5122,12 +5441,23 @@ class PipelineRunner:
             video_template=settings.video_template,
             intro_card_text=job.intro_card_text,
             intro_headline=preview_intro_headline,
-            intro_card_enabled=intro_card_enabled,
+            intro_card_enabled=(
+                intro_card_enabled
+                and float(intro_card_timeline.get("window_display_duration_seconds", intro_card_duration)) > 0
+            ),
             intro_card_start=intro_card_start,
             intro_card_duration=intro_card_duration,
-            code_card_enabled=settings.code_card_enabled,
-            code_card_start=settings.code_card_start_seconds,
-            code_card_duration=settings.code_card_duration_seconds,
+            code_card_enabled=(
+                settings.code_card_enabled
+                and float(code_card_timeline.get("window_display_duration_seconds", code_card_timeline["display_duration_seconds"])) > 0
+            ),
+            code_card_start=float(code_card_timeline["start_seconds"]),
+            code_card_duration=float(
+                code_card_timeline.get(
+                    "window_display_duration_seconds",
+                    code_card_timeline["display_duration_seconds"],
+                )
+            ),
             final_label=_story_card_final_label(job, story_card_template),
             platform_logo_present=bool(platform_logo_path),
             intro_card_cover_present=bool(preview_cover),

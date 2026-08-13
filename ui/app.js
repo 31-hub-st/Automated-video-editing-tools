@@ -112,6 +112,13 @@
     wpmPreviewStopTimer: null,
     wpmPreviewDebounceTimer: null,
     wpmPreviewRequestId: 0,
+    wpmPreviewInFlight: false,
+    wpmPreviewPending: null,
+    voicePreviewInFlight: false,
+    voiceCatalogLoading: new Set(),
+    voiceCatalogQuery: "",
+    voiceCatalogStyle: "all",
+    voiceCatalogShowHidden: false,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -263,6 +270,9 @@
     "max_episode_minutes", "cover_outro_enabled", "cover_animation", "color_grade", "end_card_seconds",
     "render_mode", "video_template", "intro_card_enabled", "intro_card_start_seconds", "intro_card_duration_seconds",
     "code_card_enabled", "code_card_start_seconds", "code_card_duration_seconds",
+    "card_timeline_schema_version", "intro_card_start_mode", "intro_card_start_value",
+    "intro_card_display_mode", "intro_card_display_value", "code_card_start_mode",
+    "code_card_start_value", "code_card_display_mode", "code_card_display_value",
     "output_mode", "export_narration_audio",
     "video_playback_speed", "video_transition", "subtitle_word_mode", "bgm_mode",
   ]);
@@ -378,6 +388,11 @@
   const localWorkerRpcMethods = new Set([
     "queue_production_draft",
     "generate_voice_candidates",
+    "get_voice_catalog",
+    "preview_voice",
+    "preview_voice_speed",
+    "save_voice_preference",
+    "set_team_voice_disabled",
     "set_local_tts_provider",
     "start_queue",
     "cancel_queue",
@@ -402,6 +417,14 @@
     "get_local_storage_status",
     "cleanup_local_storage_cache",
     "create_local_support_bundle",
+  ]);
+  const advertisedWorkerRpcMethods = new Set([
+    "queue_production_draft",
+    "get_voice_catalog",
+    "preview_voice",
+    "preview_voice_speed",
+    "save_voice_preference",
+    "set_team_voice_disabled",
   ]);
   const MOCK_PREVIEW_VIDEO_URI = "data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAQtbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAdTAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAA1h0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAdTAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAFoAAACgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAHUwAACAAAABAAAAAALQbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAHgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAACe21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAjtzdGJsAAAAw3N0c2QAAAAAAAAAAQAAALNhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAFoAoABIAAAASAAAAAAAAAABFUxhdmM2MS4xOS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAAOWF2Y0MBZAAM/+EAG2dkAAyscgRGFeTwEQAAAwABAAADAAIPFCmEYAEAB2joQ4EEsiz9+PgAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAA04AAANOAAAAGHN0dHMAAAAAAAAAAQAAAB4AAEAAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAACIY3R0cwAAAAAAAAAPAAAAAQAAgAAAAAABAAKAAAAAAAEAAQAAAAAAAwAAAAAAAAAEAABAAAAAAAEAAoAAAAAAAQABAAAAAAADAAAAAAAAAAQAAEAAAAAAAQACgAAAAAABAAEAAAAAAAMAAAAAAAAABAAAQAAAAAABAADAAAAAAAEAAEAAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAeAAAAAQAAAIxzdHN6AAAAAAAAAAAAAAAeAAADPAAAAIcAAABxAAAAQgAAAEMAAAA9AAAAQwAAAEQAAABFAAAAQwAAAIYAAABxAAAAQgAAAEIAAABCAAAARAAAAEUAAABGAAAAQwAAAIwAAAB4AAAAQwAAAEQAAABCAAAAQwAAAEMAAABGAAAAQwAAAHYAAABCAAAAFHN0Y28AAAAAAAAAAQAABF0AAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYxLjcuMTAwAAAACGZyZWUAAAxwbWRhdAAAAq8GBf//q9xF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjQgcjMxOTIgYzI0ZTA2YyAtIEguMjY0L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjQgLSBodHRwOi8vd3d3LnZpZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0xNiBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTMzIG1lPXVtaCBzdWJtZT0xMCBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTI0IGNocm9tYV9tZT0xIHRyZWxsaXM9MiA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTUgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz04IGJfcHlyYW1pZD0yIGJfYWRhcHQ9MiBiX2JpYXM9MCBkaXJlY3Q9MyB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD02MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTQyLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9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";
   const MOCK_NARRATION_AUDIO_URI = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
@@ -1225,6 +1248,11 @@
         folders: { ...(connection.data.folders || {}) },
         capabilities: [...(connection.data.capabilities || [])],
         runtime: { ...(connection.data.runtime || {}) },
+        rpcMethods: Array.isArray(connection.data.rpc_methods)
+          ? connection.data.rpc_methods.map((item) => String(item))
+          : (Array.isArray(discovered.health.rpc_methods)
+            ? discovered.health.rpc_methods.map((item) => String(item))
+            : null),
       };
       state.localWorkerSelfCheck = connection.data.self_check && typeof connection.data.self_check === "object"
         ? { ...connection.data.self_check }
@@ -1265,9 +1293,22 @@
     if (!worker) {
       return { ok: false, error: "本机制作服务尚未连接，暂时不能读取素材、试听配音或生成视频。请打开或重新启动当前电脑上的 StoryForge。" };
     }
+    if (
+      advertisedWorkerRpcMethods.has(method)
+      && (
+        !Array.isArray(worker.rpcMethods)
+        || !worker.rpcMethods.includes(method)
+      )
+    ) {
+      return {
+        ok: false,
+        error: `该制作功能需要升级当前员工电脑上的 StoryForge；本机 Worker 尚未提供 ${method}。`,
+      };
+    }
     try {
       const longRunningMethods = new Set([
         "generate_voice_candidates",
+        "preview_voice",
         "preview_voice_speed",
         "normalize_media_library",
       ]);
@@ -1465,6 +1506,7 @@
     document.body.classList.toggle("is-employee-session", normalizeSoftwareRole(user.role) === "producer");
     document.body.classList.toggle("is-admin-session", normalizeSoftwareRole(user.role) === "admin");
     applyWebCapabilityHints();
+    applyPlatformTemplateAccess();
     applyProviderAccessMode();
   }
 
@@ -2639,6 +2681,32 @@
     }
   }
 
+  function applyPlatformTemplateAccess() {
+    const form = $("#platform-form");
+    if (!form) return;
+    const templatesLocked = Boolean(state.webSession?.user)
+      && normalizeSoftwareRole(state.webSession?.user?.role) !== "admin";
+    ["search_template", "ending_template"].forEach((name) => {
+      const control = form.elements[name];
+      if (!control) return;
+      control.readOnly = templatesLocked;
+      control.setAttribute("aria-readonly", String(templatesLocked));
+    });
+    const lockedCopy = "平台口令卡模板只允许管理员修改；当前内容来自平台资料库。";
+    const searchNote = $("#platform-search-template-note");
+    const endingNote = $("#platform-ending-template-note");
+    if (searchNote) {
+      searchNote.textContent = templatesLocked
+        ? lockedCopy
+        : "可用变量：{platform}、{code}";
+    }
+    if (endingNote) {
+      endingNote.textContent = templatesLocked
+        ? lockedCopy
+        : "这段话会由女声朗读，并同步显示字幕。";
+    }
+  }
+
   function renderPlatformOptions() {
     renderLibraryPlatformFilter();
     renderNovelLibrary();
@@ -2876,25 +2944,21 @@
     };
   }
 
+  function draftPlatformEndingPreview(novel, draft) {
+    return [
+      String(draft?.platform_ending_prefix || "").trim(),
+      String(draftPlatformCopyDefaults(novel, draft).ending || "").trim(),
+      String(draft?.platform_ending_suffix || "").trim(),
+    ].filter(Boolean).join(" ");
+  }
+
   function syncDraftPlatformCopyDefaults(novel, draft) {
     if (!novel || !draft) return { search: "", ending: "" };
     const defaults = draftPlatformCopyDefaults(novel, draft);
     const searchInput = $("#production-platform-search-text");
     const endingInput = $("#production-platform-ending-text");
-    if (!draft._platformSearchTextCustomized) draft.platform_search_text = "";
-    if (!draft._platformEndingTextCustomized) draft.platform_ending_text = "";
-    if (searchInput) {
-      searchInput.dataset.custom = String(Boolean(draft._platformSearchTextCustomized));
-      searchInput.value = draft._platformSearchTextCustomized
-        ? String(draft.platform_search_text || "")
-        : defaults.search;
-    }
-    if (endingInput) {
-      endingInput.dataset.custom = String(Boolean(draft._platformEndingTextCustomized));
-      endingInput.value = draft._platformEndingTextCustomized
-        ? String(draft.platform_ending_text || "")
-        : defaults.ending;
-    }
+    if (searchInput) searchInput.value = String(defaults.search);
+    if (endingInput) endingInput.value = String(defaults.ending);
     return defaults;
   }
 
@@ -3095,7 +3159,7 @@
     }
     if (["edge", "edge_tts", "microsoft_edge", "microsoft_edge_tts"].includes(selectedProvider) && info.key !== "und" && edgeLanguages.has(info.key)) {
       const runtimeReady = Boolean(effectiveTtsSystem().edge_tts_runtime_ready);
-      notices.push(`<div class="workbench-language-alert is-provider ${runtimeReady ? "is-ready" : ""}"><b>${runtimeReady ? `可试听${escapeHtml(info.label)}在线女声` : "当前电脑缺少 Edge TTS 组件"}</b><span>${runtimeReady ? "生成候选时会联网读取该语种当前真实可用的女声，最多展示3个；无法连接时不会用假声线代替。" : "安装 requirements.txt 中的 Edge TTS 后重启；无需 API Key，但试听和制作时需要联网。"}</span><button type="button" class="text-button" data-open-view="providers">查看服务</button></div>`);
+      notices.push(`<div class="workbench-language-alert is-provider ${runtimeReady ? "is-ready" : ""}"><b>${runtimeReady ? `可试听${escapeHtml(info.label)}在线女声` : "当前电脑缺少 Edge TTS 组件"}</b><span>${runtimeReady ? "会联网读取并展示该语种当前全部真实女声；打开目录不会批量合成，无法连接时也不会用假声线代替。" : "安装 requirements.txt 中的 Edge TTS 后重启；无需 API Key，但试听和制作时需要联网。"}</span><button type="button" class="text-button" data-open-view="providers">查看服务</button></div>`);
     } else if (["local", "kokoro", "local_kokoro", "kokoro_local", "kokoro_http", "kokoro_cli"].includes(selectedProvider) && info.key !== "en" && info.key !== "und" && localKokoroLanguages.has(info.key)) {
       const providers = effectiveTtsProviders();
       const runtimeReady = Boolean(
@@ -3574,8 +3638,22 @@
     };
   }
 
-  function ttsProviderLabel(value) {
+  function canonicalTtsProvider(value) {
     const provider = String(value || "").trim().toLocaleLowerCase().replaceAll("-", "_");
+    if (["edge", "edge_tts", "microsoft_edge", "microsoft_edge_tts"].includes(provider)) return "edge_tts";
+    if (["local", "kokoro", "local_kokoro", "kokoro_local", "kokoro_http", "kokoro_cli"].includes(provider)) return "local_kokoro";
+    if (["deepgram", "deepgram_aura", "aura", "aura_2"].includes(provider)) return "deepgram";
+    return provider;
+  }
+
+  function sameVoiceIdentity(candidate, voice) {
+    return Boolean(candidate && voice)
+      && canonicalTtsProvider(candidate.provider) === canonicalTtsProvider(voice.provider)
+      && String(candidate.voice_id || "") === String(voice.voice_id || "");
+  }
+
+  function ttsProviderLabel(value) {
+    const provider = canonicalTtsProvider(value);
     if (["edge", "edge_tts", "microsoft_edge", "microsoft_edge_tts"].includes(provider)) return "Edge TTS";
     if (["local", "kokoro", "local_kokoro", "kokoro_local", "kokoro_http", "kokoro_cli"].includes(provider)) return "Kokoro";
     if (["deepgram", "deepgram_aura", "aura", "aura_2"].includes(provider)) return "Deepgram Aura";
@@ -3766,12 +3844,8 @@
     novel.draft.intro_card_source ||= "";
     novel.draft.platform_search_text = String(novel.draft.platform_search_text || "");
     novel.draft.platform_ending_text = String(novel.draft.platform_ending_text || "");
-    if (typeof novel.draft._platformSearchTextCustomized !== "boolean") {
-      novel.draft._platformSearchTextCustomized = Boolean(novel.draft.platform_search_text.trim());
-    }
-    if (typeof novel.draft._platformEndingTextCustomized !== "boolean") {
-      novel.draft._platformEndingTextCustomized = Boolean(novel.draft.platform_ending_text.trim());
-    }
+    novel.draft.platform_ending_prefix = String(novel.draft.platform_ending_prefix || "");
+    novel.draft.platform_ending_suffix = String(novel.draft.platform_ending_suffix || "");
     if (isAuthenticatedHubBrowser() || isClientLocalBrowser()) {
       const folderDefaults = webFolderDefaults();
       Object.keys(draftFolderCatalog).forEach((key) => {
@@ -3802,9 +3876,18 @@
         : defaults.video_template === "platform_story_card",
       intro_card_start_seconds: Number(defaults.intro_card_start_seconds || 0),
       intro_card_duration_seconds: Number(defaults.intro_card_duration_seconds || 5.5),
+      card_timeline_schema_version: 1,
+      intro_card_start_mode: defaults.intro_card_start_mode || "seconds",
+      intro_card_start_value: Number(defaults.intro_card_start_value ?? defaults.intro_card_start_seconds ?? 0),
+      intro_card_display_mode: defaults.intro_card_display_mode || "seconds",
+      intro_card_display_value: Number(defaults.intro_card_display_value ?? defaults.intro_card_duration_seconds ?? 5.5),
       code_card_enabled: defaults.code_card_enabled !== false,
       code_card_start_seconds: Number(defaults.code_card_start_seconds || 0),
       code_card_duration_seconds: Number(defaults.code_card_duration_seconds || 0),
+      code_card_start_mode: defaults.code_card_start_mode || "seconds",
+      code_card_start_value: Number(defaults.code_card_start_value ?? defaults.code_card_start_seconds ?? 0),
+      code_card_display_mode: defaults.code_card_display_mode || (Number(defaults.code_card_duration_seconds || 0) === 0 ? "body_end" : "seconds"),
+      code_card_display_value: Number(defaults.code_card_display_value ?? defaults.code_card_duration_seconds ?? 0),
       intro_card_preset: defaults.intro_card_preset || "editorial_white",
       caption_mode: defaults.caption_mode || "semantic",
       subtitle_preset: defaults.subtitle_preset || "clear_outline",
@@ -3855,6 +3938,20 @@
       0,
       Number(novel.draft.production_settings.code_card_duration_seconds || 0),
     );
+    const timeline = novel.draft.production_settings;
+    timeline.card_timeline_schema_version = 1;
+    timeline.intro_card_start_mode = ["seconds", "body_percent"].includes(timeline.intro_card_start_mode)
+      ? timeline.intro_card_start_mode : "seconds";
+    timeline.intro_card_start_value = Math.max(0, Number(timeline.intro_card_start_value ?? timeline.intro_card_start_seconds ?? 0));
+    timeline.intro_card_display_mode = ["seconds", "body_percent", "body_end"].includes(timeline.intro_card_display_mode)
+      ? timeline.intro_card_display_mode : "seconds";
+    timeline.intro_card_display_value = Math.max(0, Number(timeline.intro_card_display_value ?? timeline.intro_card_duration_seconds ?? 5.5));
+    timeline.code_card_start_mode = ["seconds", "body_percent"].includes(timeline.code_card_start_mode)
+      ? timeline.code_card_start_mode : "seconds";
+    timeline.code_card_start_value = Math.max(0, Number(timeline.code_card_start_value ?? timeline.code_card_start_seconds ?? 0));
+    timeline.code_card_display_mode = ["seconds", "body_percent", "body_end"].includes(timeline.code_card_display_mode)
+      ? timeline.code_card_display_mode : (Number(timeline.code_card_duration_seconds || 0) === 0 ? "body_end" : "seconds");
+    timeline.code_card_display_value = Math.max(0, Number(timeline.code_card_display_value ?? timeline.code_card_duration_seconds ?? 0));
     novel.draft.production_settings.intro_card_preset ||= defaults.intro_card_preset || "editorial_white";
     novel.draft.production_settings.code_card_preset ||= defaults.code_card_preset || "brand_pill";
     novel.draft.production_settings.outro_card_preset ||= defaults.outro_card_preset || "editorial_white";
@@ -3930,8 +4027,8 @@
       intro_card_copies: {},
       platform_search_text: "",
       platform_ending_text: "",
-      _platformSearchTextCustomized: false,
-      _platformEndingTextCustomized: false,
+      platform_ending_prefix: "",
+      platform_ending_suffix: "",
       variant_count: 1,
       approvals: { main: "pending", variants: {} },
       recipe_dirty: false,
@@ -4242,27 +4339,109 @@
     </div>`;
   }
 
+  function voiceCatalogItems(novel, { filtered = true } = {}) {
+    const items = Array.isArray(novel?.voice_catalog?.items) ? novel.voice_catalog.items : [];
+    if (!filtered) return items;
+    const query = state.voiceCatalogQuery.trim().toLocaleLowerCase();
+    return items.filter((item) => {
+      if (state.voiceCatalogShowHidden ? !item.hidden : item.hidden) return false;
+      if (state.voiceCatalogStyle !== "all" && item.style !== state.voiceCatalogStyle) return false;
+      if (!query) return true;
+      return [item.voice_name, item.style_label, item.provider, item.language, item.voice_id]
+        .some((value) => String(value || "").toLocaleLowerCase().includes(query));
+    });
+  }
+
+  function voiceCatalogItem(novel, selectionKey) {
+    return voiceCatalogItems(novel, { filtered: false })
+      .find((item) => String(item.selection_key || "") === String(selectionKey || ""));
+  }
+
   function productionVoiceCandidateMarkup(novel, draft) {
-    const candidates = Array.isArray(novel.voice_candidates) ? novel.voice_candidates.slice(0, 3) : [];
-    if (!candidates.length) {
-      return '<div class="workbench-inline-empty"><b>还没有试听候选</b><small>选择故事情绪并生成该语种可用的女声，满意后本批全程使用同一声音。</small></div>';
+    const candidates = voiceCatalogItems(novel);
+    if (!novel.voice_catalog) {
+      return '<div class="workbench-inline-empty"><b>正在读取真实音色库</b><small>只读取目录，不会批量生成试听音频。</small></div>';
     }
-    const languageInfo = novelLanguageInfo(novel);
-    const fallbackProfile = languageInfo.key === "en" ? "American female" : `${languageInfo.label}女声`;
+    if (!candidates.length) {
+      return `<div class="workbench-inline-empty"><b>${state.voiceCatalogShowHidden ? "已隐藏音色中没有匹配项" : "没有可显示的真实音色"}</b><small>请调整搜索/风格筛选，或打开“已隐藏音色”。网络失败时不会显示虚构声线。</small></div>`;
+    }
+    const canManageTeam = normalizeSoftwareRole(state.webSession?.user?.role) === "admin";
     return candidates.map((candidate, index) => {
-      const selected = candidate.provider === draft.voice?.provider && candidate.voice_id === draft.voice?.voice_id;
-      const mockAudio = String(candidate.audio_uri || "").startsWith("mock://");
-      const audioUri = webAssetUrl(candidate.audio_uri || candidate.audio_path || "");
-      const audition = mockAudio || !audioUri
-        ? `<button type="button" class="text-button" data-preview-voice-index="${index}">试听</button>`
-        : `<audio controls preload="metadata" src="${escapeHtml(audioUri)}" aria-label="试听 ${escapeHtml(candidate.label || candidate.voice_id)}"></audio>`;
-      return `<label class="production-voice-option ${selected ? "is-selected" : ""}">
-        <input type="radio" name="production-voice" value="${index}" ${selected ? "checked" : ""} />
-        <span class="production-voice-number">0${index + 1}</span>
-        <span class="production-voice-copy"><b>${escapeHtml(candidate.label || candidate.voice_id)}</b><small>${escapeHtml(candidate.profile || fallbackProfile)} · ${escapeHtml(ttsProviderLabel(candidate.provider))} · ${Math.round(Number(candidate.duration_seconds || 0))}秒</small></span>
-        <span class="production-voice-audition">${audition}</span>
+      const selected = sameVoiceIdentity(candidate, draft.voice);
+      const unavailable = candidate.team_disabled || candidate.hidden;
+      return `<label class="production-voice-option ${selected ? "is-selected" : ""} ${unavailable ? "is-unavailable" : ""}">
+        <input type="radio" name="production-voice" value="${escapeHtml(candidate.selection_key)}" ${selected ? "checked" : ""} ${unavailable ? "disabled" : ""} />
+        <span class="production-voice-number">${String(index + 1).padStart(2, "0")}</span>
+        <span class="production-voice-copy"><b>${escapeHtml(candidate.voice_name)} · ${escapeHtml(candidate.style_label)} · ${escapeHtml(ttsProviderLabel(candidate.provider))}</b><small>${escapeHtml(candidate.language)} · ${escapeHtml(candidate.voice_id)}${candidate.team_disabled ? " · 团队已停用" : candidate.hidden ? " · 个人已隐藏" : ""}</small></span>
+        <span class="production-voice-audition"><button type="button" class="text-button" data-preview-voice="${escapeHtml(candidate.selection_key)}" ${candidate.team_disabled ? "disabled" : ""}>试听</button><button type="button" class="text-button" data-favorite-voice="${escapeHtml(candidate.selection_key)}">${candidate.favorite ? "取消收藏" : "收藏"}</button><button type="button" class="text-button" data-hide-voice="${escapeHtml(candidate.selection_key)}">${candidate.hidden ? "恢复" : "隐藏"}</button>${canManageTeam ? `<button type="button" class="text-button" data-disable-team-voice="${escapeHtml(candidate.selection_key)}">${candidate.team_disabled ? "团队恢复" : "团队停用"}</button>` : ""}</span>
       </label>`;
     }).join("");
+  }
+
+  async function loadProductionVoiceCatalog({ refresh = false } = {}) {
+    const novel = state.productionNovel;
+    if (!novel || state.voiceCatalogLoading.has(novel.id)) return;
+    state.voiceCatalogLoading.add(novel.id);
+    try {
+      const catalog = await checkedCall("get_voice_catalog", novel.id, Boolean(refresh));
+      if (state.productionNovel?.id !== novel.id) return;
+      novel.voice_catalog = catalog;
+      renderProductionWorkbench();
+      if (refresh) toast(`已刷新 ${catalog.items?.length || 0} 个真实音色。`, "info");
+    } catch (error) {
+      novel.voice_catalog = { items: [], error: String(error.message || error) };
+      renderProductionWorkbench();
+      toast(error.message || "真实音色库读取失败。", "error");
+    } finally {
+      state.voiceCatalogLoading.delete(novel.id);
+    }
+  }
+
+  function cardTimelineEstimate(settings, card, bodySeconds) {
+    const enabled = settings[`${card}_card_enabled`] !== false;
+    const startMode = settings[`${card}_card_start_mode`] || "seconds";
+    const startValue = Math.max(0, Number(settings[`${card}_card_start_value`] || 0));
+    const displayMode = settings[`${card}_card_display_mode`] || "seconds";
+    const displayValue = Math.max(0, Number(settings[`${card}_card_display_value`] || 0));
+    const body = Math.max(0, Number(bodySeconds || 0));
+    const start = startMode === "body_percent" ? body * startValue / 100 : startValue;
+    const requestedEnd = displayMode === "body_end"
+      ? body
+      : start + (displayMode === "body_percent" ? body * displayValue / 100 : displayValue);
+    const end = Math.min(body, requestedEnd);
+    const invalidDisplay = enabled && displayMode !== "body_end" && displayValue <= 0;
+    const invalidStart = enabled && body > 0 && start >= body;
+    const invalid = invalidDisplay || invalidStart;
+    const clipped = enabled && requestedEnd > body;
+    return {
+      start, end: Math.max(start, end), invalid, clipped,
+      text: !enabled
+        ? "已关闭"
+        : invalidDisplay
+          ? "持续时间必须大于 0；如需一直显示，请选“显示至正文结束”。"
+        : invalidStart
+          ? `正文预计 ${formatDuration(body)}；开始位置已达到正文结束，请调整后提交。`
+          : `正文预计 ${formatDuration(body)}；${startMode === "body_percent" ? `${startValue}%≈` : ""}第 ${start.toFixed(1)} 秒；实际 ${start.toFixed(1)}–${end.toFixed(1)} 秒${clipped ? "（已自动裁剪）" : ""}`,
+    };
+  }
+
+  function updateProductionCardTimelineEstimates() {
+    const novel = state.productionNovel;
+    if (!novel) return;
+    const draft = activeDraft(novel);
+    const settings = draft.production_settings || {};
+    const bodySeconds = selectedEpisodeDurationSeconds(
+      novel,
+      new Set(draft.episode_ids || []),
+      settings.narration_wpm || 240,
+    );
+    for (const card of ["intro", "code"]) {
+      const estimateNode = $(`.production-card-estimate[data-card-estimate="${card}"]`);
+      if (!estimateNode) continue;
+      const estimate = cardTimelineEstimate(settings, card, bodySeconds);
+      estimateNode.textContent = estimate.text;
+      estimateNode.classList.toggle("is-error", estimate.invalid);
+    }
   }
 
   function productionMissingDescriptors(novel, draft) {
@@ -4275,7 +4454,7 @@
     if (!draft.platform_id) add("platform", "平台", "content", "#production-platform-select");
     if (!draft.promo_code_id) add("promo-code", "口令", "content", "#production-code-select");
     if (!draft.episode_ids?.length) add("episodes", "分集", "content", "[data-episode-id]");
-    if (!reuseAudio && (!draft.voice?.provider || !draft.voice?.voice_id)) add("voice", "本批女声", "voice", 'input[name="production-voice"], [data-generate-voices]');
+    if (!reuseAudio && (!draft.voice?.provider || !draft.voice?.voice_id)) add("voice", "本批女声", "voice", 'input[name="production-voice"], [data-refresh-voice-catalog]');
     if (reuseAudio && !String(draft.source_narration_audio || "").trim()) add("source-audio", "已有配音", "voice", "#production-source-narration-audio");
     if (!audioOnly && !draft.video_folder) add("video-folder", "视频素材", "output", "#draft-video-folder");
     if (!audioOnly && bgmMode === "auto" && !draft.music_folder) add("music-folder", "背景音乐库", "output", "#draft-music-folder");
@@ -4477,6 +4656,9 @@
     if (!novel) throw new Error("请先选择小说。 ");
     syncProductionDraftFromControls();
     const draft = activeDraft(novel);
+    if (!novel.voice_catalog && !state.voiceCatalogLoading.has(novel.id)) {
+      window.queueMicrotask(() => void loadProductionVoiceCatalog());
+    }
     return {
       story_mood: draft.story_mood || "suspense",
       voice_profile: draft.voice?.profile || storyMoodCatalog[draft.story_mood]?.voice || "",
@@ -4632,6 +4814,9 @@
       updateProductionJumpbar(null, null);
       return;
     }
+    if (!novel.voice_catalog && !state.voiceCatalogLoading.has(novel.id)) {
+      window.queueMicrotask(() => void loadProductionVoiceCatalog());
+    }
     const draft = activeDraft(novel);
     const bindings = novel.platform_bindings || [];
     if (!bindings.some((item) => item.platform_id === draft.platform_id)) {
@@ -4656,16 +4841,14 @@
       selectedEpisodes,
       settings.narration_wpm || 240,
     );
+    const introTimelineEstimate = cardTimelineEstimate(settings, "intro", selectedDurationSeconds);
+    const codeTimelineEstimate = cardTimelineEstimate(settings, "code", selectedDurationSeconds);
     const durationWarningVisible = selectedDurationSeconds > MERGED_DURATION_WARNING_SECONDS;
     const targetMinimum = 1;
     draft.target_video_count = Math.max(targetMinimum, Math.trunc(Number(draft.target_video_count || 10)));
     const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
-    const platformSearchText = draft._platformSearchTextCustomized
-      ? String(draft.platform_search_text || "")
-      : platformCopyDefaults.search;
-    const platformEndingText = draft._platformEndingTextCustomized
-      ? String(draft.platform_ending_text || "")
-      : platformCopyDefaults.ending;
+    const platformSearchText = String(platformCopyDefaults.search);
+    const platformEndingText = String(platformCopyDefaults.ending);
     const structureLocked = productionStructureLocked(novel, draft);
     const recentBatch = (
       !draft.id
@@ -4745,7 +4928,7 @@
         <div class="workbench-section-controls production-voice-controls">${reuseAudio ? "" : `<label class="field compact-inline-field"><span>本机配音服务</span><select id="production-local-tts-provider">${productionTtsProviderOptions}</select><small>只切换当前电脑；无需管理员配置文件夹或密钥。</small></label>`}<label class="field compact-inline-field"><span>故事类型</span><select id="voice-candidate-mood">${storyMoodOptions(draft.story_mood)}</select></label></div>
         ${storyClassificationMarkup(novel, draft)}
         ${reuseAudio ? productionSourceAudioMarkup(draft) : `
-          <div class="production-voice-toolbar"><button type="button" class="button button-secondary" data-generate-voices>${novel.voice_candidates?.length ? "重新生成女声候选" : "生成女声候选"}</button><span>试听后选择一个；本批所有分集保持同一声音。</span></div>
+          <div class="production-voice-toolbar"><label class="field compact-inline-field"><span>搜索音色</span><input id="production-voice-search" value="${escapeHtml(state.voiceCatalogQuery)}" placeholder="名称、风格或 voice_id" /></label><label class="field compact-inline-field"><span>风格</span><select id="production-voice-style"><option value="all">全部风格</option>${[...new Set(voiceCatalogItems(novel, { filtered: false }).map((item) => item.style))].filter(Boolean).map((style) => `<option value="${escapeHtml(style)}" ${state.voiceCatalogStyle === style ? "selected" : ""}>${escapeHtml(voiceCatalogItems(novel, { filtered: false }).find((item) => item.style === style)?.style_label || style)}</option>`).join("")}</select></label><button type="button" class="button button-secondary" data-refresh-voice-catalog>刷新真实音色</button><button type="button" class="text-button" data-toggle-hidden-voices>${state.voiceCatalogShowHidden ? "返回可用音色" : "已隐藏音色"}</button><span>目录与试听分离；只有点击某一条“试听”才会合成 8–12 秒真实音频。</span></div>
           <div class="production-voice-list">${productionVoiceCandidateMarkup(novel, draft)}</div>
           ${productionWpmControlMarkup(settings)}
         `}
@@ -4768,11 +4951,15 @@
               <div class="production-card-timeline-controls production-intro-card-controls" data-card-enabled="${settings.intro_card_enabled ? "true" : "false"}" data-intro-card-enabled="${settings.intro_card_enabled ? "true" : "false"}">
                 <label class="option-toggle production-intro-toggle">
                   <input id="production-intro-card-enabled" type="checkbox" ${settings.intro_card_enabled ? "checked" : ""} />
-                  <span><b>使用简介卡</b><small>可指定从视频第几秒开始展示。</small></span>
+                  <span><b>使用简介卡</b><small>按正文实际配音时长解析，不会延长成片。</small></span>
                   <i aria-hidden="true"></i>
                 </label>
-                <label class="field"><span>开始时间</span><input id="production-intro-card-start" type="number" min="0" step="0.5" value="${Number(settings.intro_card_start_seconds || 0)}" ${settings.intro_card_enabled ? "" : "disabled"} /><small>从视频第几秒出现</small></label>
-                <label class="field"><span>显示时长</span><input id="production-intro-card-duration" type="number" min="2.5" max="8" step="0.5" value="${Number(settings.intro_card_duration_seconds || 5.5)}" ${settings.intro_card_enabled ? "" : "disabled"} /><small>2.5–8 秒</small></label>
+                <label class="field"><span>开始位置模式</span><select id="production-intro-card-start-mode" ${settings.intro_card_enabled ? "" : "disabled"}><option value="seconds" ${settings.intro_card_start_mode === "seconds" ? "selected" : ""}>按秒数</option><option value="body_percent" ${settings.intro_card_start_mode === "body_percent" ? "selected" : ""}>按正文进度百分比</option></select></label>
+                <label class="field"><span>开始位置</span><input id="production-intro-card-start-value" type="number" min="0" max="${settings.intro_card_start_mode === "body_percent" ? "99.5" : "99999"}" step="0.5" value="${Number(settings.intro_card_start_value || 0)}" ${settings.intro_card_enabled ? "" : "disabled"} /><small>${settings.intro_card_start_mode === "body_percent" ? "正文进度百分比（须小于 100%）" : "正文开始后的秒数"}</small></label>
+                <label class="field"><span>显示模式</span><select id="production-intro-card-display-mode" ${settings.intro_card_enabled ? "" : "disabled"}><option value="seconds" ${settings.intro_card_display_mode === "seconds" ? "selected" : ""}>持续秒数</option><option value="body_percent" ${settings.intro_card_display_mode === "body_percent" ? "selected" : ""}>持续正文百分比</option><option value="body_end" ${settings.intro_card_display_mode === "body_end" ? "selected" : ""}>显示至正文结束</option></select></label>
+                <label class="field"><span>显示值</span><input id="production-intro-card-display-value" type="number" min="0.5" max="${settings.intro_card_display_mode === "body_percent" ? "100" : "99999"}" step="0.5" value="${Number(settings.intro_card_display_value || 0)}" ${settings.intro_card_enabled && settings.intro_card_display_mode !== "body_end" ? "" : "disabled"} /></label>
+                <div class="production-card-presets"><button type="button" class="text-button" data-card-preset="intro:opening">开头短显</button><button type="button" class="text-button" data-card-preset="intro:middle">中段提醒</button><button type="button" class="text-button" data-card-preset="intro:ending">结尾提醒</button><button type="button" class="text-button" data-card-preset="intro:full">全程显示</button></div>
+                <p class="production-card-estimate ${introTimelineEstimate.invalid ? "is-error" : ""}" data-card-estimate="intro">${escapeHtml(introTimelineEstimate.text)}</p>
                 <label class="field"><span>简介卡样式</span><select id="production-intro-card-preset" ${settings.intro_card_enabled ? "" : "disabled"}><option value="editorial_white">杂志白卡</option><option value="cover_story_dark">深色封面故事卡</option><option value="cover_story_noir">电影黑卡</option><option value="cinematic_dark">电影暗卡</option><option value="romance_soft">柔光浪漫</option><option value="minimal_clean">纯净极简</option><option value="social_post">社交帖卡</option><option value="paper_note">纸张便笺</option><option value="golden_luxe">金色质感</option><option value="suspense_red">悬疑红卡</option><option value="blue_glass">蓝色玻璃</option><option value="warm_story">暖调故事</option></select></label>
                 <label class="field production-intro-copy-field"><span>简介短文案</span><textarea id="production-intro-card-copy" rows="3" maxlength="155" placeholder="${escapeHtml(storyPreviewText(novel, draft))}" ${settings.intro_card_enabled ? "" : "disabled"}>${escapeHtml(draft.intro_card_text || "")}</textarea><small>留空则使用 AI 精简结果；只保留最有吸引力的冲突，不显示小说名和多余标签。</small></label>
               </div>
@@ -4793,17 +4980,24 @@
               <div class="production-card-timeline-controls production-code-card-controls" data-card-enabled="${settings.code_card_enabled !== false ? "true" : "false"}">
                 <label class="option-toggle production-code-toggle">
                   <input id="production-code-card-enabled" type="checkbox" ${settings.code_card_enabled !== false ? "checked" : ""} />
-                  <span><b>使用口令卡</b><small>展示本批平台和口令，可设置出现时段。</small></span>
+                  <span><b>使用口令卡</b><small>平台和口令来自小说库，员工不能改写。</small></span>
                   <i aria-hidden="true"></i>
                 </label>
-                <label class="field"><span>开始时间</span><input id="production-code-card-start" type="number" min="0" step="0.5" value="${Number(settings.code_card_start_seconds || 0)}" ${settings.code_card_enabled !== false ? "" : "disabled"} /><small>从视频第几秒出现</small></label>
-                <label class="field"><span>显示时长</span><input id="production-code-card-duration" type="number" min="0" step="0.5" value="${Number(settings.code_card_duration_seconds || 0)}" ${settings.code_card_enabled !== false ? "" : "disabled"} /><small>0 表示持续到视频结尾</small></label>
+                <label class="field"><span>开始位置模式</span><select id="production-code-card-start-mode" ${settings.code_card_enabled !== false ? "" : "disabled"}><option value="seconds" ${settings.code_card_start_mode === "seconds" ? "selected" : ""}>按秒数</option><option value="body_percent" ${settings.code_card_start_mode === "body_percent" ? "selected" : ""}>按正文进度百分比</option></select></label>
+                <label class="field"><span>开始位置</span><input id="production-code-card-start-value" type="number" min="0" max="${settings.code_card_start_mode === "body_percent" ? "99.5" : "99999"}" step="0.5" value="${Number(settings.code_card_start_value || 0)}" ${settings.code_card_enabled !== false ? "" : "disabled"} /></label>
+                <label class="field"><span>显示模式</span><select id="production-code-card-display-mode" ${settings.code_card_enabled !== false ? "" : "disabled"}><option value="seconds" ${settings.code_card_display_mode === "seconds" ? "selected" : ""}>持续秒数</option><option value="body_percent" ${settings.code_card_display_mode === "body_percent" ? "selected" : ""}>持续正文百分比</option><option value="body_end" ${settings.code_card_display_mode === "body_end" ? "selected" : ""}>显示至正文结束</option></select></label>
+                <label class="field"><span>显示值</span><input id="production-code-card-display-value" type="number" min="0.5" max="${settings.code_card_display_mode === "body_percent" ? "100" : "99999"}" step="0.5" value="${Number(settings.code_card_display_value || 0)}" ${settings.code_card_enabled !== false && settings.code_card_display_mode !== "body_end" ? "" : "disabled"} /></label>
+                <div class="production-card-presets"><button type="button" class="text-button" data-card-preset="code:opening">开头短显</button><button type="button" class="text-button" data-card-preset="code:middle">中段提醒</button><button type="button" class="text-button" data-card-preset="code:ending">结尾提醒</button><button type="button" class="text-button" data-card-preset="code:full">全程显示</button></div>
+                <p class="production-card-estimate ${codeTimelineEstimate.invalid ? "is-error" : ""}" data-card-estimate="code">${escapeHtml(codeTimelineEstimate.text)}</p>
                 <label class="field"><span>口令卡样式</span><select id="production-code-card-preset" ${settings.code_card_enabled !== false ? "" : "disabled"}><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
-                <label class="field production-platform-search-copy-field"><span>平台口令卡文案</span><textarea id="production-platform-search-text" rows="2" maxlength="300" data-custom="${draft._platformSearchTextCustomized ? "true" : "false"}" ${settings.code_card_enabled !== false ? "" : "disabled"}>${escapeHtml(platformSearchText)}</textarea><small>默认使用所选平台模板和当前口令解析。</small></label>
+                <div class="field production-platform-search-copy-field"><span>平台口令卡（小说库权威来源）</span><div class="production-authoritative-copy"><small>平台：${escapeHtml(selectedPlatformName)}</small><small>口令：${escapeHtml(activeCodes.find((item) => item.id === draft.promo_code_id)?.value || "待选择")}</small><b>最终口令卡：${escapeHtml(platformSearchText)}</b><em>来源：小说库；只能由管理员在平台管理中修改模板</em></div><textarea id="production-platform-search-text" hidden readonly>${escapeHtml(platformSearchText)}</textarea></div>
               </div>
               <div class="production-platform-copy-overrides">
-                <label class="field"><span>结尾引导文案</span><textarea id="production-platform-ending-text" rows="3" maxlength="600" data-custom="${draft._platformEndingTextCustomized ? "true" : "false"}">${escapeHtml(platformEndingText)}</textarea><small>默认使用平台结尾模板，用于本批旁白与字幕。</small></label>
-                <p><b>员工可直接编辑</b><span>只覆盖本批，不修改团队平台模板，也不需要平台管理权限。</span></p>
+                <label class="field"><span>结尾普通前文</span><textarea id="production-platform-ending-prefix" rows="2" maxlength="220">${escapeHtml(draft.platform_ending_prefix || "")}</textarea><small>只写普通剧情衔接语；不能包含数字、平台名、口令或搜索/下载指令。</small></label>
+                <div class="production-authoritative-token"><b>${escapeHtml(platformEndingText)}</b><small>锁定的平台/口令片段 · 来源：小说库</small></div>
+                <label class="field"><span>结尾普通后文</span><textarea id="production-platform-ending-suffix" rows="2" maxlength="220">${escapeHtml(draft.platform_ending_suffix || "")}</textarea><small>只写普通剧情衔接语；平台和口令由服务端锁定生成。</small></label>
+                <textarea id="production-platform-ending-text" hidden readonly>${escapeHtml(platformEndingText)}</textarea>
+                <p><b>平台和口令不可编辑</b><span>提交时服务端会按小说绑定重新核对并冻结权威文案。</span></p>
               </div>
             </section>
           </div>
@@ -4986,6 +5180,7 @@
 
   function stopProductionWpmPreview({ silent = false } = {}) {
     state.wpmPreviewRequestId += 1;
+    state.wpmPreviewPending = null;
     if (state.wpmPreviewDebounceTimer) window.clearTimeout(state.wpmPreviewDebounceTimer);
     state.wpmPreviewDebounceTimer = null;
     if (state.wpmPreviewStopTimer) window.clearTimeout(state.wpmPreviewStopTimer);
@@ -4998,32 +5193,50 @@
     if (!silent) setWpmPreviewStatus("idle", "试听已停止", "再次选择语速即可重新生成真实试听。");
   }
 
+  function resumePendingProductionWpmPreview() {
+    if (state.voicePreviewInFlight || state.wpmPreviewInFlight) return;
+    window.queueMicrotask(() => {
+      if (state.voicePreviewInFlight || state.wpmPreviewInFlight) return;
+      const pending = state.wpmPreviewPending;
+      if (pending !== null) {
+        state.wpmPreviewPending = null;
+        void previewProductionWpm(pending);
+      }
+    });
+  }
+
   async function previewProductionWpm(wpm) {
     const novel = state.productionNovel;
     if (!novel) return;
     const draft = activeDraft(novel);
     const voice = draft.voice || {};
-    stopProductionWpmPreview({ silent: true });
-    const requestId = ++state.wpmPreviewRequestId;
     if (!voice.provider || !voice.voice_id) {
       setWpmPreviewStatus("error", "还不能试听语速", "请先生成并选择一个真实女声候选。");
       return;
     }
+    if (state.voicePreviewInFlight || state.wpmPreviewInFlight) {
+      state.wpmPreviewPending = Number(wpm);
+      const title = state.voicePreviewInFlight ? "音色试听仍在生成" : "上一条语速试听仍在生成";
+      setWpmPreviewStatus("loading", title, `完成后将自动试听 ${wpm} WPM；语速值已经保存。`);
+      return;
+    }
+    if (state.wpmPreviewAudio) {
+      state.wpmPreviewAudio.pause();
+      state.wpmPreviewAudio = null;
+    }
+    const requestId = ++state.wpmPreviewRequestId;
+    state.wpmPreviewInFlight = true;
+    state.wpmPreviewPending = null;
     setWpmPreviewStatus("loading", `正在生成 ${wpm} WPM 试听`, "使用当前已选声线生成 8–12 秒真实音频，请稍候。");
     try {
-      const mood = String(draft.story_mood || "suspense");
-      const data = await checkedCall("generate_voice_candidates", novel.id, mood, wpm);
-      if (requestId !== state.wpmPreviewRequestId) return;
-      const candidates = Array.isArray(data?.candidates)
-        ? data.candidates
-        : Array.isArray(data?.novel?.voice_candidates)
-          ? data.novel.voice_candidates
-          : [];
-      if (candidates.length) novel.voice_candidates = candidates;
-      const candidate = data?.preview || data?.candidate || candidates.find((item) => (
-        String(item.provider || "") === String(voice.provider || "")
-        && String(item.voice_id || "") === String(voice.voice_id || "")
-      ));
+      const data = await checkedCall("preview_voice_speed", novel.id, voice.provider, voice.voice_id, Number(wpm));
+      if (requestId !== state.wpmPreviewRequestId || state.wpmPreviewPending !== null) return;
+      if (state.productionNovel?.id !== novel.id) return;
+      if (!sameVoiceIdentity(voice, activeDraft(novel).voice)) {
+        state.wpmPreviewPending = Number(wpm);
+        return;
+      }
+      const candidate = data?.candidate;
       if (!candidate) {
         setWpmPreviewStatus("error", "当前声线没有试听文件", "配音服务没有返回已选声线的真实试听，请重新生成候选后再试。");
         return;
@@ -5057,7 +5270,7 @@
       setWpmPreviewStatus(
         "playing",
         `正在试听 ${wpm} WPM`,
-        `${candidate.label || voice.label || voice.voice_id} · ${duration ? `${Math.min(12, Math.round(duration))} 秒` : "最长 12 秒"}真实音频`,
+        `${candidate.voice_name || candidate.label || voice.label || voice.voice_id} · ${duration ? `${Math.min(12, Math.round(duration))} 秒` : "最长 12 秒"}真实音频`,
         { canStop: true },
       );
       state.wpmPreviewStopTimer = window.setTimeout(() => {
@@ -5068,19 +5281,40 @@
         setWpmPreviewStatus("ready", `${wpm} WPM 试听完成`, "已播放 12 秒真实试听。");
       }, 12000);
     } catch (error) {
-      if (requestId !== state.wpmPreviewRequestId) return;
+      if (requestId !== state.wpmPreviewRequestId || state.wpmPreviewPending !== null) return;
       state.wpmPreviewAudio = null;
+      const message = String(error.message || "语速试听失败。");
+      const foldedMessage = message.toLocaleLowerCase();
+      const playbackFailure = error?.name === "NotAllowedError"
+        || error?.name === "NotSupportedError"
+        || /audio|playback|play failed|notallowed|notsupported/.test(foldedMessage);
+      const title = playbackFailure ? "真实试听播放失败"
+        : message.includes("渲染") ? "当前正在渲染"
+        : message.includes("正在生成") ? "已有试听正在生成"
+          : message.includes("离线") || message.includes("Worker") ? "制作 Worker 离线"
+            : message.includes("组件") || message.includes("模型") || /kokoro|dependenc|component/.test(foldedMessage) ? "配音组件不可用"
+              : message.includes("网络") || /could not reach|network|connect|timeout|timed out/.test(foldedMessage) ? "配音网络失败" : "语速试听失败";
       setWpmPreviewStatus(
         "error",
-        "当前版本不能生成语速试听",
-        `${error.message || "本机配音试听接口不可用。"} 语速设置仍已保存，未播放模拟声音。`,
+        title,
+        `${message} 语速设置仍已保存，不会回滚。`,
       );
+    } finally {
+      state.wpmPreviewInFlight = false;
+      resumePendingProductionWpmPreview();
     }
   }
 
   function scheduleProductionWpmPreview() {
     if (state.wpmPreviewDebounceTimer) window.clearTimeout(state.wpmPreviewDebounceTimer);
+    state.wpmPreviewDebounceTimer = null;
     const wpm = selectedProductionWpm();
+    if (state.voicePreviewInFlight || state.wpmPreviewInFlight) {
+      state.wpmPreviewPending = wpm;
+      const title = state.voicePreviewInFlight ? "音色试听仍在生成" : "语速试听仍在生成";
+      setWpmPreviewStatus("loading", title, `完成后将自动试听 ${wpm} WPM；语速值已经保存。`);
+      return;
+    }
     state.wpmPreviewDebounceTimer = window.setTimeout(() => {
       state.wpmPreviewDebounceTimer = null;
       void previewProductionWpm(wpm);
@@ -5139,8 +5373,8 @@
     draft.story_mood_source = suggestedMood && selectedMood === suggestedMood ? "auto" : "manual";
     const selectedVoice = $('input[name="production-voice"]:checked', root);
     if (selectedVoice) {
-      const candidate = novel.voice_candidates?.[Number(selectedVoice.value)];
-      if (candidate) draft.voice = { provider: candidate.provider, voice_id: candidate.voice_id, label: candidate.label, profile: candidate.profile };
+      const candidate = voiceCatalogItem(novel, selectedVoice.value);
+      if (candidate) draft.voice = { provider: candidate.provider, voice_id: candidate.voice_id, label: candidate.voice_name, profile: candidate.style };
     }
     const productionSettings = draft.production_settings || {};
     if ($('input[name="production-wpm-preset"]', root)) {
@@ -5154,42 +5388,23 @@
     }
     productionSettings.video_transition = $("#production-video-transition")?.value === "fade" ? "fade" : "cut";
     productionSettings.intro_card_enabled = $("#production-intro-card-enabled")?.checked === true;
-    productionSettings.intro_card_start_seconds = Math.max(
-      0,
-      Number($("#production-intro-card-start")?.value || productionSettings.intro_card_start_seconds || 0),
-    );
-    productionSettings.intro_card_duration_seconds = Math.max(
-      2.5,
-      Math.min(8, Number($("#production-intro-card-duration")?.value || productionSettings.intro_card_duration_seconds || 5.5)),
-    );
+    productionSettings.card_timeline_schema_version = 1;
+    productionSettings.intro_card_start_mode = $("#production-intro-card-start-mode")?.value || productionSettings.intro_card_start_mode || "seconds";
+    productionSettings.intro_card_start_value = Math.max(0, Number($("#production-intro-card-start-value")?.value || 0));
+    productionSettings.intro_card_display_mode = $("#production-intro-card-display-mode")?.value || productionSettings.intro_card_display_mode || "seconds";
+    productionSettings.intro_card_display_value = Math.max(0, Number($("#production-intro-card-display-value")?.value || 0));
+    productionSettings.intro_card_start_seconds = productionSettings.intro_card_start_mode === "seconds" ? productionSettings.intro_card_start_value : 0;
+    productionSettings.intro_card_duration_seconds = productionSettings.intro_card_display_mode === "seconds" ? productionSettings.intro_card_display_value : 0;
     productionSettings.code_card_enabled = $("#production-code-card-enabled")?.checked !== false;
-    productionSettings.code_card_start_seconds = Math.max(
-      0,
-      Number($("#production-code-card-start")?.value || productionSettings.code_card_start_seconds || 0),
-    );
-    productionSettings.code_card_duration_seconds = Math.max(
-      0,
-      Number($("#production-code-card-duration")?.value || productionSettings.code_card_duration_seconds || 0),
-    );
+    productionSettings.code_card_start_mode = $("#production-code-card-start-mode")?.value || productionSettings.code_card_start_mode || "seconds";
+    productionSettings.code_card_start_value = Math.max(0, Number($("#production-code-card-start-value")?.value || 0));
+    productionSettings.code_card_display_mode = $("#production-code-card-display-mode")?.value || productionSettings.code_card_display_mode || "body_end";
+    productionSettings.code_card_display_value = Math.max(0, Number($("#production-code-card-display-value")?.value || 0));
+    productionSettings.code_card_start_seconds = productionSettings.code_card_start_mode === "seconds" ? productionSettings.code_card_start_value : 0;
+    productionSettings.code_card_duration_seconds = productionSettings.code_card_display_mode === "seconds" ? productionSettings.code_card_display_value : 0;
     if ($("#production-intro-card-copy")) draft.intro_card_text = $("#production-intro-card-copy").value.trim();
-    const platformSearchInput = $("#production-platform-search-text");
-    const platformEndingInput = $("#production-platform-ending-text");
-    if (platformSearchInput) {
-      draft._platformSearchTextCustomized = (
-        platformSearchInput.dataset.custom === "true" && Boolean(platformSearchInput.value.trim())
-      );
-      draft.platform_search_text = draft._platformSearchTextCustomized
-        ? platformSearchInput.value.trim()
-        : "";
-    }
-    if (platformEndingInput) {
-      draft._platformEndingTextCustomized = (
-        platformEndingInput.dataset.custom === "true" && Boolean(platformEndingInput.value.trim())
-      );
-      draft.platform_ending_text = draft._platformEndingTextCustomized
-        ? platformEndingInput.value.trim()
-        : "";
-    }
+    if ($("#production-platform-ending-prefix")) draft.platform_ending_prefix = $("#production-platform-ending-prefix").value.trim();
+    if ($("#production-platform-ending-suffix")) draft.platform_ending_suffix = $("#production-platform-ending-suffix").value.trim();
     syncDraftPlatformCopyDefaults(novel, draft);
     productionSettings.intro_card_preset = $("#production-intro-card-preset")?.value || productionSettings.intro_card_preset || "editorial_white";
     productionSettings.subtitle_preset = $("#production-subtitle-preset")?.value || productionSettings.subtitle_preset || "clear_outline";
@@ -5217,16 +5432,16 @@
     if (introCardControls) {
       introCardControls.dataset.introCardEnabled = String(productionSettings.intro_card_enabled);
       introCardControls.dataset.cardEnabled = String(productionSettings.intro_card_enabled);
-      [$("#production-intro-card-start"), $("#production-intro-card-duration"), $("#production-intro-card-preset"), $("#production-intro-card-copy"), $("#production-intro-animation")]
+      [$("#production-intro-card-start-mode"), $("#production-intro-card-start-value"), $("#production-intro-card-display-mode"), $("#production-intro-card-display-value"), $("#production-intro-card-preset"), $("#production-intro-card-copy"), $("#production-intro-animation")]
         .filter(Boolean)
-        .forEach((control) => { control.disabled = !productionSettings.intro_card_enabled; });
+        .forEach((control) => { control.disabled = !productionSettings.intro_card_enabled || (control.id === "production-intro-card-display-value" && productionSettings.intro_card_display_mode === "body_end"); });
     }
     const codeCardControls = $(".production-code-card-controls", root);
     if (codeCardControls) {
       codeCardControls.dataset.cardEnabled = String(productionSettings.code_card_enabled);
-      [$("#production-code-card-start"), $("#production-code-card-duration"), $("#production-code-card-preset"), $("#production-platform-search-text")]
+      [$("#production-code-card-start-mode"), $("#production-code-card-start-value"), $("#production-code-card-display-mode"), $("#production-code-card-display-value"), $("#production-code-card-preset")]
         .filter(Boolean)
-        .forEach((control) => { control.disabled = !productionSettings.code_card_enabled; });
+        .forEach((control) => { control.disabled = !productionSettings.code_card_enabled || (control.id === "production-code-card-display-value" && productionSettings.code_card_display_mode === "body_end"); });
     }
     productionSettings.subtitle ||= {};
     Object.assign(productionSettings.subtitle, {
@@ -5359,9 +5574,9 @@
   function productionPreviewSceneForControl(control) {
     const id = control?.id || "";
     const name = control?.name || "";
-    if (["production-intro-card-enabled", "production-intro-card-start", "production-intro-card-duration", "production-intro-card-copy", "production-intro-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
-    if (["production-code-card-enabled", "production-code-card-start", "production-code-card-duration", "production-code-card-preset", "production-platform-search-text"].includes(id)) return "subtitle";
-    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset", "production-platform-ending-text"].includes(id)) return "outro";
+    if (["production-intro-card-enabled", "production-intro-card-start-mode", "production-intro-card-start-value", "production-intro-card-display-mode", "production-intro-card-display-value", "production-intro-card-copy", "production-intro-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
+    if (["production-code-card-enabled", "production-code-card-start-mode", "production-code-card-start-value", "production-code-card-display-mode", "production-code-card-display-value", "production-code-card-preset"].includes(id)) return "subtitle";
+    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset", "production-platform-ending-prefix", "production-platform-ending-suffix"].includes(id)) return "outro";
     if (id.startsWith("production-subtitle-") || id === "production-caption-mode") return "subtitle";
     return "";
   }
@@ -5749,12 +5964,7 @@
     const platform = platformById(draft.platform_id);
     const code = binding?.codes?.find((item) => item.id === draft.promo_code_id)?.value || "123456";
     const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
-    const platformSearchText = draft._platformSearchTextCustomized
-      ? String(draft.platform_search_text || "")
-      : platformCopyDefaults.search;
-    const platformEndingText = draft._platformEndingTextCustomized
-      ? String(draft.platform_ending_text || "")
-      : platformCopyDefaults.ending;
+    const platformSearchText = String(platformCopyDefaults.search);
     $("#preview-code").textContent = platformSearchText;
     $("#preview-platform").textContent = platform?.name || "尚未选择";
     const subtitle = $("#preview-subtitle");
@@ -5773,10 +5983,14 @@
       root.dataset.videoTemplate = videoTemplate;
       root.dataset.introCardEnabled = String(introCardEnabled);
       root.dataset.codeCardEnabled = String(codeCardEnabled);
-      root.dataset.introCardStartSeconds = String(Number(settings.intro_card_start_seconds || 0));
-      root.dataset.introCardDurationSeconds = String(Number(settings.intro_card_duration_seconds || 5.5));
-      root.dataset.codeCardStartSeconds = String(Number(settings.code_card_start_seconds || 0));
-      root.dataset.codeCardDurationSeconds = String(Number(settings.code_card_duration_seconds || 0));
+      root.dataset.introCardStartMode = settings.intro_card_start_mode || "seconds";
+      root.dataset.introCardStartValue = String(Number(settings.intro_card_start_value || 0));
+      root.dataset.introCardDisplayMode = settings.intro_card_display_mode || "seconds";
+      root.dataset.introCardDisplayValue = String(Number(settings.intro_card_display_value || 0));
+      root.dataset.codeCardStartMode = settings.code_card_start_mode || "seconds";
+      root.dataset.codeCardStartValue = String(Number(settings.code_card_start_value || 0));
+      root.dataset.codeCardDisplayMode = settings.code_card_display_mode || "body_end";
+      root.dataset.codeCardDisplayValue = String(Number(settings.code_card_display_value || 0));
       root.dataset.subtitlePreset = settings.subtitle_preset || "clear_outline";
       root.dataset.subtitleAnimation = settings.subtitle_animation || "none";
       root.dataset.codePreset = settings.code_card_preset || "brand_pill";
@@ -5793,12 +6007,14 @@
     }
     if ($("#preview-output")) $("#preview-output").textContent = `1080 × 1920 · ${Number(settings.output_fps || 60)} FPS`;
     if ($("#preview-template")) {
+      const bodyEstimate = selectedEpisodeDurationSeconds(novel, new Set(draft.episode_ids || []), settings.narration_wpm || 240);
+      const introResolved = cardTimelineEstimate(settings, "intro", bodyEstimate);
+      const codeResolved = cardTimelineEstimate(settings, "code", bodyEstimate);
       const introSummary = introCardEnabled
-        ? `${videoTemplate === "platform_story_card" ? "平台简介卡" : "经典简介"} ${Number(settings.intro_card_start_seconds || 0)}秒起·${Number(settings.intro_card_duration_seconds || 5.5)}秒`
+        ? `${videoTemplate === "platform_story_card" ? "平台简介卡" : "经典简介"} ${introResolved.start.toFixed(1)}–${introResolved.end.toFixed(1)}秒`
         : "简介卡关闭";
-      const codeDuration = Number(settings.code_card_duration_seconds || 0);
       const codeSummary = codeCardEnabled
-        ? `口令卡 ${Number(settings.code_card_start_seconds || 0)}秒起·${codeDuration > 0 ? `${codeDuration}秒` : "至结尾"}`
+        ? `口令卡 ${codeResolved.start.toFixed(1)}–${codeResolved.end.toFixed(1)}秒`
         : "口令卡关闭";
       $("#preview-template").textContent = `${introSummary} / ${codeSummary}`;
     }
@@ -5826,7 +6042,7 @@
       $("#preview-story-copy-secondary").lang = previewLanguage;
     }
     paintIntroCardCover($("#preview-story-cover"), novel, introCardEnabled);
-    const outroCopy = platformEndingText;
+    const outroCopy = draftPlatformEndingPreview(novel, draft);
     if ($("#preview-outro-copy")) $("#preview-outro-copy").textContent = outroCopy;
     if ($("#preview-outro-code")) $("#preview-outro-code").textContent = `Search “${code}”`;
     const subtitleSettings = settings.subtitle || {};
@@ -7320,32 +7536,6 @@
     });
   }
 
-  async function generateVoiceCandidates(button) {
-    const novel = state.productionNovel || state.selectedNovel;
-    if (!novel) return;
-    const currentDraft = state.productionNovel?.id === novel.id
-      ? structuredClone(activeDraft(novel))
-      : null;
-    const mood = $("#voice-candidate-mood")?.value || "suspense";
-    try {
-      await withBusyButton(button, "正在生成女声候选…", async () => {
-        const data = await checkedCall("generate_voice_candidates", novel.id, mood);
-        const updated = data?.novel || { ...novel, voice_candidates: data?.candidates || [] };
-        if (!updated.voice_candidates?.length && data?.candidates) updated.voice_candidates = data.candidates;
-        if (currentDraft) updated.draft = { ...(updated.draft || {}), ...currentDraft, story_mood: mood };
-        upsertNovel(updated);
-        if (state.productionNovel?.id === updated.id) renderProductionWorkbench();
-        else renderNovelDetail();
-        const candidates = updated.voice_candidates?.length ? updated.voice_candidates : (data?.candidates || []);
-        const count = candidates.length;
-        const actualProvider = candidates[0]?.provider;
-        toast(`已使用 ${ttsProviderLabel(actualProvider)} 生成 ${count} 个${novelLanguageInfo(updated).label}女声候选，请试听后选择本批固定声线。`, "info");
-      });
-    } catch (error) {
-      toast(error.message, "error");
-    }
-  }
-
   async function generateIntroCardCopy(button) {
     const novel = state.productionNovel;
     if (!novel) return;
@@ -7373,34 +7563,86 @@
     }
   }
 
-  function playVoiceCandidate(button) {
+  async function playVoiceCandidate(button) {
     const novel = state.productionNovel || state.selectedNovel;
-    const candidate = novel?.voice_candidates?.[Number(button.dataset.previewVoiceIndex)];
+    const candidate = voiceCatalogItem(novel, button.dataset.previewVoice);
     if (!candidate) return;
-    const audioUri = webAssetUrl(candidate.audio_uri || candidate.audio_path || "");
-    if (audioUri && !String(candidate.audio_uri || "").startsWith("mock://")) {
-      const audio = new Audio(audioUri);
-      audio.play().catch(() => toast("候选音频暂时无法播放，请重新生成后重试。", "error"));
+    if (state.voicePreviewInFlight) {
+      toast("已有真实音色试听正在生成，完成后再试听其他音色。", "info");
       return;
     }
-    if (!window.speechSynthesis || typeof window.SpeechSynthesisUtterance !== "function") {
-      toast("当前浏览器不支持语音试听；桌面版会播放实际候选音频。", "error");
+    if (state.wpmPreviewInFlight) {
+      toast("语速试听正在生成，完成后再试听其他音色。", "info");
       return;
     }
-    window.speechSynthesis.cancel();
-    const utterance = new window.SpeechSynthesisUtterance(candidate.excerpt || novel.synopsis || "Listen to this narration voice.");
-    utterance.lang = ({ en: "en-US", ja: "ja-JP", zh: "zh-CN", es: "es-ES", fr: "fr-FR", hi: "hi-IN", it: "it-IT", pt: "pt-BR", id: "id-ID", de: "de-DE", ko: "ko-KR" })[novelLanguageInfo(novel).key] || "en-US";
-    utterance.rate = candidate.profile === "confident" ? 1.02 : candidate.profile === "intimate" ? 0.9 : 0.96;
-    utterance.pitch = candidate.profile === "warm" ? 1.08 : candidate.profile === "confident" ? 0.94 : 1.02;
-    const voices = window.speechSynthesis.getVoices?.() || [];
-    const languagePrefix = utterance.lang.split("-")[0];
-    utterance.voice = (languagePrefix === "en"
-      ? voices.find((voice) => /^en-US$/i.test(voice.lang) && /female|zira|samantha|ava|jenny|aria/i.test(voice.name))
-      : null)
-      || voices.find((voice) => String(voice.lang || "").toLocaleLowerCase().startsWith(languagePrefix))
-      || null;
-    window.speechSynthesis.speak(utterance);
-    toast(`正在试听 ${candidate.label || candidate.voice_id}。`, "info");
+    const resumeWpm = Boolean(state.wpmPreviewDebounceTimer);
+    const pendingWpm = resumeWpm ? selectedProductionWpm() : null;
+    if (state.wpmPreviewAudio) {
+      stopProductionWpmPreview({ silent: true });
+    } else if (state.wpmPreviewDebounceTimer) {
+      window.clearTimeout(state.wpmPreviewDebounceTimer);
+      state.wpmPreviewDebounceTimer = null;
+    }
+    if (pendingWpm !== null) state.wpmPreviewPending = pendingWpm;
+    state.voicePreviewInFlight = true;
+    let failureStage = "generation";
+    try {
+      await withBusyButton(button, "生成中…", async () => {
+        const data = await checkedCall("preview_voice", novel.id, candidate.provider, candidate.voice_id, selectedProductionWpm());
+        const preview = data?.candidate || {};
+        const rawUri = String(preview.audio_uri || preview.audio_path || "");
+        const audioUri = webAssetUrl(rawUri);
+        if (!audioUri || rawUri.startsWith("mock://")) throw new Error("配音服务没有返回真实试听音频。");
+        const audio = new Audio(audioUri);
+        failureStage = "playback";
+        await audio.play();
+        toast(`正在试听 ${candidate.voice_name} · ${candidate.style_label}。`, "info");
+      });
+    } catch (error) {
+      const message = String(error.message || "未知错误。");
+      const title = failureStage === "playback" ? "真实音色播放失败" : "真实音色试听生成失败";
+      toast(`${title}：${message}`, "error");
+    } finally {
+      state.voicePreviewInFlight = false;
+      resumePendingProductionWpmPreview();
+    }
+  }
+
+  async function saveVoiceCatalogPreference(button, field) {
+    const novel = state.productionNovel;
+    const candidate = voiceCatalogItem(novel, button.dataset.favoriteVoice || button.dataset.hideVoice);
+    if (!candidate) return;
+    const nextFavorite = field === "favorite" ? !candidate.favorite : candidate.favorite;
+    const nextHidden = field === "hidden" ? !candidate.hidden : candidate.hidden;
+    if (nextHidden && sameVoiceIdentity(candidate, activeDraft(novel).voice)) {
+      toast("当前批次正在使用这个音色，请先重新选择另一个可用音色再隐藏。", "error");
+      return;
+    }
+    try {
+      await checkedCall("save_voice_preference", candidate.provider, candidate.language, candidate.voice_id, nextFavorite, nextHidden);
+      candidate.favorite = nextFavorite;
+      candidate.hidden = nextHidden;
+      renderProductionWorkbench();
+    } catch (error) {
+      toast(`音色个人设置保存失败：${error.message}`, "error");
+    }
+  }
+
+  async function setTeamVoiceAvailability(button) {
+    const novel = state.productionNovel;
+    const candidate = voiceCatalogItem(novel, button.dataset.disableTeamVoice);
+    if (!candidate) return;
+    if (!candidate.team_disabled && sameVoiceIdentity(candidate, activeDraft(novel).voice)) {
+      toast("当前批次正在使用这个音色，请先重新选择后再执行团队停用。", "error");
+      return;
+    }
+    try {
+      await checkedCall("set_team_voice_disabled", candidate.provider, candidate.language, candidate.voice_id, !candidate.team_disabled);
+      candidate.team_disabled = !candidate.team_disabled;
+      renderProductionWorkbench();
+    } catch (error) {
+      toast(`团队音色状态更新失败：${error.message}`, "error");
+    }
   }
 
 
@@ -7443,6 +7685,17 @@
     if (forQueue && !audioOnly && !draft.video_folder) throw new Error("开始完整生成前，请选择视频素材文件夹。");
     if (forQueue && !audioOnly && bgmMode === "auto" && !draft.music_folder) throw new Error("自动匹配背景音乐前，请选择背景音乐文件夹。");
     if (forQueue && !audioOnly && bgmMode === "manual" && !String(draft.production_settings?.bgm_file || "").trim()) throw new Error("手动指定背景音乐时，请选择音乐文件。");
+    if (forQueue) {
+      const bodyEstimate = selectedEpisodeDurationSeconds(
+        novel,
+        new Set(draft.episode_ids || []),
+        draft.production_settings?.narration_wpm || 240,
+      );
+      for (const card of ["intro", "code"]) {
+        const estimate = cardTimelineEstimate(draft.production_settings || {}, card, bodyEstimate);
+        if (estimate.invalid) throw new Error(`${card === "intro" ? "简介卡" : "口令卡"}时间设置无效：${estimate.text}`);
+      }
+    }
     return {
       id: draft.id || "",
       row_version: Number(draft.row_version || 0) || undefined,
@@ -7469,8 +7722,8 @@
       intro_card_source: String(
         draft.intro_card_source || (String(novel.synopsis || "").trim() ? "novel_synopsis" : "episode_excerpt"),
       ),
-      platform_search_text: String(draft.platform_search_text || ""),
-      platform_ending_text: String(draft.platform_ending_text || ""),
+      platform_ending_prefix: String(draft.platform_ending_prefix || ""),
+      platform_ending_suffix: String(draft.platform_ending_suffix || ""),
       video_folder: draft.video_folder,
       music_folder: draft.music_folder,
       output_folder: draft.output_folder,
@@ -9795,7 +10048,7 @@
       const copy = $("small", templateProof);
       if (title) title.textContent = videoTemplate === "platform_story_card" ? "当前默认：平台简介卡" : "当前默认：经典模板";
       if (copy) copy.textContent = videoTemplate === "platform_story_card"
-        ? "前 5.5 秒先展示标题、平台口令与故事简介。"
+        ? "按制作台为当前批次设置的简介卡时间轴展示标题、平台口令与故事简介。"
         : "保留顶部口令卡与醒目钩子标题。";
     }
     const strategyProof = $("#style-strategy-proof");
@@ -10403,11 +10656,6 @@
         await deletePromoCode(removeCode);
         return;
       }
-      const generateVoices = event.target.closest("[data-generate-voices]");
-      if (generateVoices) {
-        await generateVoiceCandidates(generateVoices);
-        return;
-      }
       const generateIntroCopy = event.target.closest("[data-generate-intro-copy]");
       if (generateIntroCopy) {
         await generateIntroCardCopy(generateIntroCopy);
@@ -10464,9 +10712,57 @@
         await chooseProductionAudioFile(productionAudioFile);
         return;
       }
-      const previewVoice = event.target.closest("[data-preview-voice-index]");
+      const refreshVoiceCatalog = event.target.closest("[data-refresh-voice-catalog]");
+      if (refreshVoiceCatalog) {
+        await loadProductionVoiceCatalog({ refresh: true });
+        return;
+      }
+      const toggleHiddenVoices = event.target.closest("[data-toggle-hidden-voices]");
+      if (toggleHiddenVoices) {
+        state.voiceCatalogShowHidden = !state.voiceCatalogShowHidden;
+        renderProductionWorkbench();
+        return;
+      }
+      const previewVoice = event.target.closest("[data-preview-voice]");
       if (previewVoice) {
-        playVoiceCandidate(previewVoice);
+        await playVoiceCandidate(previewVoice);
+        return;
+      }
+      const favoriteVoice = event.target.closest("[data-favorite-voice]");
+      if (favoriteVoice) {
+        await saveVoiceCatalogPreference(favoriteVoice, "favorite");
+        return;
+      }
+      const hideVoice = event.target.closest("[data-hide-voice]");
+      if (hideVoice) {
+        await saveVoiceCatalogPreference(hideVoice, "hidden");
+        return;
+      }
+      const teamVoice = event.target.closest("[data-disable-team-voice]");
+      if (teamVoice) {
+        await setTeamVoiceAvailability(teamVoice);
+        return;
+      }
+      const cardPreset = event.target.closest("[data-card-preset]");
+      if (cardPreset && state.productionNovel) {
+        syncProductionDraftFromControls();
+        const [card, preset] = String(cardPreset.dataset.cardPreset || "").split(":");
+        const settings = activeDraft(state.productionNovel).production_settings;
+        const values = {
+          opening: ["body_percent", 0, "seconds", 6],
+          middle: ["body_percent", 50, "seconds", 8],
+          ending: ["body_percent", 85, "body_end", 0],
+          full: ["body_percent", 0, "body_end", 0],
+        }[preset];
+        if (values && ["intro", "code"].includes(card)) {
+          settings[`${card}_card_start_mode`] = values[0];
+          settings[`${card}_card_start_value`] = values[1];
+          settings[`${card}_card_display_mode`] = values[2];
+          settings[`${card}_card_display_value`] = values[3];
+          settings[`${card}_card_enabled`] = true;
+          markProductionRecipeDirty();
+          renderProductionWorkbench();
+        }
         return;
       }
       const draftFolder = event.target.closest("[data-draft-folder]");
@@ -10624,41 +10920,61 @@
         select.disabled = true;
         try {
           const applied = await switchFreeLocalTtsProvider(select.value);
+          state.productionNovel.voice_catalog = null;
+          const draft = activeDraft(state.productionNovel);
+          draft.voice = { provider: "", voice_id: "", label: "", profile: "" };
           renderProductionWorkbench();
-          toast(`当前电脑已切换为 ${ttsProviderLabel(applied)}，请重新生成女声候选。`, "info");
+          toast(`当前电脑已切换为 ${ttsProviderLabel(applied)}；旧声音选择已清除，请从新目录重新试听选择。`, "info");
         } catch (error) {
           renderProductionWorkbench();
           toast(error.message || "切换本机配音服务失败。", "error");
         }
         return;
       }
+      if (event.target.matches("#production-voice-style") && state.productionNovel) {
+        state.voiceCatalogStyle = String(event.target.value || "all");
+        renderProductionWorkbench();
+        return;
+      }
       if (event.target.matches("#voice-candidate-mood") && state.productionNovel) {
         const draft = activeDraft(state.productionNovel);
-        const previousMood = draft.story_mood;
         markProductionRecipeDirty();
         syncProductionDraftFromControls();
-        if (previousMood !== draft.story_mood && state.productionNovel.voice_candidates?.length) {
-          state.productionNovel.voice_candidates = [];
-          draft.voice = { provider: "", voice_id: "", label: "", profile: "" };
-          renderProductionWorkbench();
-          toast("故事类型已调整，请按新类型重新生成女声候选。", "info");
-        } else {
-          updateProductionPreview();
-        }
+        updateProductionPreview();
         return;
       }
       if (event.target.closest("#production-workbench-content") && event.target.matches('[data-episode-id], input[name="production-voice"], input[name="production-output-mode"], #production-intro-card-enabled, #production-code-card-enabled, #production-cover-outro-enabled, select, input[type="color"]')) {
+        const voiceChanged = event.target.matches('input[name="production-voice"]');
+        const resumeWpmPreview = voiceChanged && Boolean(
+          state.wpmPreviewInFlight || state.wpmPreviewAudio || state.wpmPreviewDebounceTimer
+          || state.wpmPreviewPending !== null,
+        );
         const previewScene = productionPreviewSceneForControl(event.target);
         if (previewScene) state.productionPreviewScene = previewScene;
         markProductionRecipeDirty();
         resetProductionStyleFromPreset(event.target);
-        syncProductionDraftFromControls({ render: event.target.matches('input[name="production-voice"]') });
+        syncProductionDraftFromControls({ render: voiceChanged });
         updateProductionPreview();
+        if (resumeWpmPreview) scheduleProductionWpmPreview();
         return;
       }
     });
     document.addEventListener("input", (event) => {
       if (!event.target.closest("#production-workbench-content")) return;
+      if (event.target.matches("#production-voice-search") && state.productionNovel) {
+        state.voiceCatalogQuery = String(event.target.value || "");
+        renderProductionWorkbench();
+        const input = $("#production-voice-search");
+        input?.focus();
+        input?.setSelectionRange(input.value.length, input.value.length);
+        return;
+      }
+      if (event.target.matches("#production-intro-card-start-mode, #production-intro-card-display-mode, #production-code-card-start-mode, #production-code-card-display-mode") && state.productionNovel) {
+        markProductionRecipeDirty();
+        syncProductionDraftFromControls();
+        renderProductionWorkbench();
+        return;
+      }
       if (event.target.matches("#production-wpm-custom") && state.productionNovel) {
         markProductionRecipeDirty();
         syncProductionDraftFromControls();
@@ -10673,23 +10989,16 @@
         updateProductionPreview();
         return;
       }
-      if (event.target.matches("#production-platform-search-text, #production-platform-ending-text") && state.productionNovel) {
-        const customized = Boolean(event.target.value.trim());
-        event.target.dataset.custom = String(customized);
-        if (!customized) {
-          const draft = activeDraft(state.productionNovel);
-          const defaults = draftPlatformCopyDefaults(state.productionNovel, draft);
-          event.target.value = event.target.id === "production-platform-search-text"
-            ? defaults.search
-            : defaults.ending;
-        }
-      }
       if (event.target.matches('input[type="range"], input[type="number"], textarea, [data-draft-path], #production-source-narration-audio, #production-bgm-file')) {
+        const cardTimelineValueChanged = event.target.matches(
+          "#production-intro-card-start-value, #production-intro-card-display-value, #production-code-card-start-value, #production-code-card-display-value",
+        );
         const previewScene = productionPreviewSceneForControl(event.target);
         if (previewScene) state.productionPreviewScene = previewScene;
         markProductionRecipeDirty();
         syncProductionDraftFromControls();
         updateProductionPreview();
+        if (cardTimelineValueChanged) updateProductionCardTimelineEstimates();
       }
     });
     document.addEventListener("keydown", (event) => {

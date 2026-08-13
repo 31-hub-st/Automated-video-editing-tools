@@ -278,6 +278,12 @@ class VoicePreviewService:
         )
 
     @staticmethod
+    def selection_key(provider: object, language: object, voice_id: object) -> str:
+        return _voice_selection_key(
+            provider=provider, language=language, voice_id=voice_id
+        )
+
+    @staticmethod
     def _provider_config(settings: AppSettings, language: str = "en") -> Any:
         providers = settings.providers
         if providers.tts_provider == "local_kokoro":
@@ -307,6 +313,7 @@ class VoicePreviewService:
         *,
         language: str = "en",
         narration_wpm: int | None = None,
+        selected_voice_id: str | None = None,
     ) -> list[dict[str, Any]]:
         settings = self._settings_getter()
         raw_wpm = settings.narration_wpm if narration_wpm is None else narration_wpm
@@ -360,7 +367,20 @@ class VoicePreviewService:
                 "请切换服务，或由管理员补充该语种声线。",
                 provider=provider_name,
             )
-        selected_options = _ordered_voice_options(catalog, profiles)
+        requested_voice_id = str(selected_voice_id or "").strip()
+        if requested_voice_id:
+            selected_voice = next(
+                (item for item in catalog if item.voice_id == requested_voice_id),
+                None,
+            )
+            if selected_voice is None:
+                raise ValueError(
+                    f"voice_id {requested_voice_id!r} is not available for "
+                    f"{provider_name}/{normalized_language}"
+                )
+            selected_options = ((selected_voice.profile, selected_voice),)
+        else:
+            selected_options = _ordered_voice_options(catalog, profiles)
         speed = narration_speed_for_wpm(requested_wpm, provider_name)
         metered_provider = (
             normalized_provider not in _EDGE_PROVIDER_NAMES

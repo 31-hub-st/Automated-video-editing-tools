@@ -32,6 +32,7 @@ from .providers.base import ProviderConfig, ProviderError
 from .providers.text import TextRequest, create_text_provider
 from .providers.tts import (
     available_female_voice_candidates,
+    edge_female_voice_candidates,
     ensure_kokoro_language_available,
     kokoro_language_code,
 )
@@ -420,6 +421,34 @@ class LibraryService:
         self._text_provider_factory = text_provider_factory
         self._remote_text_provider = bool(remote_text_provider)
 
+    def _voice_preferences(self, actor_user_id: str | None) -> dict[str, list[Any]]:
+        """Read optional preference state without breaking an older Hub.
+
+        v1.0.6 and older Hubs do not expose ``list_voice_preferences``. The
+        real voice catalog remains usable during a rolling upgrade; preference
+        mutations still fail explicitly until the Hub itself is upgraded.
+
+        Team status is shared policy and must be read even for an ownerless
+        historical draft.  The synthetic local lookup identity can never
+        expose personal state: that part of the result is discarded unless a
+        real authenticated actor was supplied.  A Hub proxy replaces the
+        lookup identity with its bearer-token actor before repository access.
+        """
+
+        supports_method = getattr(self.catalog, "supports_rpc_method", None)
+        if callable(supports_method) and not supports_method(
+            "list_voice_preferences"
+        ):
+            return {"personal": [], "team": []}
+        actor = str(actor_user_id or "").strip()
+        preferences = self.catalog.list_voice_preferences(
+            actor_user_id=actor or "storyforge-team-policy"
+        )
+        return {
+            "personal": list(preferences.get("personal") or []) if actor else [],
+            "team": list(preferences.get("team") or []),
+        }
+
     def _intro_card_copy(
         self,
         synopsis: str,
@@ -641,6 +670,11 @@ class LibraryService:
                 "source_narration_audio": "",
                 "platform_search_text": "",
                 "platform_ending_text": "",
+                "platform_copy_schema_version": 2,
+                "platform_name_snapshot": "",
+                "platform_authoritative_ending_text": "",
+                "platform_ending_prefix": "",
+                "platform_ending_suffix": "",
             }
         metadata = dict(value.get("metadata") or {})
         production_settings = (
@@ -688,6 +722,21 @@ class LibraryService:
             ),
             "platform_search_text": str(metadata.get("platform_search_text") or ""),
             "platform_ending_text": str(metadata.get("platform_ending_text") or ""),
+            "platform_copy_schema_version": int(
+                metadata.get("platform_copy_schema_version") or 0
+            ),
+            "platform_name_snapshot": str(
+                metadata.get("platform_name_snapshot") or ""
+            ),
+            "platform_authoritative_ending_text": str(
+                metadata.get("platform_authoritative_ending_text") or ""
+            ),
+            "platform_ending_prefix": str(
+                metadata.get("platform_ending_prefix") or ""
+            ),
+            "platform_ending_suffix": str(
+                metadata.get("platform_ending_suffix") or ""
+            ),
             "configuration_fingerprint": str(
                 metadata.get("configuration_fingerprint") or ""
             ),
@@ -746,6 +795,13 @@ class LibraryService:
         incoming = normalize_retired_subtitle_settings(
             dict(value or {}) if isinstance(value, Mapping) else {}
         )
+        legacy_card_timeline = (
+            "card_timeline_schema_version" not in incoming
+            and (
+                not isinstance(base, Mapping)
+                or "card_timeline_schema_version" not in base
+            )
+        )
 
         for boolean_key in (
             "export_narration_audio",
@@ -795,6 +851,10 @@ class LibraryService:
             "cover_animation": COVER_ANIMATIONS,
             "color_grade": COLOR_GRADES,
             "video_template": {"classic", "platform_story_card"},
+            "intro_card_start_mode": {"seconds", "body_percent"},
+            "intro_card_display_mode": {"seconds", "body_percent", "body_end"},
+            "code_card_start_mode": {"seconds", "body_percent"},
+            "code_card_display_mode": {"seconds", "body_percent", "body_end"},
         }.items():
             if key not in incoming:
                 continue
@@ -852,6 +912,89 @@ class LibraryService:
             if not math.isfinite(number) or number < 0:
                 raise ValueError(f"{key} must be a non-negative finite number")
             result[key] = number
+        if "card_timeline_schema_version" in incoming:
+            raw_schema = incoming["card_timeline_schema_version"]
+            if isinstance(raw_schema, bool):
+                raise ValueError("card_timeline_schema_version must be 0 or 1")
+            try:
+                schema_version = int(raw_schema)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "card_timeline_schema_version must be 0 or 1"
+                ) from None
+            if schema_version not in {0, 1}:
+                raise ValueError("card_timeline_schema_version must be 0 or 1")
+            result["card_timeline_schema_version"] = schema_version
+        for prefix in ("intro_card", "code_card"):
+            for suffix in ("start_value", "display_value"):
+                key = f"{prefix}_{suffix}"
+                if key not in incoming:
+                    continue
+                try:
+                    number = float(incoming[key])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{key} must be a non-negative finite number"
+                    ) from None
+                mode = str(
+                    result[
+                        f"{prefix}_{'start_mode' if suffix == 'start_value' else 'display_mode'}"
+                    ]
+                )
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError(
+                        f"{key} must be a non-negative finite number"
+                    )
+                if mode == "body_percent" and number > 100:
+                    raise ValueError(f"{key} must not exceed 100 percent")
+                if (
+                    suffix == "display_value"
+                    and mode in {"seconds", "body_percent"}
+                    and number <= 0
+                ):
+                    raise ValueError(
+                        f"{key} must be positive unless display_mode is body_end"
+                    )
+                result[key] = number
+            if (
+                int(result.get("card_timeline_schema_version") or 0) == 1
+                and bool(result.get(f"{prefix}_enabled"))
+                and str(result.get(f"{prefix}_start_mode") or "")
+                == "body_percent"
+                and float(result.get(f"{prefix}_start_value") or 0) >= 100
+            ):
+                raise ValueError(
+                    f"{prefix}_start_value must be below 100 percent when the card is enabled"
+                )
+        if legacy_card_timeline:
+            # v1.0.6 drafts stored only absolute-second fields.  Translate
+            # those validated values once into the explicit schema-one
+            # contract instead of accidentally inheriting today's hybrid
+            # defaults.  Only the old code-card duration used zero as a magic
+            # value (through video end); the old intro duration was always an
+            # ordinary validated 2.5-8 second duration.
+            result["card_timeline_schema_version"] = 1
+            result["intro_card_start_mode"] = "seconds"
+            result["intro_card_start_value"] = float(
+                result.get("intro_card_start_seconds") or 0.0
+            )
+            result["intro_card_display_mode"] = "seconds"
+            result["intro_card_display_value"] = float(
+                result.get("intro_card_duration_seconds") or 0.0
+            )
+            result["code_card_start_mode"] = "seconds"
+            result["code_card_start_value"] = float(
+                result.get("code_card_start_seconds") or 0.0
+            )
+            legacy_code_duration = float(
+                result.get("code_card_duration_seconds") or 0.0
+            )
+            if legacy_code_duration == 0:
+                result["code_card_display_mode"] = "body_end"
+                result["code_card_display_value"] = 0.0
+            else:
+                result["code_card_display_mode"] = "seconds"
+                result["code_card_display_value"] = legacy_code_duration
         if "output_fps" in incoming:
             try:
                 output_fps = int(incoming["output_fps"])
@@ -1412,6 +1555,137 @@ class LibraryService:
             raise ValueError("该小说的平台绑定已归档，请先在资料库恢复后再制作。")
         return binding
 
+    def _authoritative_platform_copy(
+        self,
+        platform_id: str,
+        promo_code: str,
+        *,
+        binding: Mapping[str, Any] | None = None,
+        known_promo_codes: object = (),
+        ending_prefix: object = "",
+        ending_suffix: object = "",
+    ) -> dict[str, str | int]:
+        """Render immutable platform/code tokens from the shared library only."""
+
+        platforms = self.catalog.list_platforms(include_archived=True).get(
+            "items", []
+        )
+        raw = next(
+            (
+                item
+                for item in platforms
+                if str(item.get("id") or "") == str(platform_id)
+            ),
+            None,
+        )
+        if raw is None or bool(raw.get("archived")):
+            raise ValueError("所选平台已删除或停用，请返回小说库重新绑定。")
+        profile = PlatformProfile.from_dict(dict(raw))
+        search_template = str(profile.search_template or "")
+        ending_template = str(profile.ending_template or "")
+        for name, template in (
+            ("口令卡模板", search_template),
+            ("结尾引导模板", ending_template),
+        ):
+            if "{platform}" not in template or "{code}" not in template:
+                raise ValueError(
+                    f"{name}必须同时包含 {{platform}} 和 {{code}}，请由管理员在平台管理中修复。"
+                )
+        try:
+            search_text = normalize_platform_copy(
+                profile.render_search(promo_code), "platform_search_text"
+            )
+            authoritative_ending = normalize_platform_copy(
+                profile.render_ending(promo_code), "platform_ending_text"
+            )
+        except (KeyError, ValueError, IndexError) as error:
+            raise ValueError("平台口令模板解析失败，请由管理员在平台管理中修复。") from error
+        if profile.name not in search_text or promo_code not in search_text:
+            raise ValueError("口令卡模板未生成真实平台名和口令，请由管理员修复。")
+        if profile.name not in authoritative_ending or promo_code not in authoritative_ending:
+            raise ValueError("结尾模板未生成真实平台名和口令，请由管理员修复。")
+        prefix = normalize_platform_copy(ending_prefix, "platform_ending_prefix")
+        suffix = normalize_platform_copy(ending_suffix, "platform_ending_suffix")
+        known_platform_names = {
+            str(item.get("name") or "").strip().casefold()
+            for item in platforms
+            if str(item.get("name") or "").strip()
+        }
+        binding_promo_codes = {
+            str(item.get("code") or "").strip().casefold()
+            for item in list((binding or {}).get("promo_codes") or [])
+            if str(item.get("code") or "").strip()
+        }
+        binding_promo_codes.update(
+            str(item or "").strip().casefold()
+            for item in list(known_promo_codes or [])
+            if str(item or "").strip()
+        )
+        promotional_directive = re.compile(
+            r"(?i)(?:\b(?:search|code|promo|platform|download|app)\b|"
+            r"搜索|口令|兑换码|推广码|平台|下载|应用)"
+        )
+
+        def contains_identity_token(context: str, token: str) -> bool:
+            folded_token = token.casefold()
+            if not folded_token:
+                return False
+            left_boundary = r"(?<![^\W_])" if folded_token[0].isalnum() else ""
+            right_boundary = r"(?![^\W_])" if folded_token[-1].isalnum() else ""
+            return bool(
+                re.search(
+                    f"{left_boundary}{re.escape(folded_token)}{right_boundary}",
+                    context.casefold(),
+                )
+            )
+
+        def contains_authoritative_identity(context: str, identity: str) -> bool:
+            folded_identity = identity.casefold()
+            if not folded_identity:
+                return False
+            # A known platform or promo identity remains authoritative even
+            # when an employee glues extra letters around it (for example
+            # ``GoodNovelApp`` or ``ALPHAApp``).
+            # Keep word-boundary matching for unusually short names so a
+            # one-letter code does not reject ordinary prose such as
+            # ``After the storm``.
+            if sum(character.isalnum() for character in folded_identity) >= 3:
+                return folded_identity in context.casefold()
+            return contains_identity_token(context, folded_identity)
+
+        for label, context in (("结尾前文", prefix), ("结尾后文", suffix)):
+            contains_known_identity = any(
+                contains_authoritative_identity(context, token)
+                for token in (*known_platform_names, *binding_promo_codes)
+            )
+            contains_untrusted_token = bool(
+                re.search(r"[{}]", context)
+                or re.search(r"\d", context)
+                or re.search(r"\b[A-Z0-9]{4,}\b", context)
+                or promotional_directive.search(context)
+            )
+            if contains_known_identity or contains_untrusted_token:
+                raise ValueError(
+                    f"{label}只能填写不含数字、平台名、口令或搜索/下载指令的普通剧情衔接语；"
+                    "平台与口令由小说库权威生成。"
+                )
+        ending_text = normalize_platform_copy(
+            " ".join(part for part in (prefix, authoritative_ending, suffix) if part),
+            "platform_ending_text",
+        )
+        return {
+            "schema_version": 2,
+            "platform_name": profile.name,
+            "promo_code": promo_code,
+            "search_template": search_template,
+            "ending_template": ending_template,
+            "search_text": search_text,
+            "authoritative_ending": authoritative_ending,
+            "ending_prefix": prefix,
+            "ending_suffix": suffix,
+            "ending_text": ending_text,
+        }
+
     def add_promo_code(self, value: Mapping[str, Any]) -> dict[str, Any]:
         novel_id = str(value.get("novel_id") or "")
         platform_id = str(value.get("platform_id") or "")
@@ -1596,24 +1870,54 @@ class LibraryService:
         if bool(voice["provider"]) != bool(voice["voice_id"]):
             raise ValueError("请选择一个完整的本批女声配置。")
         if has_incoming_voice and voice["voice_id"]:
-            candidates = [
-                item
-                for item in list(novel_metadata.get("voice_candidates") or [])
-                if isinstance(item, Mapping)
-            ]
-            matching_candidate = next(
-                (
-                    item
-                    for item in candidates
-                    if str(item.get("provider") or "").strip()
-                    == voice["provider"]
-                    and str(item.get("voice_id") or "").strip()
-                    == voice["voice_id"]
-                ),
-                None,
+            language = str(
+                novel.get("language_code") or novel.get("language") or "unknown"
             )
-            if candidates and matching_candidate is None:
-                raise ValueError("所选声音不在当前的3个试听候选中，请重新试听。")
+            if language not in {"unknown", "mixed", "other"}:
+                settings = self._settings_getter()
+                real_voices = available_female_voice_candidates(
+                    voice["provider"],
+                    language,
+                    endpoint=settings.providers.kokoro_endpoint,
+                    command=settings.providers.kokoro_command,
+                )
+                legacy_candidates = [
+                    item
+                    for item in novel_metadata.get("voice_candidates") or []
+                    if isinstance(item, Mapping)
+                ]
+                legacy_match = any(
+                    _canonical_voice_provider(str(item.get("provider") or ""))
+                    == _canonical_voice_provider(voice["provider"])
+                    and str(item.get("voice_id") or "") == voice["voice_id"]
+                    for item in legacy_candidates
+                )
+                if not any(item.voice_id == voice["voice_id"] for item in real_voices) and not legacy_match:
+                    raise ValueError("所选声音不在当前电脑的真实可用音色库中，请重新选择。")
+            actor = str(
+                value.get("created_by_user_id")
+                or (existing or {}).get("created_by_user_id")
+                or ""
+            )
+            preferences = self._voice_preferences(actor or None)
+            identity = (
+                _canonical_voice_provider(voice["provider"]),
+                language.casefold().replace("_", "-"),
+                voice["voice_id"],
+            )
+            blocked = any(
+                (
+                    str(item.get("provider") or ""),
+                    str(item.get("language") or ""),
+                    str(item.get("voice_id") or ""),
+                )
+                == identity
+                and bool(item.get(flag))
+                for group, flag in (("personal", "hidden"), ("team", "disabled"))
+                for item in preferences.get(group) or []
+            )
+            if blocked:
+                raise ValueError("所选声音已隐藏或被团队停用，请恢复或重新选择。")
             # Voice identity and speaking speed are independent.  A preview is
             # still cached per WPM because its audio bytes differ, but changing
             # WPM must never invalidate or silently replace the selected actor.
@@ -1709,20 +2013,20 @@ class LibraryService:
                 "source": source_value,
             }
 
-        platform_search_text = normalize_platform_copy(
-            value.get(
-                "platform_search_text",
-                existing_metadata.get("platform_search_text", ""),
+        platform_copy = self._authoritative_platform_copy(
+            platform_id,
+            str(promo_code.get("code") or ""),
+            binding=binding,
+            known_promo_codes=(
+                code.get("code")
+                for novel_binding in novel.get("bindings", [])
+                for code in novel_binding.get("promo_codes", [])
             ),
-            "platform_search_text",
+            ending_prefix=value.get("platform_ending_prefix", ""),
+            ending_suffix=value.get("platform_ending_suffix", ""),
         )
-        platform_ending_text = normalize_platform_copy(
-            value.get(
-                "platform_ending_text",
-                existing_metadata.get("platform_ending_text", ""),
-            ),
-            "platform_ending_text",
-        )
+        platform_search_text = str(platform_copy["search_text"])
+        platform_ending_text = str(platform_copy["ending_text"])
 
         production_preset_id = str(
             value.get("applied_production_preset_id") or ""
@@ -1810,6 +2114,19 @@ class LibraryService:
             "intro_card_copies": intro_card_copies,
             "platform_search_text": platform_search_text,
             "platform_ending_text": platform_ending_text,
+            "platform_copy_schema_version": 2,
+            "platform_name_snapshot": str(platform_copy["platform_name"]),
+            "platform_search_template_snapshot": str(
+                platform_copy["search_template"]
+            ),
+            "platform_ending_template_snapshot": str(
+                platform_copy["ending_template"]
+            ),
+            "platform_authoritative_ending_text": str(
+                platform_copy["authoritative_ending"]
+            ),
+            "platform_ending_prefix": str(platform_copy["ending_prefix"]),
+            "platform_ending_suffix": str(platform_copy["ending_suffix"]),
             "production_preset_id": production_preset_id,
             "production_preset_revision": production_preset_revision,
             "production_preset_hash": production_preset_hash,
@@ -2090,7 +2407,155 @@ class LibraryService:
             )
         return {"candidates": candidates, "novel": self.novel_for_ui(novel_id)}
 
-    def lock_voice(self, novel_id: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    def get_voice_catalog(
+        self,
+        novel_id: str,
+        *,
+        actor_user_id: str | None = None,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return real workstation voices plus lightweight Hub preference state."""
+
+        novel = self.catalog.get_novel(novel_id)
+        language = str(
+            novel.get("language_code") or novel.get("language") or "unknown"
+        )
+        if language in {"unknown", "mixed", "other"}:
+            raise ValueError("请先确认小说语言，再打开真实音色库。")
+        settings = self._settings_getter()
+        provider = str(settings.providers.tts_provider or "").strip()
+        normalized_provider = _canonical_voice_provider(provider)
+        if normalized_provider in _LOCAL_KOKORO_PROVIDER_ALIASES:
+            ensure_kokoro_language_available(
+                language,
+                provider=normalized_provider or "local_kokoro",
+                endpoint=settings.providers.kokoro_endpoint,
+                command=settings.providers.kokoro_command,
+            )
+        if normalized_provider == "edge_tts":
+            voices = edge_female_voice_candidates(language, refresh=bool(refresh))
+        else:
+            voices = available_female_voice_candidates(
+                provider,
+                language,
+                endpoint=settings.providers.kokoro_endpoint,
+                command=settings.providers.kokoro_command,
+            )
+        if not voices:
+            raise ValueError(
+                "当前电脑没有读到该供应商和语言的真实女声音色；"
+                "请检查组件或网络后重试，软件不会用虚构声线代替。"
+            )
+
+        preferences = self._voice_preferences(actor_user_id)
+        personal = {
+            (
+                str(item.get("provider") or ""),
+                str(item.get("language") or ""),
+                str(item.get("voice_id") or ""),
+            ): item
+            for item in preferences.get("personal") or []
+            if isinstance(item, Mapping)
+        }
+        team = {
+            (
+                str(item.get("provider") or ""),
+                str(item.get("language") or ""),
+                str(item.get("voice_id") or ""),
+            ): item
+            for item in preferences.get("team") or []
+            if isinstance(item, Mapping)
+        }
+        style_labels = {
+            "dramatic": "戏剧张力",
+            "warm": "温暖亲密",
+            "calm": "冷静克制",
+            "confident": "清晰强势",
+        }
+        normalized_language = language.casefold().replace("_", "-")
+        items: list[dict[str, Any]] = []
+        for option in voices:
+            key = (normalized_provider, normalized_language, option.voice_id)
+            own = personal.get(key, {})
+            shared = team.get(key, {})
+            items.append(
+                {
+                    "provider": normalized_provider,
+                    "language": normalized_language,
+                    "voice_id": option.voice_id,
+                    "voice_name": option.label,
+                    "style": option.profile,
+                    "style_label": style_labels.get(option.profile, option.profile),
+                    "favorite": bool(own.get("favorite")),
+                    "hidden": bool(own.get("hidden")),
+                    "team_disabled": bool(shared.get("disabled")),
+                    "selection_key": self.voice_previews.selection_key(
+                        normalized_provider, normalized_language, option.voice_id
+                    ),
+                }
+            )
+        return {
+            "novel_id": str(novel_id),
+            "provider": normalized_provider,
+            "language": normalized_language,
+            "items": items,
+            "refreshed": bool(refresh),
+        }
+
+    def preview_voice(
+        self,
+        novel_id: str,
+        provider: str,
+        voice_id: str,
+        *,
+        narration_wpm: int | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Synthesize one selected real voice without mutating novel metadata."""
+
+        novel = self.catalog.get_novel(novel_id)
+        language = str(
+            novel.get("language_code") or novel.get("language") or "unknown"
+        )
+        revision = novel.get("current_revision") or {}
+        settings = self._settings_getter()
+        configured_provider = _canonical_voice_provider(
+            settings.providers.tts_provider
+        )
+        requested_provider = _canonical_voice_provider(provider)
+        if requested_provider != configured_provider:
+            raise ValueError(
+                "试听音色的供应商与当前制作设置不一致，请刷新音色目录后重新选择。"
+            )
+        language_key = language.casefold().replace("_", "-")
+        team_disabled = any(
+            str(item.get("provider") or "") == requested_provider
+            and str(item.get("language") or "") == language_key
+            and str(item.get("voice_id") or "") == str(voice_id or "")
+            and bool(item.get("disabled"))
+            for item in self._voice_preferences(actor_user_id).get("team") or []
+        )
+        if team_disabled:
+            raise ValueError("该音色已被团队停用，请恢复后再试听。")
+        candidates = self.voice_previews.generate(
+            str(revision.get("body") or ""),
+            "suspense",
+            self.data_dir / "voice-previews" / novel_id,
+            language=language,
+            narration_wpm=narration_wpm,
+            selected_voice_id=str(voice_id or ""),
+        )
+        if len(candidates) != 1:
+            raise RuntimeError("single voice preview did not return exactly one item")
+        return {"candidate": candidates[0]}
+
+    def lock_voice(
+        self,
+        novel_id: str,
+        value: Mapping[str, Any],
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Remember a convenient default voice without locking future batches."""
 
         novel = self.catalog.get_novel(novel_id)
@@ -2099,17 +2564,46 @@ class LibraryService:
         voice_id = str(value.get("voice_id") or "").strip()
         if not provider or not voice_id:
             raise ValueError("请选择一个有效的候选女声。")
-        candidates = [
-            candidate
-            for candidate in list(metadata.get("voice_candidates") or [])
-            if isinstance(candidate, Mapping)
-        ]
-        if candidates and not any(
-            str(candidate.get("provider") or "").strip() == provider
-            and str(candidate.get("voice_id") or "").strip() == voice_id
-            for candidate in candidates
-        ):
-            raise ValueError("所选声音不在本小说当前的 3 个试听候选中，请重新试听。")
+        language = str(
+            novel.get("language_code") or novel.get("language") or "unknown"
+        )
+        settings = self._settings_getter()
+        available = available_female_voice_candidates(
+            provider,
+            language,
+            endpoint=settings.providers.kokoro_endpoint,
+            command=settings.providers.kokoro_command,
+        )
+        if not any(item.voice_id == voice_id for item in available):
+            raise ValueError("所选声音不在当前电脑的真实可用音色库中，请重新选择。")
+        preferences = self._voice_preferences(actor_user_id)
+        identity = (
+            _canonical_voice_provider(provider),
+            language.casefold().replace("_", "-"),
+            voice_id,
+        )
+        hidden = any(
+            (
+                str(item.get("provider") or ""),
+                str(item.get("language") or ""),
+                str(item.get("voice_id") or ""),
+            )
+            == identity
+            and bool(item.get("hidden"))
+            for item in preferences.get("personal") or []
+        )
+        disabled = any(
+            (
+                str(item.get("provider") or ""),
+                str(item.get("language") or ""),
+                str(item.get("voice_id") or ""),
+            )
+            == identity
+            and bool(item.get("disabled"))
+            for item in preferences.get("team") or []
+        )
+        if hidden or disabled:
+            raise ValueError("所选声音已隐藏或被团队停用，请恢复或重新选择。")
         self.catalog.save_novel_voice_state(
             novel_id,
             {
@@ -2127,16 +2621,14 @@ class LibraryService:
         draft_metadata: dict[str, Any],
         *,
         language: str,
+        actor_user_id: str | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
         """Validate the voice frozen on this draft before queueing.
 
-        Older drafts can contain a provider alias or a voice which no longer
-        exists in the selected provider/language catalog.  A provider alias is
-        normalized without changing the actor.  A removed voice is migrated
-        only to an already-previewed voice with the same delivery profile; if
-        that is impossible, candidates are regenerated once and the user is
-        asked to select again. Every automatic repair is retained in this
-        draft; later batches remain free to choose another voice.
+        Older drafts can contain a provider alias, which is normalized without
+        changing the selected actor. The selected ``voice_id`` itself is an
+        immutable batch identity: stale legacy candidate rows are display data
+        only and never authorize replacement or synthesis during queueing.
         """
 
         novel_metadata = dict(novel.get("metadata") or {})
@@ -2152,6 +2644,14 @@ class LibraryService:
 
         provider = _canonical_voice_provider(raw_provider)
         settings = self._settings_getter()
+        configured_provider = _canonical_voice_provider(
+            settings.providers.tts_provider
+        )
+        if provider != configured_provider:
+            raise ValueError(
+                "本批已选声音与当前配音服务不匹配；"
+                "系统不会自动换声，请在制作台刷新音色库并重新选择。"
+            )
         if provider in _LOCAL_KOKORO_PROVIDER_ALIASES:
             ensure_kokoro_language_available(
                 language,
@@ -2167,6 +2667,28 @@ class LibraryService:
                 command=settings.providers.kokoro_command,
             )
         )
+        preferences = self._voice_preferences(actor_user_id)
+        blocked = {
+            (
+                str(item.get("provider") or ""),
+                str(item.get("language") or ""),
+                str(item.get("voice_id") or ""),
+            )
+            for group, flag in (("personal", "hidden"), ("team", "disabled"))
+            for item in preferences.get(group) or []
+            if bool(item.get(flag))
+        }
+        language_key = language.casefold().replace("_", "-")
+        if (provider, language_key, raw_voice_id) in blocked:
+            raise ValueError(
+                "该批次锁定的声音已被当前账号隐藏或由团队停用；"
+                "请先恢复该声音，或在制作台重新试听并选择其他声音。"
+            )
+        available = [
+            item
+            for item in available
+            if (provider, language_key, item.voice_id) not in blocked
+        ]
         if not available:
             language_name = str(novel.get("language_name") or language)
             raise ValueError(
@@ -2174,128 +2696,51 @@ class LibraryService:
                 "请在制作台更换配音服务后重新试听。"
             )
 
-        option_by_id = {item.voice_id: item for item in available}
-        selected = option_by_id.get(raw_voice_id)
+        selected = next(
+            (item for item in available if item.voice_id == raw_voice_id),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                f"该批次锁定的声音 {raw_voice_id} 已不在当前电脑的真实可用音色库中；"
+                "系统不会自动换声或批量生成候选，请在制作台刷新音色库并重新选择。"
+            )
+
+        # v1.0.6 and earlier stored at most three preview rows on the novel.
+        # They remain useful for presenting the original label/profile, but
+        # only the live provider catalog above authorizes the frozen voice id.
         candidate_rows = [
             dict(item)
             for item in list(novel_metadata.get("voice_candidates") or [])
             if isinstance(item, Mapping)
         ]
-        old_candidate = next(
+        matching_candidate = next(
             (
                 item
                 for item in candidate_rows
                 if _canonical_voice_provider(item.get("provider")) == provider
                 and str(item.get("voice_id") or "").strip() == raw_voice_id
             ),
-            None,
+            {},
         )
         desired_profile = str(
             voice.get("profile")
-            or (old_candidate or {}).get("profile")
-            or ""
+            or matching_candidate.get("profile")
+            or selected.profile
         ).strip()
-        regenerated = False
-
-        if selected is None:
-            selected = next(
-                (
-                    option
-                    for option in available
-                    if desired_profile and option.profile == desired_profile
-                    and any(
-                        _canonical_voice_provider(candidate.get("provider")) == provider
-                        and str(candidate.get("voice_id") or "").strip()
-                        == option.voice_id
-                        for candidate in candidate_rows
-                    )
-                ),
-                None,
-            )
-            if selected is None:
-                # Rebuild the shortlist once on this device.  This both probes
-                # the configured engine and replaces stale candidate ids before
-                # any task is queued.
-                configured_provider = _canonical_voice_provider(
-                    self._settings_getter().providers.tts_provider
-                )
-                if configured_provider != provider:
-                    raise ValueError(
-                        "该批次的旧配音服务与本机当前服务不同。"
-                        "请在制作台重新生成候选配音并选择一次。"
-                    )
-                try:
-                    rebuilt = self.generate_voice_candidates(
-                        str(novel["id"]),
-                        str(draft_metadata.get("story_mood") or "suspense"),
-                        narration_wpm=int(
-                            (draft_metadata.get("production_settings") or {}).get(
-                                "narration_wpm",
-                                self._settings_getter().narration_wpm,
-                            )
-                        ),
-                        persist=False,
-                    )
-                except (ProviderError, ValueError, OSError) as error:
-                    raise ValueError(
-                        "旧草稿锁定的女声已不可用，且本机无法重建候选配音："
-                        f"{error}"
-                    ) from error
-                candidate_rows = [
-                    dict(item)
-                    for item in list(rebuilt.get("candidates") or [])
-                    if isinstance(item, Mapping)
-                ]
-                regenerated = True
-                selected = next(
-                    (
-                        option_by_id.get(str(candidate.get("voice_id") or "").strip())
-                        for candidate in candidate_rows
-                        if _canonical_voice_provider(candidate.get("provider")) == provider
-                        and str(candidate.get("profile") or "").strip()
-                        == desired_profile
-                        and option_by_id.get(
-                            str(candidate.get("voice_id") or "").strip()
-                        )
-                        is not None
-                    ),
-                    None,
-                )
-
-            if selected is None:
-                suffix = "，已重新生成候选声音" if regenerated else ""
-                raise ValueError(
-                    "旧草稿锁定的女声已不可用"
-                    f"{suffix}；请在制作台为本批重新选择一次。"
-                )
-
-        matching_candidate = next(
-            (
-                item
-                for item in candidate_rows
-                if _canonical_voice_provider(item.get("provider")) == provider
-                and str(item.get("voice_id") or "").strip() == selected.voice_id
-            ),
-            {},
-        )
         resolved_voice = {
             "provider": provider,
             "voice_id": selected.voice_id,
             "label": str(matching_candidate.get("label") or selected.label),
             "profile": str(matching_candidate.get("profile") or selected.profile),
         }
-        changed = raw_provider != provider or raw_voice_id != selected.voice_id
+        changed = raw_provider != provider
         if not changed:
             return provider, selected.voice_id, resolved_voice
 
-        reason = (
-            "provider_alias_normalized"
-            if raw_voice_id == selected.voice_id
-            else "legacy_voice_replaced_same_profile"
-        )
         migration = {
             "migrated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "reason": reason,
+            "reason": "provider_alias_normalized",
             "language": str(language),
             "from": {
                 "provider": raw_provider,
@@ -2431,6 +2876,15 @@ class LibraryService:
             "code_card_enabled": settings.code_card_enabled,
             "code_card_start_seconds": settings.code_card_start_seconds,
             "code_card_duration_seconds": settings.code_card_duration_seconds,
+            "card_timeline_schema_version": settings.card_timeline_schema_version,
+            "intro_card_start_mode": settings.intro_card_start_mode,
+            "intro_card_start_value": settings.intro_card_start_value,
+            "intro_card_display_mode": settings.intro_card_display_mode,
+            "intro_card_display_value": settings.intro_card_display_value,
+            "code_card_start_mode": settings.code_card_start_mode,
+            "code_card_start_value": settings.code_card_start_value,
+            "code_card_display_mode": settings.code_card_display_mode,
+            "code_card_display_value": settings.code_card_display_value,
             "max_episode_minutes": settings.max_episode_minutes,
             "cover_animation": settings.cover_animation,
             "cover_outro_enabled": settings.cover_outro_enabled,
@@ -2454,6 +2908,8 @@ class LibraryService:
     def build_render_jobs(
         self,
         value: Mapping[str, Any],
+        *,
+        actor_user_id: str | None = None,
     ) -> tuple[dict[str, Any], str, list[RenderJob]]:
         """Materialize a render plan for legacy/internal callers.
 
@@ -2463,12 +2919,17 @@ class LibraryService:
         focused tooling and older integrations.
         """
 
-        draft, platform_id, _total_count, jobs = self.build_render_job_plan(value)
+        draft, platform_id, _total_count, jobs = self.build_render_job_plan(
+            value,
+            actor_user_id=actor_user_id,
+        )
         return draft, platform_id, list(jobs)
 
     def build_render_job_plan(
         self,
         value: Mapping[str, Any],
+        *,
+        actor_user_id: str | None = None,
     ) -> tuple[dict[str, Any], str, int, Iterator[RenderJob]]:
         """Build a lazy, directly runnable full-video plan from a draft.
 
@@ -2495,9 +2956,35 @@ class LibraryService:
         )
         if binding is None:
             raise ValueError("生产草稿对应的平台绑定已不存在。")
+        if bool(binding.get("archived")):
+            raise ValueError("生产草稿对应的平台绑定已停用，请返回小说库重新选择。")
         platform_id = str(binding["platform_id"])
 
+        promo_code_id = str(draft.get("promo_code_id") or "")
+        current_promo = next(
+            (
+                item
+                for item in binding.get("promo_codes", [])
+                if str(item.get("id") or "") == promo_code_id
+            ),
+            None,
+        )
+        if current_promo is None or str(current_promo.get("status") or "") != "active":
+            raise ValueError("生产草稿中的平台口令已删除或停用，请重新选择有效口令。")
+
         draft_metadata = dict(draft.get("metadata") or {})
+        platform_copy = self._authoritative_platform_copy(
+            platform_id,
+            str(current_promo.get("code") or ""),
+            binding=binding,
+            known_promo_codes=(
+                code.get("code")
+                for novel_binding in novel.get("bindings", [])
+                for code in novel_binding.get("promo_codes", [])
+            ),
+            ending_prefix=draft_metadata.get("platform_ending_prefix", ""),
+            ending_suffix=draft_metadata.get("platform_ending_suffix", ""),
+        )
         saved_recipe = draft_metadata.get("production_settings")
         frozen_recipe = (
             dict(saved_recipe) if isinstance(saved_recipe, Mapping) else {}
@@ -2552,6 +3039,11 @@ class LibraryService:
                 novel,
                 draft_metadata,
                 language=effective_language,
+                actor_user_id=(
+                    str(actor_user_id or "").strip()
+                    or str(draft.get("created_by_user_id") or "").strip()
+                    or None
+                ),
             )
         if locked_provider.casefold() == "local_kokoro" and locked_voice:
             try:
@@ -2743,14 +3235,8 @@ class LibraryService:
         saved_intro_source = str(
             draft_metadata.get("intro_card_source") or ""
         ).strip()
-        platform_search_text = normalize_platform_copy(
-            draft_metadata.get("platform_search_text", ""),
-            "platform_search_text",
-        )
-        platform_ending_text = normalize_platform_copy(
-            draft_metadata.get("platform_ending_text", ""),
-            "platform_ending_text",
-        )
+        platform_search_text = str(platform_copy["search_text"])
+        platform_ending_text = str(platform_copy["ending_text"])
         novel_synopsis = str(novel.get("synopsis") or "")
         first_episode = episodes[0]
         first_episode_id = str(first_episode.get("id") or "")
@@ -2795,8 +3281,9 @@ class LibraryService:
             narration_parts.append(f"Chapter {episode_number}\n{episode_text}")
         narration_text = "\n\n".join(narration_parts)
         source_episode_code = re.sub(r"[^A-Za-z0-9]", "", episode_label) or "E001"
+        current_promo_code = str(current_promo.get("code") or "").strip()
         source_name = safe_component(
-            f"{source_episode_code}_{draft['promo_code_snapshot']}_{draft['novel_title_snapshot']}",
+            f"{source_episode_code}_{current_promo_code}_{draft['novel_title_snapshot']}",
             fallback=f"{source_episode_code}_story",
         )
         source_file = source_root / f"{source_name}.txt"
@@ -2816,7 +3303,7 @@ class LibraryService:
                     platform_id=platform_id,
                     source_file=str(source_file),
                     title=str(draft["novel_title_snapshot"]),
-                    code=str(draft["promo_code_snapshot"]),
+                    code=current_promo_code,
                     video_folder=folders["video_folder"],
                     music_folder=folders["music_folder"],
                     output_folder=folders["output_folder"],
@@ -2837,7 +3324,7 @@ class LibraryService:
                     episode_label=episode_label,
                     listing_id=str(draft["binding_id"]),
                     promo_code_id=str(draft["promo_code_id"]),
-                    promo_code_snapshot=str(draft["promo_code_snapshot"]),
+                    promo_code_snapshot=current_promo_code,
                     production_draft_id=draft_id,
                     production_run_id=production_run_id,
                     publishing_account_id=account_id,
@@ -2867,6 +3354,19 @@ class LibraryService:
                     intro_card_source=intro_card_source,
                     platform_search_text=platform_search_text,
                     platform_ending_text=platform_ending_text,
+                    platform_copy_schema_version=2,
+                    platform_name_snapshot=str(platform_copy["platform_name"]),
+                    platform_search_template_snapshot=str(
+                        platform_copy["search_template"]
+                    ),
+                    platform_ending_template_snapshot=str(
+                        platform_copy["ending_template"]
+                    ),
+                    platform_authoritative_ending_text=str(
+                        platform_copy["authoritative_ending"]
+                    ),
+                    platform_ending_prefix=str(platform_copy["ending_prefix"]),
+                    platform_ending_suffix=str(platform_copy["ending_suffix"]),
                     production_preset_id=str(
                         draft_metadata.get("production_preset_id") or ""
                     ),

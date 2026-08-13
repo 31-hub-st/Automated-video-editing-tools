@@ -14,6 +14,7 @@ from storyforge.config import SettingsRepository
 from storyforge.hub import HubRemoteError
 from storyforge.jobs import JobQueue
 from storyforge.models import JobStatus, PlatformProfile, RenderJob
+from storyforge.providers.tts import TTSVoiceOption
 
 
 class ProductionWorkflowTests(unittest.TestCase):
@@ -27,6 +28,18 @@ class ProductionWorkflowTests(unittest.TestCase):
         )
         admission_patch.start()
         self.addCleanup(admission_patch.stop)
+
+    def _declare_verified_kokoro_voice(self) -> None:
+        """Keep queue-lifecycle fixtures independent from voice discovery."""
+
+        catalog_patch = patch(
+            "storyforge.library_service.available_female_voice_candidates",
+            return_value=(
+                TTSVoiceOption("af_heart", "Heart", "dramatic"),
+            ),
+        )
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
 
     def _wait_for(self, api: StoryForgeApi, expected: set[str]) -> list[dict]:
         deadline = time.monotonic() + 4
@@ -120,6 +133,7 @@ class ProductionWorkflowTests(unittest.TestCase):
         root: Path,
         processor,
     ) -> tuple[StoryForgeApi, CatalogRepository, JobQueue, str]:
+        self._declare_verified_kokoro_voice()
         video = root / "video"
         music = root / "music"
         output = root / "output"
@@ -307,6 +321,7 @@ class ProductionWorkflowTests(unittest.TestCase):
             self.assertTrue(held["lease_owner_device"])
 
     def test_library_draft_runs_full_jobs_without_sample_approval(self) -> None:
+        self._declare_verified_kokoro_voice()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             video = root / "video"
@@ -416,6 +431,27 @@ class ProductionWorkflowTests(unittest.TestCase):
                 ),
                 "small batches must also retain restart snapshots",
             )
+            self.assertEqual(
+                {
+                    int((item.get("metadata") or {}).get("required_production_contract") or 0)
+                    for item in records
+                },
+                {2},
+                "new recipes must not be leased to a pre-scheme-two renderer",
+            )
+            self.assertTrue(
+                all(
+                    int(
+                        ((item.get("metadata") or {}).get("job_snapshot") or {}).get(
+                            "required_production_contract"
+                        )
+                        or 0
+                    )
+                    == 2
+                    for item in records
+                ),
+                "the contract must be frozen in every restart snapshot",
+            )
             completed_record = next(
                 item for item in records if item["status"] == "completed"
             )
@@ -448,7 +484,63 @@ class ProductionWorkflowTests(unittest.TestCase):
             )
             api.cancel_queue()
 
+    def test_local_api_uses_authenticated_actor_instead_of_payload_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            catalog = CatalogRepository(root / "catalog.sqlite3")
+            api = StoryForgeApi(
+                repository=SettingsRepository(root / "state"),
+                queue=JobQueue(lambda *_args: ""),
+                catalog=catalog,
+            )
+            self.addCleanup(api._shutdown)
+            catalog.save_user(
+                {"username": "draft-owner-admin", "role": "admin"}
+            )
+            actor = catalog.save_user(
+                {"username": "real-draft-actor", "role": "producer"}
+            )
+            forged = catalog.save_user(
+                {"username": "forged-draft-owner", "role": "producer"}
+            )
+            platform = api.save_platform(
+                {"id": "actor-platform", "name": "Actor Platform"}
+            )["data"]
+            novel = api.import_novel_text(
+                {
+                    "title": "Actor-bound draft",
+                    "text": "The authenticated employee must own this production draft.",
+                    "language": "en",
+                }
+            )["data"]["novel"]
+            api.save_novel_binding(
+                {"novel_id": novel["id"], "platform_id": platform["id"]}
+            )
+            promo = api.add_promo_code(
+                {
+                    "novel_id": novel["id"],
+                    "platform_id": platform["id"],
+                    "code": "ACTOR01",
+                }
+            )["data"]["promo_code"]
+
+            with api._web_actor_scope(actor["id"]):
+                draft = api.save_production_draft(
+                    {
+                        "novel_id": novel["id"],
+                        "platform_id": platform["id"],
+                        "promo_code_id": promo["id"],
+                        "episode_ids": [novel["episodes"][0]["id"]],
+                        "created_by_user_id": forged["id"],
+                    }
+                )["data"]["draft"]
+
+            stored = catalog.get_draft(draft["id"])
+            self.assertEqual(stored["created_by_user_id"], actor["id"])
+            self.assertNotEqual(stored["created_by_user_id"], forged["id"])
+
     def test_large_batch_returns_window_while_all_tasks_are_durable(self) -> None:
+        self._declare_verified_kokoro_voice()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             video = root / "video"
@@ -573,7 +665,21 @@ class ProductionWorkflowTests(unittest.TestCase):
             for job in [queue.get_job(item["id"]) for item in payload["jobs"]]:
                 self.assertIsNotNone(job)
                 job.status = JobStatus.COMPLETED
+                job.card_timeline_resolved = {
+                    "schema_version": 1,
+                    "body_duration_seconds": 600.0,
+                    "intro_card": {
+                        "start_seconds": 120.0,
+                        "end_seconds": 128.0,
+                    },
+                }
                 api._sync_one_job_record(job)
+                terminal = catalog.get_record(job.production_record_id)
+                self.assertEqual(
+                    terminal["metadata"]["card_timeline_resolved"]
+                    ["intro_card"],
+                    {"start_seconds": 120.0, "end_seconds": 128.0},
+                )
             api._release_finished_draft_gates()
             held_gate = catalog.get_record(gate["id"])
             self.assertTrue(held_gate["lease_owner_device"])
@@ -760,6 +866,57 @@ class ProductionWorkflowTests(unittest.TestCase):
                 self.assertGreater(generation, 0)
                 self.assertEqual(retried["lease_generation"], generation)
                 api._sync_one_job_record(job)
+            finally:
+                api._shutdown()
+
+    def test_legacy_contract_survives_retry_progress_and_interrupted_sync(self) -> None:
+        """A new Worker must not turn a pre-contract task into contract two."""
+
+        with tempfile.TemporaryDirectory() as temp:
+            api, catalog, queue, job, record = self._durable_retry_job(Path(temp))
+            try:
+                legacy_snapshot = job.to_dict()
+                legacy_snapshot.pop("required_production_contract")
+                self.assertEqual(
+                    RenderJob.from_dict(legacy_snapshot).required_production_contract,
+                    1,
+                )
+                with (
+                    patch.object(queue, "start"),
+                    patch.object(api, "_validate_provider_readiness"),
+                ):
+                    result = api.retry_failed(job.id)
+
+                self.assertTrue(result["ok"], result)
+                job.status = JobStatus.RENDERING
+                job.progress = 0.5
+                api._sync_one_job_record(job)
+                running = catalog.get_record(str(record["id"]))
+                self.assertEqual(
+                    int(
+                        (running.get("metadata") or {}).get(
+                            "required_production_contract"
+                        )
+                        or 1
+                    ),
+                    1,
+                )
+
+                job.status = JobStatus.INTERRUPTED
+                job.message = "legacy task interrupted"
+                api._sync_one_job_record(job)
+                interrupted = catalog.get_record(str(record["id"]))
+                self.assertEqual(interrupted["status"], "interrupted")
+                self.assertEqual(
+                    int(
+                        (interrupted.get("metadata") or {}).get(
+                            "required_production_contract"
+                        )
+                        or 1
+                    ),
+                    1,
+                )
+                self.assertFalse(interrupted["lease_owner_device"])
             finally:
                 api._shutdown()
 
@@ -1007,6 +1164,152 @@ class ProductionWorkflowTests(unittest.TestCase):
             interrupted = catalog.get_record(running["id"])
             self.assertEqual(interrupted["status"], "interrupted")
             self.assertTrue(interrupted["metadata"]["recovery_available"])
+
+    def test_restart_recovers_schema_two_job_after_platform_is_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repository = SettingsRepository(root / "state")
+            catalog = CatalogRepository(root / "catalog.sqlite3")
+            source = root / "story.txt"
+            source.write_text("A frozen platform survives archival.", encoding="utf-8")
+            first_api = StoryForgeApi(
+                repository=repository,
+                queue=JobQueue(lambda *_args: str(root / "unused.mp4")),
+                catalog=catalog,
+            )
+            platform = first_api.save_platform(
+                {
+                    "id": "frozen-platform",
+                    "name": "Frozen Platform",
+                    "search_template": "Find {platform} with {code}",
+                    "ending_template": "Continue on {platform} with {code}",
+                }
+            )["data"]
+            novel = first_api.import_novel_text(
+                {
+                    "title": "Frozen restart",
+                    "text": source.read_text(encoding="utf-8"),
+                    "language": "en",
+                }
+            )["data"]["novel"]
+            first_api.save_novel_binding(
+                {"novel_id": novel["id"], "platform_id": platform["id"]}
+            )
+            promo = first_api.add_promo_code(
+                {
+                    "novel_id": novel["id"],
+                    "platform_id": platform["id"],
+                    "code": "FROZEN01",
+                }
+            )["data"]["promo_code"]
+            draft = first_api.save_production_draft(
+                {
+                    "novel_id": novel["id"],
+                    "platform_id": platform["id"],
+                    "promo_code_id": promo["id"],
+                    "episode_ids": [novel["episodes"][0]["id"]],
+                    "target_video_count": 1,
+                    "video_folder": str(root),
+                    "music_folder": str(root),
+                    "output_folder": str(root),
+                }
+            )["data"]["draft"]
+            job = RenderJob(
+                id="frozen-restart-job",
+                batch_id="frozen-restart-batch",
+                platform_id=str(platform["id"]),
+                source_file=str(source),
+                title="Frozen restart",
+                code="FROZEN01",
+                video_folder=str(root),
+                music_folder=str(root),
+                output_folder=str(root),
+                novel_id=str(novel["id"]),
+                episode_id=str(novel["episodes"][0]["id"]),
+                production_draft_id=str(draft["id"]),
+                status=JobStatus.QUEUED,
+                required_production_contract=2,
+                promo_code_snapshot="FROZEN01",
+                platform_copy_schema_version=2,
+                platform_name_snapshot="Frozen Platform",
+                platform_search_template_snapshot="Find {platform} with {code}",
+                platform_ending_template_snapshot="Continue on {platform} with {code}",
+                platform_search_text="Find Frozen Platform with FROZEN01",
+                platform_ending_text="Continue on Frozen Platform with FROZEN01",
+                platform_authoritative_ending_text=(
+                    "Continue on Frozen Platform with FROZEN01"
+                ),
+            )
+            catalog.save_production_record(
+                {
+                    "draft_id": draft["id"],
+                    "job_id": job.id,
+                    "episode_id": job.episode_id,
+                    "device_id": first_api._current_device_id(),
+                    "status": "queued",
+                    "metadata": {
+                        "required_production_contract": 2,
+                        "job_snapshot": job.to_dict(),
+                    },
+                }
+            )
+            first_api._shutdown()
+            catalog.delete_platform(str(platform["id"]))
+            settings, _platforms, batches = repository.load()
+            repository.save(settings, [], batches)
+
+            processed: list[tuple[str, str, str, str]] = []
+
+            def processor(
+                recovered: RenderJob,
+                recovered_platform: PlatformProfile,
+                _progress,
+            ) -> str:
+                processed.append(
+                    (
+                        recovered.id,
+                        recovered_platform.name,
+                        recovered_platform.search_template,
+                        recovered_platform.ending_template,
+                    )
+                )
+                self.assertEqual(
+                    recovered.platform_search_text,
+                    "Find Frozen Platform with FROZEN01",
+                )
+                self.assertEqual(
+                    recovered.platform_ending_text,
+                    "Continue on Frozen Platform with FROZEN01",
+                )
+                return str(root / "recovered.mp4")
+
+            recovered_queue = JobQueue(processor)
+            recovered_api = StoryForgeApi(
+                repository=repository,
+                queue=recovered_queue,
+                catalog=catalog,
+            )
+            try:
+                worker = recovered_queue._worker
+                self.assertIsNotNone(worker)
+                assert worker is not None
+                worker.join(timeout=3)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(
+                    processed,
+                    [
+                        (
+                            "frozen-restart-job",
+                            "Frozen Platform",
+                            "Find {platform} with {code}",
+                            "Continue on {platform} with {code}",
+                        )
+                    ],
+                )
+                self.assertEqual(catalog.list_platforms()["items"], [])
+                self.assertEqual(recovered_api._state.platforms, [])
+            finally:
+                recovered_api._shutdown()
 
     def test_lease_confirmation_distinguishes_outage_from_other_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1431,6 +1734,53 @@ class ProductionWorkflowTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertIn("候选配音正在生成", response["error"])
         api._library.generate_voice_candidates.assert_not_called()
+
+    def test_speed_preview_synthesizes_only_selected_voice_without_persisting_candidates(self) -> None:
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._queue = Mock()
+        api._queue.is_rendering_busy.return_value = False
+        api._voice_preview_lock = threading.Lock()
+        api._library = Mock()
+        api._library.preview_voice.return_value = {
+            "candidate": {"voice_id": "af_sarah", "narration_wpm": 280}
+        }
+        api._require_shared_catalog_online = lambda: None
+        api._current_web_actor = lambda: ""
+
+        response = api.preview_voice_speed(
+            "novel-1", "local_kokoro", "af_sarah", 280
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["data"]["candidate"]["voice_id"], "af_sarah")
+        api._library.preview_voice.assert_called_once_with(
+            "novel-1",
+            "local_kokoro",
+            "af_sarah",
+            narration_wpm=280,
+            actor_user_id=None,
+        )
+        api._library.generate_voice_candidates.assert_not_called()
+
+    def test_speed_preview_reports_busy_without_mislabeling_version_support(self) -> None:
+        api = StoryForgeApi.__new__(StoryForgeApi)
+        api._queue = Mock()
+        api._queue.is_rendering_busy.return_value = False
+        api._voice_preview_lock = threading.Lock()
+        api._voice_preview_lock.acquire()
+        api._library = Mock()
+        api._require_shared_catalog_online = lambda: None
+        try:
+            response = api.preview_voice_speed(
+                "novel-1", "local_kokoro", "af_sarah", 280
+            )
+        finally:
+            api._voice_preview_lock.release()
+
+        self.assertFalse(response["ok"])
+        self.assertIn("正在生成", response["error"])
+        self.assertNotIn("版本", response["error"])
+        api._library.preview_voice.assert_not_called()
 
 
 if __name__ == "__main__":

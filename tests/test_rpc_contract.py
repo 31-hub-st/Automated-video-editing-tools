@@ -67,6 +67,8 @@ class RpcContractTests(unittest.TestCase):
         self.assertTrue(
             LEGACY_DEVICE_CAPABILITY_FIELDS <= DEVICE_CAPABILITY_FIELDS
         )
+        self.assertIn("production_contract", DEVICE_CAPABILITY_FIELDS)
+        self.assertNotIn("production_contract", LEGACY_DEVICE_CAPABILITY_FIELDS)
 
 
 if __name__ == "__main__":

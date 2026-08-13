@@ -251,9 +251,9 @@ KOKORO_LANGUAGE_CODES: dict[str, str] = {
 }
 
 # Voice ids are from the official Kokoro-82M voice collection.  Some
-# languages currently have fewer than three female identities; do not invent
-# extra ids just to fill the UI.  The preview service returns every distinct
-# identity that is actually available, up to three.
+# languages currently have fewer female identities; do not invent extra ids
+# just to fill the UI. The catalog returns every identity actually installed
+# for the selected language, while preview synthesis remains per voice.
 KOKORO_FEMALE_VOICES: dict[str, tuple[TTSVoiceOption, ...]] = {
     "en": (
         TTSVoiceOption("af_heart", "Heart", "dramatic"),
@@ -377,7 +377,7 @@ def edge_female_voice_candidates(
     proxy: str = "",
     refresh: bool = False,
 ) -> tuple[TTSVoiceOption, ...]:
-    """Discover up to three female Edge voices that exist upstream right now.
+    """Discover every female Edge voice that exists upstream right now.
 
     No voice identifiers are invented or assumed.  An unavailable module,
     failed network probe, or upstream language with no female voices returns an
@@ -414,7 +414,14 @@ def edge_female_voice_candidates(
         language_prefixes = tuple(
             dict.fromkeys(item.split("-", 1)[0] for item in preferred_locales)
         )
-        allow_regional_fallback = normalized_language not in {"en-gb", "pt-br"}
+        # ``en`` is the product's explicit American-English language, not a
+        # generic request for every global English accent. Keep every real
+        # en-US voice while excluding en-GB/en-AU/etc. from that catalog.
+        allow_regional_fallback = normalized_language not in {
+            "en",
+            "en-gb",
+            "pt-br",
+        }
 
         def locale_rank(row: dict[str, Any]) -> tuple[int, str]:
             locale = str(row.get("Locale") or "").strip().casefold()
@@ -453,11 +460,9 @@ def edge_female_voice_candidates(
                 TTSVoiceOption(
                     voice_id=voice_id,
                     label=local_name,
-                    profile=profiles[len(selected)],
+                    profile=profiles[len(selected) % len(profiles)],
                 )
             )
-            if len(selected) == 3:
-                break
         options = tuple(selected)
 
     with _EDGE_VOICE_CACHE_LOCK:
@@ -513,8 +518,9 @@ def available_female_voice_candidates(
     The public catalog above remains the authoritative list of real provider
     ids.  This narrower projection prevents the UI from offering Japanese or
     Chinese local voices when that workstation is missing their tokenizer
-    pack.  An explicit HTTP/CLI service owns its own runtime and is therefore
-    not inspected through the desktop process.
+    pack.  A configured HTTP address or CLI command alone is not a verified
+    capability/voice-list contract, so external runtimes fail closed instead
+    of advertising every static official id.
     """
 
     catalog = female_voice_candidates(provider, language)
@@ -531,7 +537,7 @@ def available_female_voice_candidates(
     }:
         return catalog
     if str(endpoint or "").strip() or str(command or "").strip():
-        return catalog
+        return ()
     try:
         lang_code = KOKORO_LANGUAGE_CODES[normalize_tts_language(language)]
     except (KeyError, ValueError):
@@ -540,12 +546,13 @@ def available_female_voice_candidates(
     if not health.ready:
         return ()
 
-    # If a local bundle exists, expose only voice tensors actually present in
-    # it.  With no bundle at all Kokoro can still obtain official voices from
-    # its configured Hugging Face cache/network, so keep the real catalog.
+    # The production catalog must describe this workstation, not voices which
+    # a future network download might make available.  Explicit HTTP/CLI
+    # runtimes were handled above; embedded Kokoro exposes only installed,
+    # non-empty tensors and never invents a fallback entry.
     installed = _available_offline_kokoro_voice_ids()
     if not installed:
-        return catalog
+        return ()
     return tuple(option for option in catalog if option.voice_id in installed)
 
 
@@ -687,10 +694,19 @@ def _offline_kokoro_assets() -> Path | None:
 
 
 def _available_offline_kokoro_voice_ids() -> frozenset[str]:
-    """Return non-empty voice tensors found in any configured local bundle."""
+    """Return voice tensors co-located with a usable local core bundle."""
 
     result: set[str] = set()
     for root in _kokoro_runtime_roots():
+        required = tuple(root / name for name in _KOKORO_MODEL_FILES)
+        try:
+            if not all(
+                path.is_file() and path.stat().st_size > 0
+                for path in required
+            ):
+                continue
+        except OSError:
+            continue
         voice_root = root / "voices"
         try:
             for path in voice_root.glob("*.pt"):

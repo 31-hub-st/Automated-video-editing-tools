@@ -80,6 +80,7 @@ _MINIMUM_RENDER_CLIENT_RC: int | None = None
 MINIMUM_RENDER_CLIENT_VERSION = ".".join(
     str(item) for item in _MINIMUM_RENDER_CLIENT_CORE
 )
+CURRENT_PRODUCTION_CONTRACT = 2
 _RENDER_CLIENT_VERSION_PATTERN = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\."
     r"(?P<patch>0|[1-9]\d*)(?:-rc(?P<rc>0|[1-9]\d*))?$",
@@ -309,6 +310,17 @@ def _device_capabilities(value: Any) -> dict[str, Any]:
         if not 1 <= parsed_version <= 100:
             raise ValueError("device_config_sync is unsupported")
         result["device_config_sync"] = parsed_version
+    if "production_contract" in value:
+        raw_contract = value["production_contract"]
+        if isinstance(raw_contract, bool):
+            raise ValueError("production_contract must be an integer")
+        try:
+            parsed_contract = int(raw_contract)
+        except (TypeError, ValueError) as error:
+            raise ValueError("production_contract must be an integer") from error
+        if not 1 <= parsed_contract <= 100:
+            raise ValueError("production_contract is unsupported")
+        result["production_contract"] = parsed_contract
     for name in ("local_render", "local_tts", "local_subtitles"):
         if name in value:
             if not isinstance(value[name], bool):
@@ -2426,6 +2438,45 @@ class HubServer:
         ):
             self._require_own_record(str(value["record_id"]), access)
 
+    def _require_new_production_record_contracts(
+        self, device_id: str, values: Sequence[Mapping[str, Any]]
+    ) -> None:
+        new_values = [value for value in values if not value.get("id")]
+        if not new_values:
+            return
+        device = self.catalog.get_hub_device(device_id)
+        try:
+            device_contract = int(
+                (device.get("capabilities") or {}).get("production_contract") or 1
+            )
+        except (TypeError, ValueError, OverflowError):
+            device_contract = 1
+
+        for value in new_values:
+            metadata = value.get("metadata")
+            raw_required = (
+                metadata.get("required_production_contract")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            try:
+                required_contract = (
+                    0 if isinstance(raw_required, bool) else int(raw_required)
+                )
+            except (TypeError, ValueError, OverflowError):
+                required_contract = 0
+            if (
+                device_contract < CURRENT_PRODUCTION_CONTRACT
+                or required_contract < CURRENT_PRODUCTION_CONTRACT
+                or required_contract > device_contract
+            ):
+                raise _HubHTTPError(
+                    HTTPStatus.UPGRADE_REQUIRED,
+                    "production_contract_update_required",
+                    "该新任务使用新版制作合同；请先升级当前员工电脑上的 StoryForge。"
+                    "旧版仍可继续完成已冻结的旧任务。",
+                )
+
     def _list_own_drafts(
         self,
         callback: Any,
@@ -2833,7 +2884,21 @@ class HubServer:
                     f"{shown_version}，请先升级 StoryForge 至 "
                     f"{MINIMUM_RENDER_CLIENT_VERSION} 或更高版本后再开始制作。",
                 )
-        if method == "list_production_presets":
+            record = self.catalog.get_record(str(arguments.get("record_id") or ""))
+            required_contract = int(
+                (record.get("metadata") or {}).get("required_production_contract") or 1
+            )
+            device_contract = int(
+                (device.get("capabilities") or {}).get("production_contract") or 1
+            )
+            if device_contract < required_contract:
+                raise _HubHTTPError(
+                    HTTPStatus.UPGRADE_REQUIRED,
+                    "production_contract_update_required",
+                    "该任务使用新版制作合同；请先升级当前员工电脑上的 StoryForge，"
+                    "旧版仍可继续完成已冻结的旧任务。",
+                )
+        if method in {"list_production_presets", "list_voice_preferences"}:
             # Listing is actor-scoped too: a caller may not forge another
             # user id to enumerate that employee's personal presets.
             arguments.pop("actor_user_id", None)
@@ -2893,6 +2958,9 @@ class HubServer:
                         # to the same member omit this optional catalog guard
                         # and overwrite the first workstation's live result.
                         value["expected_lease_owner_device"] = auth.device_id
+                    self._require_new_production_record_contracts(
+                        auth.device_id, [value]
+                    )
             elif method == "save_production_records_bulk" and auth.device_id:
                 for value in arguments.get("values") or []:
                     if not isinstance(value, dict):
@@ -2907,6 +2975,14 @@ class HubServer:
                     value["device_id"] = auth.device_id
                     if value.get("id"):
                         value["expected_lease_owner_device"] = auth.device_id
+                self._require_new_production_record_contracts(
+                    auth.device_id,
+                    [
+                        value
+                        for value in arguments.get("values") or []
+                        if isinstance(value, Mapping)
+                    ],
+                )
             arguments["actor_user_id"] = access.user_id
 
         if (
@@ -3379,6 +3455,24 @@ class HubClient:
             raise HubConnectionError("Hub health response was not successful")
         self._remember_server_contract(payload)
         return payload
+
+    def supports_rpc_method(self, method: str) -> bool:
+        """Return whether the connected Hub explicitly advertises an RPC.
+
+        Optional post-v1.0.6 features must not be sent to an older Hub. A Hub
+        without a capability manifest is treated as not supporting the method
+        instead of optimistically issuing an incompatible request.
+        """
+
+        clean_method = str(method or "").strip()
+        if not clean_method:
+            return False
+        if not self._server_capability_manifest_known:
+            self.health()
+        return bool(
+            self._server_rpc_methods is not None
+            and clean_method in self._server_rpc_methods
+        )
 
     @classmethod
     def enroll_device(
@@ -4221,6 +4315,9 @@ class HubCatalogProxy:
         if not isinstance(client, HubClient):
             raise TypeError("client must be a HubClient")
         self.client = client
+
+    def supports_rpc_method(self, method: str) -> bool:
+        return self.client.supports_rpc_method(method)
 
     def __getattr__(self, name: str) -> Any:
         if name not in CATALOG_RPC_METHODS:

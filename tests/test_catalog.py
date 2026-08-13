@@ -11,6 +11,7 @@ from storyforge.catalog import (
     CatalogConflictError,
     CatalogNotFoundError,
     CatalogRepository,
+    CatalogPermissionError,
     CatalogValidationError,
     DuplicateContentError,
     KNOWN_PERMISSIONS,
@@ -75,6 +76,68 @@ class CatalogTestCase(unittest.TestCase):
         return self.catalog.add_promo_code(
             {"binding_id": binding_id, "code": code}
         )
+
+    def test_voice_preferences_are_user_scoped_and_team_status_is_shared(self) -> None:
+        admin = self.catalog.save_user(
+            {"username": "voice-admin", "role": "admin", "active": True}
+        )
+        first = self.catalog.save_user(
+            {"username": "voice-first", "role": "producer", "active": True}
+        )
+        second = self.catalog.save_user(
+            {"username": "voice-second", "role": "producer", "active": True}
+        )
+
+        self.catalog.save_voice_preference(
+            "edge_tts",
+            "en",
+            "en-US-AnaNeural",
+            favorite=True,
+            hidden=True,
+            actor_user_id=first["id"],
+        )
+        self.catalog.set_team_voice_disabled(
+            "edge_tts",
+            "en",
+            "en-US-BeaNeural",
+            disabled=True,
+            actor_user_id=admin["id"],
+        )
+
+        first_view = self.catalog.list_voice_preferences(
+            actor_user_id=first["id"]
+        )
+        second_view = self.catalog.list_voice_preferences(
+            actor_user_id=second["id"]
+        )
+        self.assertEqual(len(first_view["personal"]), 1)
+        self.assertTrue(first_view["personal"][0]["favorite"])
+        self.assertTrue(first_view["personal"][0]["hidden"])
+        self.assertEqual(second_view["personal"], [])
+        self.assertEqual(first_view["team"], second_view["team"])
+        self.assertTrue(first_view["team"][0]["disabled"])
+
+    def test_only_admin_can_disable_a_team_voice(self) -> None:
+        admin = self.catalog.save_user(
+            {"username": "voice-owner", "role": "admin", "active": True}
+        )
+        producer = self.catalog.save_user(
+            {"username": "voice-producer", "role": "producer", "active": True}
+        )
+        self.catalog.set_user_permission(
+            producer["id"],
+            "hub.manage",
+            True,
+            actor_user_id=admin["id"],
+        )
+        with self.assertRaises(PermissionError):
+            self.catalog.set_team_voice_disabled(
+                "local_kokoro",
+                "en",
+                "af_sarah",
+                disabled=True,
+                actor_user_id=producer["id"],
+            )
 
     def test_hub_user_tokens_are_hashed_resolvable_and_revocable(self) -> None:
         self.catalog.save_user(
@@ -1471,6 +1534,85 @@ class BindingAndPromoCodeTests(CatalogTestCase):
         listed = self.catalog.list_platforms()
         self.assertEqual(listed["total"], 1)
         self.assertEqual(listed["items"][0]["brand_color"], "#D92D20")
+
+    def test_platform_templates_require_admin_role_even_with_platform_permission(self) -> None:
+        admin = self.catalog.save_user(
+            {"username": "template-admin", "role": "admin"}
+        )
+        producer = self.catalog.save_user(
+            {"username": "platform-editor", "role": "producer"}
+        )
+        self.catalog.set_user_permission(
+            producer["id"],
+            "platforms.manage",
+            True,
+            actor_user_id=admin["id"],
+        )
+        platform = self.catalog.save_platform(
+            {
+                "name": "GoodNovel",
+                "search_template": "Search {platform}: {code}",
+                "ending_template": "Continue on {platform} with {code}.",
+            },
+            actor_user_id=admin["id"],
+        )
+
+        with self.assertRaisesRegex(CatalogPermissionError, "administrator"):
+            self.catalog.save_platform(
+                {
+                    "id": platform["id"],
+                    "name": platform["name"],
+                    "search_template": "Forged {platform}: {code}",
+                    "ending_template": platform["ending_template"],
+                    "expected_version": platform["row_version"],
+                },
+                actor_user_id=producer["id"],
+            )
+        with self.assertRaisesRegex(CatalogPermissionError, "administrator"):
+            self.catalog.save_platform(
+                {
+                    "name": "New Platform",
+                    "search_template": "Custom {platform}: {code}",
+                },
+                actor_user_id=producer["id"],
+            )
+
+        updated = self.catalog.save_platform(
+            {
+                "id": platform["id"],
+                "name": "GoodNovel Updated",
+                "brand_color": "#112233",
+                "expected_version": platform["row_version"],
+            },
+            actor_user_id=producer["id"],
+        )
+        self.assertEqual(updated["brand_color"], "#112233")
+        self.assertEqual(updated["search_template"], platform["search_template"])
+        self.assertEqual(updated["ending_template"], platform["ending_template"])
+
+        admin_updated = self.catalog.save_platform(
+            {
+                "id": updated["id"],
+                "name": updated["name"],
+                "search_template": "Admin {platform}: {code}",
+                "ending_template": "Admin ending {platform}: {code}",
+                "expected_version": updated["row_version"],
+            },
+            actor_user_id=admin["id"],
+        )
+        self.assertEqual(
+            admin_updated["search_template"], "Admin {platform}: {code}"
+        )
+
+        created = self.catalog.save_platform(
+            {"name": "Default Template Platform"},
+            actor_user_id=producer["id"],
+        )
+        self.assertEqual(created["search_template"], "Search {platform}: {code}")
+        self.assertEqual(
+            created["ending_template"],
+            "Download {platform} and search code {code} to continue reading.",
+        )
 
     def test_binding_upserts_platform_and_exposes_five_historical_slots(self) -> None:
         novel = self.import_story()["novel"]

@@ -40,6 +40,10 @@ EMPLOYEE_DESKTOP_METHODS = frozenset(
         "save_production_draft",
         "queue_production_draft",
         "generate_voice_candidates",
+        "get_voice_catalog",
+        "preview_voice",
+        "preview_voice_speed",
+        "save_voice_preference",
         "set_local_tts_provider",
         "generate_intro_card_copy",
         "classify_novel",
@@ -67,6 +71,7 @@ EMPLOYEE_DESKTOP_METHODS = frozenset(
 
 ADMIN_DESKTOP_METHODS = EMPLOYEE_DESKTOP_METHODS | frozenset(
     {
+        "set_team_voice_disabled",
         "sync_device_config_now",
         "get_hub_backup_status",
         "list_hub_backups",

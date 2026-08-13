@@ -196,6 +196,55 @@ class VoicePreviewTests(unittest.TestCase):
             [item["cache_key"] for item in second],
         )
 
+    def test_selected_voice_preview_synthesizes_only_that_real_voice_and_reuses_cache(self) -> None:
+        settings = AppSettings()
+        fake = _TimedFakeProvider()
+        story = " ".join(
+            f"word{index}{'.' if index % 12 == 0 else ''}"
+            for index in range(1, 201)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = VoicePreviewService(
+                lambda: settings,
+                tts_provider_factory=lambda _config: fake,
+            )
+            first = service.generate(
+                story,
+                "suspense",
+                temporary,
+                narration_wpm=260,
+                selected_voice_id="af_sarah",
+            )
+            second = service.generate(
+                story,
+                "suspense",
+                temporary,
+                narration_wpm=260,
+                selected_voice_id="af_sarah",
+            )
+
+        self.assertEqual([item["voice_id"] for item in first], ["af_sarah"])
+        self.assertEqual(fake.voices, ["af_sarah"])
+        self.assertTrue(second[0]["cached"])
+        self.assertEqual(first[0]["cache_key"], second[0]["cache_key"])
+
+    def test_selected_voice_preview_rejects_unknown_voice_without_synthesis(self) -> None:
+        settings = AppSettings()
+        fake = _TimedFakeProvider()
+        with tempfile.TemporaryDirectory() as temporary:
+            service = VoicePreviewService(
+                lambda: settings,
+                tts_provider_factory=lambda _config: fake,
+            )
+            with self.assertRaisesRegex(ValueError, "voice_id"):
+                service.generate(
+                    "A sufficiently long story sentence for preview generation.",
+                    "suspense",
+                    temporary,
+                    selected_voice_id="invented-voice",
+                )
+        self.assertEqual(fake.voices, [])
+
     def test_wpm_changes_audio_cache_but_keeps_selected_voice_identity(self) -> None:
         settings = AppSettings()
         fake = _TimedFakeProvider()

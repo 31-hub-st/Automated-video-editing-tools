@@ -2432,10 +2432,8 @@ def generate_ass(
     if not math.isfinite(intro_start) or intro_start < 0:
         raise ValueError("intro_card_start must be a non-negative finite number")
     intro_duration = float(intro_card_duration)
-    if not math.isfinite(intro_duration) or not 2.5 <= intro_duration <= 8.0:
-        if intro_enabled:
-            raise ValueError("intro_card_duration must be between 2.5 and 8 seconds")
-        intro_duration = 0.0
+    if not math.isfinite(intro_duration) or intro_duration < 0:
+        raise ValueError("intro_card_duration must be a non-negative finite number")
     intro_end_value = (
         min(duration, intro_start + intro_duration)
         if intro_enabled and intro_start < duration

@@ -208,6 +208,32 @@ class AssGenerationTests(unittest.TestCase):
         self.assertIn("0:00:08.00,0:00:10.00", clipped)
         self.assertIn("0:00:09.00,0:00:10.00", clipped)
 
+        mixed_timeline = generate_ass(
+            [SubtitleCue(0.0, 120.0, "Long narration.")],
+            platform="GoodNovel",
+            code="B39760",
+            video_duration=120.0,
+            video_template="platform_story_card",
+            intro_card_enabled=True,
+            intro_card_start=60.0,
+            intro_card_duration=60.0,
+            intro_card_text="Show until the narrated body ends.",
+        )
+        self.assertIn("0:01:00.00,0:02:00.00", mixed_timeline)
+
+        short_clipped = generate_ass(
+            [SubtitleCue(0.0, 10.0, "Short narration.")],
+            platform="GoodNovel",
+            code="B39760",
+            video_duration=10.0,
+            video_template="platform_story_card",
+            intro_card_enabled=True,
+            intro_card_start=9.0,
+            intro_card_duration=1.0,
+            intro_card_text="Do not lengthen this resolved window.",
+        )
+        self.assertIn("0:00:09.00,0:00:10.00", short_clipped)
+
         with self.assertRaisesRegex(ValueError, "intro_card_start"):
             generate_ass(
                 [SubtitleCue(0.0, 2.0, "Narration.")],

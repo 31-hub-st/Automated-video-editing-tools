@@ -733,6 +733,7 @@ class HubSettings:
     capabilities: dict[str, Any] = field(
         default_factory=lambda: {
             "device_config_sync": 1,
+            "production_contract": 2,
             "local_render": True,
             "local_tts": True,
             "local_subtitles": True,
@@ -788,8 +789,20 @@ class AppSettings:
     intro_card_duration_seconds: float = 5.5
     code_card_enabled: bool = True
     code_card_start_seconds: float = 0.0
-    # Zero means "from the absolute start above through the end of the video".
+    # Schema 0 only: zero means "from the absolute start above through the end
+    # of the video". Schema 1 uses ``code_card_display_mode`` explicitly.
     code_card_duration_seconds: float = 0.0
+    # Schema 0 preserves frozen pre-hybrid jobs. Schema 1 resolves explicit
+    # start/display modes against the actual narrated body duration.
+    card_timeline_schema_version: int = 1
+    intro_card_start_mode: str = "seconds"
+    intro_card_start_value: float = 0.0
+    intro_card_display_mode: str = "seconds"
+    intro_card_display_value: float = 5.5
+    code_card_start_mode: str = "seconds"
+    code_card_start_value: float = 0.0
+    code_card_display_mode: str = "body_end"
+    code_card_display_value: float = 0.0
     preview_seconds: int = DEFAULT_PREVIEW_SECONDS
     max_episode_minutes: float = 10.0
     cover_animation: str = "gentle_push"
@@ -831,6 +844,48 @@ class AppSettings:
                 "code_card_duration_seconds must be a non-negative finite number"
             )
         self.code_card_duration_seconds = code_duration
+        if isinstance(self.card_timeline_schema_version, bool):
+            raise ValueError("card_timeline_schema_version must be 0 or 1")
+        self.card_timeline_schema_version = int(self.card_timeline_schema_version)
+        if self.card_timeline_schema_version not in {0, 1}:
+            raise ValueError("card_timeline_schema_version must be 0 or 1")
+        for prefix in ("intro_card", "code_card"):
+            start_mode = str(getattr(self, f"{prefix}_start_mode") or "").strip().casefold()
+            display_mode = str(getattr(self, f"{prefix}_display_mode") or "").strip().casefold()
+            if start_mode not in {"seconds", "body_percent"}:
+                raise ValueError(f"{prefix}_start_mode is invalid")
+            if display_mode not in {"seconds", "body_percent", "body_end"}:
+                raise ValueError(f"{prefix}_display_mode is invalid")
+            setattr(self, f"{prefix}_start_mode", start_mode)
+            setattr(self, f"{prefix}_display_mode", display_mode)
+            for suffix in ("start_value", "display_value"):
+                name = f"{prefix}_{suffix}"
+                number = float(getattr(self, name))
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError(f"{name} must be a non-negative finite number")
+                if (
+                    (suffix == "start_value" and start_mode == "body_percent")
+                    or (suffix == "display_value" and display_mode == "body_percent")
+                ) and number > 100:
+                    raise ValueError(f"{name} must not exceed 100 percent")
+                if (
+                    suffix == "display_value"
+                    and display_mode in {"seconds", "body_percent"}
+                    and number <= 0
+                ):
+                    raise ValueError(
+                        f"{name} must be positive unless display_mode is body_end"
+                    )
+                setattr(self, name, number)
+            if (
+                self.card_timeline_schema_version == 1
+                and bool(getattr(self, f"{prefix}_enabled"))
+                and start_mode == "body_percent"
+                and float(getattr(self, f"{prefix}_start_value")) >= 100
+            ):
+                raise ValueError(
+                    f"{prefix}_start_value must be below 100 percent when the card is enabled"
+                )
 
     def to_dict(self, *, redact_secrets: bool = False) -> dict[str, Any]:
         data = asdict(self)
@@ -1026,6 +1081,15 @@ class AppSettings:
                 "code_card_enabled",
                 "code_card_start_seconds",
                 "code_card_duration_seconds",
+                "card_timeline_schema_version",
+                "intro_card_start_mode",
+                "intro_card_start_value",
+                "intro_card_display_mode",
+                "intro_card_display_value",
+                "code_card_start_mode",
+                "code_card_start_value",
+                "code_card_display_mode",
+                "code_card_display_value",
                 "preview_seconds",
                 "max_episode_minutes",
                 "cover_animation",
@@ -1106,6 +1170,58 @@ class AppSettings:
             if 2.5 <= intro_card_duration <= 8.0
             else defaults.intro_card_duration_seconds
         )
+        try:
+            timeline_schema = int(scalar["card_timeline_schema_version"])
+        except (TypeError, ValueError):
+            timeline_schema = defaults.card_timeline_schema_version
+        scalar["card_timeline_schema_version"] = (
+            timeline_schema if timeline_schema in {0, 1} else 1
+        )
+        if "intro_card_start_mode" not in value:
+            scalar["intro_card_start_mode"] = "seconds"
+            scalar["intro_card_start_value"] = scalar["intro_card_start_seconds"]
+            scalar["intro_card_display_mode"] = "seconds"
+            scalar["intro_card_display_value"] = scalar["intro_card_duration_seconds"]
+        if "code_card_start_mode" not in value:
+            scalar["code_card_start_mode"] = "seconds"
+            scalar["code_card_start_value"] = scalar["code_card_start_seconds"]
+            if scalar["code_card_duration_seconds"] == 0:
+                scalar["code_card_display_mode"] = "body_end"
+                scalar["code_card_display_value"] = 0.0
+            else:
+                scalar["code_card_display_mode"] = "seconds"
+                scalar["code_card_display_value"] = scalar[
+                    "code_card_duration_seconds"
+                ]
+        for prefix in ("intro_card", "code_card"):
+            start_key = f"{prefix}_start_mode"
+            display_key = f"{prefix}_display_mode"
+            normalized_start_mode = str(scalar[start_key] or "").strip().casefold()
+            normalized_display_mode = str(scalar[display_key] or "").strip().casefold()
+            scalar[start_key] = (
+                normalized_start_mode
+                if normalized_start_mode in {"seconds", "body_percent"}
+                else getattr(defaults, start_key)
+            )
+            scalar[display_key] = (
+                normalized_display_mode
+                if normalized_display_mode in {"seconds", "body_percent", "body_end"}
+                else getattr(defaults, display_key)
+            )
+            for suffix in ("start_value", "display_value"):
+                name = f"{prefix}_{suffix}"
+                try:
+                    number = float(scalar[name])
+                except (TypeError, ValueError):
+                    number = float(getattr(defaults, name))
+                if not math.isfinite(number) or number < 0:
+                    number = float(getattr(defaults, name))
+                if (
+                    (suffix == "start_value" and scalar[start_key] == "body_percent")
+                    or (suffix == "display_value" and scalar[display_key] == "body_percent")
+                ) and number > 100:
+                    number = float(getattr(defaults, name))
+                scalar[name] = number
         for boolean_key in (
             "export_narration_audio",
             "cover_outro_enabled",
@@ -1226,6 +1342,9 @@ class RenderJob:
     production_draft_id: str = ""
     production_run_id: str = ""
     production_record_id: str = ""
+    # Frozen renderer contract for this individual task.  Snapshots written
+    # before the field existed intentionally deserialize as contract one.
+    required_production_contract: int = 1
     publishing_account_id: str = ""
     publishing_account_label: str = ""
     # ``batch_total_count`` and ``batch_ordinal`` describe the complete
@@ -1259,6 +1378,14 @@ class RenderJob:
     intro_card_source: str = ""
     platform_search_text: str = ""
     platform_ending_text: str = ""
+    platform_copy_schema_version: int = 0
+    platform_name_snapshot: str = ""
+    platform_search_template_snapshot: str = ""
+    platform_ending_template_snapshot: str = ""
+    platform_authoritative_ending_text: str = ""
+    platform_ending_prefix: str = ""
+    platform_ending_suffix: str = ""
+    card_timeline_resolved: dict[str, Any] = field(default_factory=dict)
     production_preset_id: str = ""
     production_preset_revision: int = 0
     production_preset_hash: str = ""
@@ -1280,11 +1407,30 @@ class RenderJob:
         self.episode_label = str(self.episode_label or "").strip()
         self.batch_total_count = max(0, int(self.batch_total_count or 0))
         self.batch_ordinal = max(0, int(self.batch_ordinal or 0))
+        if isinstance(self.required_production_contract, bool):
+            raise ValueError("required_production_contract must be a positive integer")
+        self.required_production_contract = int(
+            self.required_production_contract or 1
+        )
+        if self.required_production_contract < 1:
+            raise ValueError("required_production_contract must be a positive integer")
         self.platform_search_text = normalize_platform_copy(
             self.platform_search_text, "platform_search_text"
         )
         self.platform_ending_text = normalize_platform_copy(
             self.platform_ending_text, "platform_ending_text"
+        )
+        self.platform_copy_schema_version = max(
+            0, int(self.platform_copy_schema_version or 0)
+        )
+        self.platform_authoritative_ending_text = normalize_platform_copy(
+            self.platform_authoritative_ending_text, "platform_ending_text"
+        )
+        self.platform_ending_prefix = normalize_platform_copy(
+            self.platform_ending_prefix, "platform_ending_prefix"
+        )
+        self.platform_ending_suffix = normalize_platform_copy(
+            self.platform_ending_suffix, "platform_ending_suffix"
         )
 
     def to_dict(self) -> dict[str, Any]:

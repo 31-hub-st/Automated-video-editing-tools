@@ -10,6 +10,7 @@ from storyforge.catalog import CatalogConflictError, CatalogRepository
 from storyforge.library_service import LibraryService, _fit_intro_card_text
 from storyforge.models import AppSettings, JobStatus, PlatformProfile
 from storyforge.providers.base import ProviderConfigurationError
+from storyforge.providers.tts import TTSVoiceOption
 from storyforge.providers.text import TextResult
 from storyforge.services.subtitles import _fit_card_lines
 from storyforge.services.text_processing import analyze_manuscript
@@ -59,6 +60,79 @@ class LibraryServiceTests(unittest.TestCase):
 
         self.assertEqual(projected["id"], novel["id"])
         self.assertEqual(projected["default_voice"], "待试听")
+
+    def test_real_voice_catalog_survives_older_hub_without_preferences_rpc(self) -> None:
+        novel = self._import()
+        self.settings.providers.tts_provider = "edge_tts"
+        self.catalog.supports_rpc_method = lambda method: False
+
+        with (
+            patch.object(
+                self.catalog,
+                "list_voice_preferences",
+                side_effect=AssertionError("old Hub must not receive new RPC"),
+            ),
+            patch(
+                "storyforge.library_service.edge_female_voice_candidates",
+                return_value=(
+                    TTSVoiceOption("en-US-AnaNeural", "Ana", "dramatic"),
+                ),
+            ),
+        ):
+            result = self.service.get_voice_catalog(
+                novel["id"], actor_user_id="producer-1"
+            )
+
+        self.assertEqual(result["items"][0]["voice_id"], "en-US-AnaNeural")
+        self.assertFalse(result["items"][0]["favorite"])
+        self.assertFalse(result["items"][0]["hidden"])
+
+    def test_single_voice_preview_rejects_provider_identity_mismatch(self) -> None:
+        novel = self._import()
+        self.settings.providers.tts_provider = "edge_tts"
+
+        with patch.object(
+            self.service.voice_previews,
+            "generate",
+            side_effect=AssertionError("a mismatched provider must not synthesize"),
+        ):
+            with self.assertRaisesRegex(ValueError, "供应商"):
+                self.service.preview_voice(
+                    novel["id"],
+                    "local_kokoro",
+                    "af_sarah",
+                    narration_wpm=240,
+                )
+
+    def test_single_voice_preview_rejects_team_disabled_identity(self) -> None:
+        novel = self._import()
+        self.settings.providers.tts_provider = "edge_tts"
+        admin = self.catalog.save_user(
+            {"username": "preview-admin", "role": "admin"}
+        )
+        producer = self.catalog.save_user(
+            {"username": "preview-producer", "role": "producer"}
+        )
+        self.catalog.set_team_voice_disabled(
+            "edge_tts",
+            "en",
+            "en-US-AnaNeural",
+            disabled=True,
+            actor_user_id=admin["id"],
+        )
+
+        with patch.object(
+            self.service.voice_previews,
+            "generate",
+            side_effect=AssertionError("a disabled voice must not synthesize"),
+        ):
+            with self.assertRaisesRegex(ValueError, "团队停用"):
+                self.service.preview_voice(
+                    novel["id"],
+                    "edge_tts",
+                    "en-US-AnaNeural",
+                    actor_user_id=producer["id"],
+                )
 
     def test_record_projection_exposes_generic_video_fallback_marker(self) -> None:
         selection = {
@@ -172,6 +246,44 @@ class LibraryServiceTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
                 self.service._validated_production_settings({key: invalid})
 
+    def test_v106_custom_card_timeline_is_migrated_to_explicit_schema_one(self) -> None:
+        legacy_recipe = {
+            "intro_card_enabled": True,
+            "intro_card_start_seconds": 12.5,
+            "intro_card_duration_seconds": 4.0,
+            "code_card_enabled": True,
+            "code_card_start_seconds": 7.0,
+            # The supported v1.0.6 contract used zero only for the code card:
+            # it meant that the card stayed visible through the video end.
+            "code_card_duration_seconds": 0.0,
+        }
+
+        migrated = self.service._validated_production_settings(
+            legacy_recipe,
+            base=legacy_recipe,
+        )
+
+        self.assertEqual(migrated["card_timeline_schema_version"], 1)
+        self.assertEqual(migrated["intro_card_start_mode"], "seconds")
+        self.assertEqual(migrated["intro_card_start_value"], 12.5)
+        self.assertEqual(migrated["intro_card_display_mode"], "seconds")
+        self.assertEqual(migrated["intro_card_display_value"], 4.0)
+        self.assertEqual(migrated["code_card_start_mode"], "seconds")
+        self.assertEqual(migrated["code_card_start_value"], 7.0)
+        self.assertEqual(migrated["code_card_display_mode"], "body_end")
+        self.assertEqual(migrated["code_card_display_value"], 0.0)
+
+        positive_code_duration = {
+            **legacy_recipe,
+            "code_card_duration_seconds": 9.0,
+        }
+        migrated_positive = self.service._validated_production_settings(
+            positive_code_duration,
+            base=positive_code_duration,
+        )
+        self.assertEqual(migrated_positive["code_card_display_mode"], "seconds")
+        self.assertEqual(migrated_positive["code_card_display_value"], 9.0)
+
     def test_legacy_draft_materialization_never_inherits_live_card_timeline(self) -> None:
         novel = self._import()
         self.service.save_binding(
@@ -235,7 +347,7 @@ class LibraryServiceTests(unittest.TestCase):
         self.assertEqual(frozen["code_card_start_seconds"], 0.0)
         self.assertEqual(frozen["code_card_duration_seconds"], 0.0)
 
-    def test_employee_platform_copy_overrides_are_normalized_fingerprinted_and_frozen(self) -> None:
+    def test_platform_and_code_copy_is_server_authoritative_and_frozen(self) -> None:
         novel = self._import()
         self.service.save_binding(
             {"novel_id": novel["id"], "platform_id": self.platform.id}
@@ -254,16 +366,17 @@ class LibraryServiceTests(unittest.TestCase):
             "episode_ids": [novel["episodes"][0]["id"]],
             "target_video_count": 1,
             "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
-            "platform_search_text": "  Search\tthis exact\r\ncode: COPY01  ",
-            "platform_ending_text": "  Read the next chapter\n  in the app.  ",
+            "platform_search_text": "MALICIOUS SEARCH OVERRIDE",
+            "platform_ending_text": "MALICIOUS ENDING OVERRIDE",
+            "platform_ending_prefix": "Read the next chapter.",
+            "platform_ending_suffix": "New episodes every day.",
         }
         saved = self.service.save_draft(payload)["draft"]
         self.assertEqual(
-            saved["platform_search_text"], "Search this exact code: COPY01"
+            saved["platform_search_text"], "Search GoodNovel: COPY01"
         )
-        self.assertEqual(
-            saved["platform_ending_text"], "Read the next chapter in the app."
-        )
+        self.assertIn("Download GoodNovel and search code COPY01", saved["platform_ending_text"])
+        self.assertNotIn("MALICIOUS", saved["platform_ending_text"])
 
         with tempfile.TemporaryDirectory() as media:
             media_root = Path(media)
@@ -281,6 +394,8 @@ class LibraryServiceTests(unittest.TestCase):
             )
         self.assertEqual(jobs[0].platform_search_text, saved["platform_search_text"])
         self.assertEqual(jobs[0].platform_ending_text, saved["platform_ending_text"])
+        self.assertEqual(jobs[0].platform_copy_schema_version, 2)
+        self.assertEqual(jobs[0].platform_name_snapshot, "GoodNovel")
 
         first_fingerprint = saved["configuration_fingerprint"]
         self.assertRegex(first_fingerprint, r"^[0-9a-f]{64}$")
@@ -290,11 +405,104 @@ class LibraryServiceTests(unittest.TestCase):
                 "platform_search_text": "A different exact search line",
             }
         )["draft"]
-        self.assertNotEqual(
+        self.assertEqual(
             changed["configuration_fingerprint"], first_fingerprint
         )
 
-    def test_platform_copy_rejects_controls_and_length_and_empty_falls_back(self) -> None:
+    def test_hybrid_card_timeline_is_validated_and_frozen_on_draft(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "TIMELINE1",
+            }
+        )["promo_code"]
+        base = {
+            "novel_id": novel["id"],
+            "platform_id": self.platform.id,
+            "promo_code_id": promo["id"],
+            "episode_ids": [novel["episodes"][0]["id"]],
+            "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+        }
+        timeline = {
+            "card_timeline_schema_version": 1,
+            "intro_card_start_mode": "body_percent",
+            "intro_card_start_value": 20,
+            "intro_card_display_mode": "seconds",
+            "intro_card_display_value": 8,
+            "code_card_start_mode": "body_percent",
+            "code_card_start_value": 85,
+            "code_card_display_mode": "body_end",
+            "code_card_display_value": 0,
+        }
+        draft = self.service.save_draft(
+            {**base, "production_settings": timeline}
+        )["draft"]
+
+        for key, expected in timeline.items():
+            self.assertEqual(draft["production_settings"][key], expected)
+
+        for key, invalid in (
+            ("intro_card_start_value", float("nan")),
+            ("intro_card_display_value", float("inf")),
+            ("intro_card_display_value", 0),
+            ("code_card_start_value", 101),
+            ("code_card_display_value", -1),
+        ):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.service.save_draft(
+                    {
+                        **base,
+                        "production_settings": {**timeline, key: invalid},
+                    }
+                )
+
+        with self.assertRaisesRegex(
+            ValueError, "intro_card_start_value must be below 100 percent"
+        ):
+            self.service.save_draft(
+                {
+                    **base,
+                    "production_settings": {
+                        **timeline,
+                        "intro_card_enabled": True,
+                        "intro_card_start_value": 100,
+                    },
+                }
+            )
+
+        disabled_at_body_end = self.service.save_draft(
+            {
+                **base,
+                "production_settings": {
+                    **timeline,
+                    "intro_card_enabled": False,
+                    "intro_card_start_value": 100,
+                },
+            }
+        )["draft"]
+        self.assertEqual(
+            disabled_at_body_end["production_settings"]["intro_card_start_value"],
+            100,
+        )
+
+        with self.assertRaisesRegex(ValueError, "code_card_display_value"):
+            self.service.save_draft(
+                {
+                    **base,
+                    "production_settings": {
+                        **timeline,
+                        "code_card_display_mode": "seconds",
+                        "code_card_display_value": 0,
+                    },
+                }
+            )
+
+    def test_platform_copy_rejects_invalid_editable_context_and_ignores_full_override(self) -> None:
         novel = self._import()
         self.service.save_binding(
             {"novel_id": novel["id"], "platform_id": self.platform.id}
@@ -317,14 +525,335 @@ class LibraryServiceTests(unittest.TestCase):
         fallback = self.service.save_draft(
             {**base, "platform_search_text": " ", "platform_ending_text": ""}
         )["draft"]
-        self.assertEqual(fallback["platform_search_text"], "")
-        self.assertEqual(fallback["platform_ending_text"], "")
+        self.assertEqual(fallback["platform_search_text"], "Search GoodNovel: COPY02")
+        self.assertIn("GoodNovel", fallback["platform_ending_text"])
         for key, invalid in (
-            ("platform_search_text", "bad\x00copy"),
-            ("platform_ending_text", "x" * 1201),
+            ("platform_ending_prefix", "bad\x00copy"),
+            ("platform_ending_suffix", "x" * 1201),
         ):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
                 self.service.save_draft({**base, key: invalid})
+        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
+            self.service.save_draft(
+                {**base, "platform_ending_prefix": "Use GoodNovel first"}
+            )
+        for disguised_platform in ("GoodNovelApp", "AppGoodNovel"):
+            with self.subTest(disguised_platform=disguised_platform), self.assertRaisesRegex(
+                ValueError, "普通剧情衔接语"
+            ):
+                self.service.save_draft(
+                    {
+                        **base,
+                        "platform_ending_prefix": (
+                            f"Continue on {disguised_platform} tonight."
+                        ),
+                    }
+                )
+        for malicious in (
+            "Search FakeNovel with code 99999",
+            "Read FakeNovel with ALPHACODE tonight.",
+            "Download another app",
+            "请搜索假平台口令 ABC",
+            "Use {platform} with {code}",
+        ):
+            with self.subTest(malicious=malicious), self.assertRaisesRegex(
+                ValueError, "普通剧情衔接语"
+            ):
+                self.service.save_draft(
+                    {**base, "platform_ending_prefix": malicious}
+                )
+
+        other_platform = PlatformProfile(id="otherbooks", name="OtherBooks")
+        self.service.sync_platforms([self.platform, other_platform])
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": other_platform.id}
+        )
+        self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": other_platform.id,
+                "code": "ALPHA",
+            }
+        )
+        self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": other_platform.id,
+                "code": "A",
+            }
+        )
+        accepted = self.service.save_draft(
+            {**base, "platform_ending_prefix": "After the storm."}
+        )["draft"]
+        self.assertTrue(
+            accepted["platform_ending_text"].startswith("After the storm. ")
+        )
+        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
+            self.service.save_draft(
+                {**base, "platform_ending_prefix": "Read A tonight."}
+            )
+        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
+            self.service.save_draft(
+                {**base, "platform_ending_prefix": "Read alpha tonight."}
+            )
+        for disguised_code in ("ALPHAApp", "AppALPHA"):
+            with self.subTest(disguised_code=disguised_code), self.assertRaisesRegex(
+                ValueError, "普通剧情衔接语"
+            ):
+                self.service.save_draft(
+                    {
+                        **base,
+                        "platform_ending_prefix": (
+                            f"Continue with {disguised_code} tonight."
+                        ),
+                    }
+                )
+
+    def test_queue_revalidates_live_code_and_platform_templates(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "QUEUECOPY1",
+            }
+        )["promo_code"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"queue-copy-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        self.service.update_promo_code(
+            {
+                "novel_id": novel["id"],
+                "promo_code_id": promo["id"],
+                "active": False,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "口令已删除或停用"):
+            self.service.build_render_jobs(
+                {"draft_id": draft["id"], **folders, "confirm_language": True}
+            )
+
+        self.service.update_promo_code(
+            {
+                "novel_id": novel["id"],
+                "promo_code_id": promo["id"],
+                "active": True,
+            }
+        )
+        self.catalog.save_platform(
+            {
+                "id": self.platform.id,
+                "name": self.platform.name,
+                "search_template": "Search {platform}",
+                "ending_template": "Download {platform} and search code {code}.",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "必须同时包含"):
+            self.service.build_render_jobs(
+                {"draft_id": draft["id"], **folders, "confirm_language": True}
+            )
+
+    def test_queue_freezes_current_promo_code_in_every_job_identity_field(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        first = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "OLDPROMO1",
+            }
+        )["promo_code"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": first["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        # Simulate an authoritative catalog correction that preserves the row
+        # identity. Queue materialization must never reuse the stale draft text.
+        with self.catalog._write_connection() as connection:
+            connection.execute(
+                "UPDATE promo_codes SET code = ?, normalized_code = ? WHERE id = ?",
+                ("NEWPROMO2", "NEWPROMO2", first["id"]),
+            )
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"current-code-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        _draft, _platform, jobs = self.service.build_render_jobs(
+            {"draft_id": draft["id"], **folders, "confirm_language": True}
+        )
+
+        self.assertEqual(jobs[0].code, "NEWPROMO2")
+        self.assertEqual(jobs[0].promo_code_snapshot, "NEWPROMO2")
+        self.assertIn("NEWPROMO2", jobs[0].platform_search_text)
+        self.assertNotIn("OLDPROMO1", Path(jobs[0].source_file).name)
+
+    def test_queue_rejects_voice_hidden_after_draft_was_saved(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "HIDDENVOICE1",
+            }
+        )["promo_code"]
+        self.catalog.save_user({"username": "voice-admin", "role": "admin"})
+        actor = self.catalog.save_user(
+            {"username": "producer-hidden-voice", "role": "producer"}
+        )["id"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "created_by_user_id": actor,
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        self.catalog.save_voice_preference(
+            "local_kokoro",
+            "en",
+            "af_bella",
+            hidden=True,
+            actor_user_id=actor,
+        )
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"hidden-voice-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        with self.assertRaisesRegex(ValueError, "重新试听"):
+            self.service.build_render_jobs(
+                {"draft_id": draft["id"], **folders, "confirm_language": True}
+            )
+
+    def test_queue_rejects_team_disabled_voice_for_ownerless_legacy_draft(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "TEAMVOICE1",
+            }
+        )["promo_code"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        self.assertIsNone(self.catalog.get_draft(draft["id"])["created_by_user_id"])
+        admin = self.catalog.save_user(
+            {"username": "ownerless-voice-admin", "role": "admin"}
+        )
+        self.catalog.set_team_voice_disabled(
+            "local_kokoro",
+            "en",
+            "af_bella",
+            disabled=True,
+            actor_user_id=admin["id"],
+        )
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"ownerless-team-disabled-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        with self.assertRaisesRegex(ValueError, "团队停用"):
+            self.service.build_render_jobs(
+                {"draft_id": draft["id"], **folders, "confirm_language": True}
+            )
+
+    def test_queue_does_not_apply_another_users_personal_hidden_voice(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "PRIVATEVOICE1",
+            }
+        )["promo_code"]
+        self.catalog.save_user(
+            {"username": "voice-personal-admin", "role": "admin"}
+        )
+        owner = self.catalog.save_user(
+            {"username": "voice-draft-owner", "role": "producer"}
+        )
+        colleague = self.catalog.save_user(
+            {"username": "voice-draft-colleague", "role": "producer"}
+        )
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "created_by_user_id": owner["id"],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        self.catalog.save_voice_preference(
+            "local_kokoro",
+            "en",
+            "af_bella",
+            hidden=True,
+            actor_user_id=colleague["id"],
+        )
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"other-user-hidden-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        _saved, _platform_id, jobs = self.service.build_render_jobs(
+            {"draft_id": draft["id"], **folders, "confirm_language": True}
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].locked_voice_id, "af_bella")
+
+        with self.assertRaisesRegex(ValueError, "当前账号隐藏"):
+            self.service.build_render_jobs(
+                {"draft_id": draft["id"], **folders, "confirm_language": True},
+                actor_user_id=colleague["id"],
+            )
 
     def test_retired_subtitle_presets_are_normalized_when_old_drafts_are_opened(self) -> None:
         projected = self.service._ui_draft(
@@ -952,7 +1481,7 @@ class LibraryServiceTests(unittest.TestCase):
         ]
         self.catalog.save_novel({"id": novel["id"], "metadata": metadata})
 
-        with self.assertRaisesRegex(ValueError, "3 个试听候选"):
+        with self.assertRaisesRegex(ValueError, "真实可用音色库"):
             self.service.lock_voice(
                 novel["id"],
                 {"provider": "local_kokoro", "voice_id": "af_unknown"},
@@ -1171,7 +1700,209 @@ class LibraryServiceTests(unittest.TestCase):
         iterator.close()
         self.assertEqual(list((self.root / "data" / "job-spool").glob("*.jsonl")), [])
 
-    def test_build_migrates_retired_legacy_voice_before_queue_and_records_it(self) -> None:
+    def test_queue_rejects_edge_voice_that_disappeared_without_synthesis_or_mutation(
+        self,
+    ) -> None:
+        novel = self._import()
+        self.settings.providers.tts_provider = "edge_tts"
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "EDGEGONE1",
+            }
+        )["promo_code"]
+        ana = TTSVoiceOption("en-US-AnaNeural", "Ana", "dramatic")
+        aria = TTSVoiceOption("en-US-AriaNeural", "Aria", "dramatic")
+        with patch(
+            "storyforge.library_service.available_female_voice_candidates",
+            return_value=(ana,),
+        ):
+            draft = self.service.save_draft(
+                {
+                    "novel_id": novel["id"],
+                    "platform_id": self.platform.id,
+                    "promo_code_id": promo["id"],
+                    "episode_ids": [novel["episodes"][0]["id"]],
+                    "voice": {
+                        "provider": "edge_tts",
+                        "voice_id": ana.voice_id,
+                        "label": ana.label,
+                        "profile": ana.profile,
+                    },
+                }
+            )["draft"]
+        original_voice = dict(draft["voice"])
+        folders: dict[str, str] = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"edge-gone-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        with (
+            patch(
+                "storyforge.library_service.available_female_voice_candidates",
+                return_value=(aria,),
+            ),
+            patch.object(
+                self.service,
+                "generate_voice_candidates",
+                return_value={"candidates": []},
+            ) as generate,
+        ):
+            with self.assertRaisesRegex(ValueError, "重新选择"):
+                self.service.build_render_jobs(
+                    {"draft_id": draft["id"], **folders, "confirm_language": True}
+                )
+
+        generate.assert_not_called()
+        stored = self.catalog.get_draft(draft["id"])
+        self.assertEqual(stored["metadata"]["voice"], original_voice)
+
+    def test_legacy_candidate_rows_cannot_authorize_same_profile_voice_replacement(
+        self,
+    ) -> None:
+        novel = self._import()
+        self.settings.providers.tts_provider = "edge_tts"
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "EDGESTALE1",
+            }
+        )["promo_code"]
+        stored_novel = self.catalog.get_novel(novel["id"])
+        metadata = dict(stored_novel.get("metadata") or {})
+        metadata["voice_candidates"] = [
+            {
+                "provider": "edge_tts",
+                "voice_id": "en-US-AnaNeural",
+                "label": "Ana",
+                "profile": "dramatic",
+            },
+            {
+                "provider": "edge_tts",
+                "voice_id": "en-US-AriaNeural",
+                "label": "Aria",
+                "profile": "dramatic",
+            },
+        ]
+        self.catalog.save_novel({"id": novel["id"], "metadata": metadata})
+        aria = TTSVoiceOption("en-US-AriaNeural", "Aria", "dramatic")
+        with patch(
+            "storyforge.library_service.available_female_voice_candidates",
+            return_value=(aria,),
+        ):
+            draft = self.service.save_draft(
+                {
+                    "novel_id": novel["id"],
+                    "platform_id": self.platform.id,
+                    "promo_code_id": promo["id"],
+                    "episode_ids": [novel["episodes"][0]["id"]],
+                    "voice": {
+                        "provider": "edge_tts",
+                        "voice_id": "en-US-AnaNeural",
+                        "label": "Ana",
+                        "profile": "dramatic",
+                    },
+                }
+            )["draft"]
+        original_voice = dict(draft["voice"])
+        folders: dict[str, str] = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"edge-stale-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+
+        with (
+            patch(
+                "storyforge.library_service.available_female_voice_candidates",
+                return_value=(aria,),
+            ),
+            patch.object(self.service, "generate_voice_candidates") as generate,
+        ):
+            with self.assertRaisesRegex(ValueError, "重新选择"):
+                self.service.build_render_jobs(
+                    {"draft_id": draft["id"], **folders, "confirm_language": True}
+                )
+
+        generate.assert_not_called()
+        stored = self.catalog.get_draft(draft["id"])
+        self.assertEqual(stored["metadata"]["voice"], original_voice)
+
+    def test_preflight_normalizes_kokoro_provider_alias_without_changing_voice_id(
+        self,
+    ) -> None:
+        novel = self.catalog.get_novel(self._import()["id"])
+        draft_metadata = {
+            "voice": {
+                "provider": "kokoro",
+                "voice_id": "af_bella",
+                "label": "Bella",
+                "profile": "warm",
+            }
+        }
+        bella = TTSVoiceOption("af_bella", "Bella", "warm")
+
+        with (
+            patch(
+                "storyforge.library_service.ensure_kokoro_language_available"
+            ),
+            patch(
+                "storyforge.library_service.available_female_voice_candidates",
+                return_value=(bella,),
+            ),
+            patch.object(self.service, "generate_voice_candidates") as generate,
+        ):
+            provider, voice_id, resolved = self.service._preflight_draft_voice(
+                novel,
+                draft_metadata,
+                language="en",
+            )
+
+        generate.assert_not_called()
+        self.assertEqual(provider, "local_kokoro")
+        self.assertEqual(voice_id, "af_bella")
+        self.assertEqual(resolved["voice_id"], "af_bella")
+        self.assertEqual(draft_metadata["voice"]["voice_id"], "af_bella")
+
+    def test_preflight_rejects_real_voice_from_a_different_configured_provider(
+        self,
+    ) -> None:
+        novel = self.catalog.get_novel(self._import()["id"])
+        self.settings.providers.tts_provider = "local_kokoro"
+        draft_metadata = {
+            "voice": {
+                "provider": "edge_tts",
+                "voice_id": "en-US-AnaNeural",
+                "label": "Ana",
+                "profile": "dramatic",
+            }
+        }
+        with (
+            patch(
+                "storyforge.library_service.available_female_voice_candidates"
+            ) as catalog,
+            patch.object(self.service, "generate_voice_candidates") as generate,
+        ):
+            with self.assertRaisesRegex(ValueError, "不匹配"):
+                self.service._preflight_draft_voice(
+                    novel,
+                    draft_metadata,
+                    language="en",
+                )
+
+        catalog.assert_not_called()
+        generate.assert_not_called()
+        self.assertEqual(draft_metadata["voice"]["voice_id"], "en-US-AnaNeural")
+
+    def test_build_rejects_retired_legacy_voice_without_migrating_draft(self) -> None:
         novel = self._import()
         self.service.save_binding(
             {"novel_id": novel["id"], "platform_id": self.platform.id}
@@ -1232,27 +1963,22 @@ class LibraryServiceTests(unittest.TestCase):
         output = self.root / "legacy-output"
         video.mkdir()
         music.mkdir()
-        saved, _platform_id, jobs = self.service.build_render_jobs(
-            {
-                "draft_id": draft["id"],
-                "video_folder": str(video),
-                "music_folder": str(music),
-                "output_folder": str(output),
-            }
-        )
+        with self.assertRaisesRegex(ValueError, "重新选择"):
+            self.service.build_render_jobs(
+                {
+                    "draft_id": draft["id"],
+                    "video_folder": str(video),
+                    "music_folder": str(music),
+                    "output_folder": str(output),
+                }
+            )
 
-        self.assertTrue(jobs)
-        self.assertTrue(all(job.locked_voice_id == "af_bella" for job in jobs))
-        self.assertTrue(
-            all(job.locked_voice_provider == "local_kokoro" for job in jobs)
+        stored_draft = self.catalog.get_draft(draft["id"])
+        self.assertEqual(
+            stored_draft["metadata"]["voice"]["voice_id"],
+            "af_retired",
         )
-        self.assertEqual(saved["metadata"]["voice"]["voice_id"], "af_bella")
-        migration = saved["metadata"]["voice_migrations"][-1]
-        self.assertEqual(migration["from"]["voice_id"], "af_retired")
-        self.assertEqual(migration["to"]["voice_id"], "af_bella")
-        self.assertEqual(migration["reason"], "legacy_voice_replaced_same_profile")
-        # Candidate rebuilding during render preflight is draft-local.  It
-        # must not silently replace the shared novel shortlist.
+        self.assertNotIn("voice_migrations", stored_draft["metadata"])
         shared_metadata = dict(
             self.catalog.get_novel(novel["id"]).get("metadata") or {}
         )
@@ -1261,7 +1987,7 @@ class LibraryServiceTests(unittest.TestCase):
             "af_retired",
         )
 
-    def test_draft_voice_preflight_does_not_overwrite_concurrent_shared_lock(self) -> None:
+    def test_rejected_preflight_never_runs_candidate_side_effect(self) -> None:
         novel = self._import()
         self.service.save_binding(
             {"novel_id": novel["id"], "platform_id": self.platform.id}
@@ -1349,34 +2075,33 @@ class LibraryServiceTests(unittest.TestCase):
         output = self.root / "race-output"
         video.mkdir()
         music.mkdir()
-        saved, _platform_id, jobs = self.service.build_render_jobs(
-            {
-                "draft_id": draft["id"],
-                "video_folder": str(video),
-                "music_folder": str(music),
-                "output_folder": str(output),
-            }
-        )
+        with self.assertRaisesRegex(ValueError, "重新选择"):
+            self.service.build_render_jobs(
+                {
+                    "draft_id": draft["id"],
+                    "video_folder": str(video),
+                    "music_folder": str(music),
+                    "output_folder": str(output),
+                }
+            )
 
-        self.assertTrue(jobs)
-        self.assertTrue(all(job.locked_voice_id == "af_bella" for job in jobs))
-        self.assertEqual(saved["metadata"]["voice"]["voice_id"], "af_bella")
+        stored_draft = self.catalog.get_draft(draft["id"])
         self.assertEqual(
-            saved["metadata"]["voice_migrations"][-1]["to"]["voice_id"],
-            "af_bella",
+            stored_draft["metadata"]["voice"]["voice_id"],
+            "af_retired",
         )
         shared_metadata = dict(
             self.catalog.get_novel(novel["id"]).get("metadata") or {}
         )
-        self.assertEqual(shared_metadata["locked_voice_id"], "af_sarah")
-        self.assertEqual(shared_metadata["locked_voice_profile"], "confident")
+        self.assertEqual(shared_metadata["locked_voice_id"], "af_retired")
+        self.assertEqual(shared_metadata["locked_voice_profile"], "warm")
         self.assertEqual(
             shared_metadata["voice_candidates"][0]["voice_id"],
-            "af_sarah",
+            "af_retired",
         )
         self.assertEqual(
             [item["voice_id"] for item in shared_metadata["voice_lock_history"]],
-            ["admin-change"],
+            ["before-render"],
         )
 
     def test_non_contiguous_selection_uses_true_previous_episode_and_story_order(self) -> None:

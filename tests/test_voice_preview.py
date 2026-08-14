@@ -21,6 +21,10 @@ from storyforge.services.voice_preview import (
     VoicePreviewService,
     audition_excerpt,
 )
+from tests.voice_fixtures import (
+    install_verified_kokoro_voice_catalog,
+    verified_voice_candidates,
+)
 
 
 def _write_wav(path: Path, seconds: float = 0.05) -> None:
@@ -77,6 +81,31 @@ class _TimedFakeProvider(_FakeProvider):
 
 
 class VoicePreviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        install_verified_kokoro_voice_catalog(
+            self,
+            "storyforge.services.voice_preview.available_female_voice_candidates",
+        )
+
+    def test_verified_voice_fixture_does_not_bypass_external_kokoro_contract(self) -> None:
+        with patch(
+            "tests.voice_fixtures.available_female_voice_candidates",
+            return_value=(),
+        ) as production_availability:
+            result = verified_voice_candidates(
+                "local_kokoro",
+                "en",
+                endpoint="http://127.0.0.1:8880",
+            )
+
+        self.assertEqual(result, ())
+        production_availability.assert_called_once_with(
+            "local_kokoro",
+            "en",
+            endpoint="http://127.0.0.1:8880",
+            command="",
+        )
+
     def test_generated_candidate_schema_is_accepted_by_hub_catalog(self) -> None:
         generated_fields = {item.name for item in fields(VoiceCandidate)}
 

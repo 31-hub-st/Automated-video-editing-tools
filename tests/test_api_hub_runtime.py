@@ -20,6 +20,7 @@ from storyforge.hub import HubAuthenticationError, HubRemoteError
 from storyforge.models import AppSettings, JobStatus, PlatformProfile, RenderJob
 from storyforge.pipeline import PipelineRunner, job_workspace_directory
 from storyforge.providers.text import TextRequest, TextResult
+from tests.voice_fixtures import install_verified_kokoro_voice_catalog
 
 
 def _free_port() -> int:
@@ -1467,6 +1468,10 @@ class ApiHubRuntimeTests(unittest.TestCase):
         self.assertEqual([item[0] for item in outcomes].count("blocked"), 1)
 
     def test_producer_can_share_and_lock_voice_without_editing_novel(self) -> None:
+        install_verified_kokoro_voice_catalog(
+            self,
+            "storyforge.library_service.available_female_voice_candidates",
+        )
         port = _free_port()
         host_repository = SettingsRepository(self.root / "voice-host")
         host_settings = AppSettings()

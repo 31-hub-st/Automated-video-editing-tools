@@ -14,10 +14,15 @@ from storyforge.providers.tts import TTSVoiceOption
 from storyforge.providers.text import TextResult
 from storyforge.services.subtitles import _fit_card_lines
 from storyforge.services.text_processing import analyze_manuscript
+from tests.voice_fixtures import install_verified_kokoro_voice_catalog
 
 
 class LibraryServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        install_verified_kokoro_voice_catalog(
+            self,
+            "storyforge.library_service.available_female_voice_candidates",
+        )
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.settings = AppSettings()
@@ -368,14 +373,19 @@ class LibraryServiceTests(unittest.TestCase):
             "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
             "platform_search_text": "MALICIOUS SEARCH OVERRIDE",
             "platform_ending_text": "MALICIOUS ENDING OVERRIDE",
-            "platform_ending_prefix": "Read the next chapter.",
-            "platform_ending_suffix": "New episodes every day.",
+            "platform_search_template": "Find {platform} with {code} tonight.",
+            "platform_ending_template": (
+                "Read the next chapter on {platform} with {code}."
+            ),
         }
         saved = self.service.save_draft(payload)["draft"]
         self.assertEqual(
-            saved["platform_search_text"], "Search GoodNovel: COPY01"
+            saved["platform_search_text"], "Find GoodNovel with COPY01 tonight."
         )
-        self.assertIn("Download GoodNovel and search code COPY01", saved["platform_ending_text"])
+        self.assertEqual(
+            saved["platform_ending_text"],
+            "Read the next chapter on GoodNovel with COPY01.",
+        )
         self.assertNotIn("MALICIOUS", saved["platform_ending_text"])
 
         with tempfile.TemporaryDirectory() as media:
@@ -394,20 +404,95 @@ class LibraryServiceTests(unittest.TestCase):
             )
         self.assertEqual(jobs[0].platform_search_text, saved["platform_search_text"])
         self.assertEqual(jobs[0].platform_ending_text, saved["platform_ending_text"])
-        self.assertEqual(jobs[0].platform_copy_schema_version, 2)
+        self.assertEqual(jobs[0].platform_copy_schema_version, 3)
         self.assertEqual(jobs[0].platform_name_snapshot, "GoodNovel")
+        self.assertEqual(
+            jobs[0].platform_search_template_snapshot,
+            "Find {platform} with {code} tonight.",
+        )
 
         first_fingerprint = saved["configuration_fingerprint"]
         self.assertRegex(first_fingerprint, r"^[0-9a-f]{64}$")
         changed = self.service.save_draft(
             {
                 **payload,
-                "platform_search_text": "A different exact search line",
+                "platform_search_template": "Open {platform}; enter {code}.",
             }
         )["draft"]
-        self.assertEqual(
+        self.assertNotEqual(
             changed["configuration_fingerprint"], first_fingerprint
         )
+
+    def test_batch_platform_templates_are_editable_with_locked_authoritative_tokens(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "LOCKED77",
+            }
+        )["promo_code"]
+        draft = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+                "platform_search_template": "Tonight on {platform}, enter {code}.",
+                "platform_ending_template": (
+                    "The story continues on {platform}; use {code} after the finale."
+                ),
+            }
+        )["draft"]
+
+        self.assertEqual(
+            draft["platform_search_template"],
+            "Tonight on {platform}, enter {code}.",
+        )
+        self.assertEqual(
+            draft["platform_ending_template"],
+            "The story continues on {platform}; use {code} after the finale.",
+        )
+        self.assertEqual(
+            draft["platform_search_text"],
+            "Tonight on GoodNovel, enter LOCKED77.",
+        )
+        self.assertEqual(
+            draft["platform_ending_text"],
+            "The story continues on GoodNovel; use LOCKED77 after the finale.",
+        )
+        self.assertEqual(draft["platform_copy_schema_version"], 3)
+
+        for field, invalid in (
+            ("platform_search_template", "Search {platform} without a code"),
+            ("platform_search_template", "{platform}: {code} / {code}"),
+            ("platform_ending_template", "Open {platform} with {code} and {name}"),
+            ("platform_ending_template", "Open {Platform} with {code}"),
+        ):
+            with self.subTest(field=field, invalid=invalid), self.assertRaisesRegex(
+                ValueError, r"\{platform\}.*\{code\}"
+            ):
+                self.service.save_draft(
+                    {
+                        "novel_id": novel["id"],
+                        "platform_id": self.platform.id,
+                        "promo_code_id": promo["id"],
+                        "episode_ids": [novel["episodes"][0]["id"]],
+                        "voice": {
+                            "provider": "local_kokoro",
+                            "voice_id": "af_bella",
+                        },
+                        "platform_search_template": "Search {platform}: {code}",
+                        "platform_ending_template": (
+                            "Download {platform} with {code} to continue."
+                        ),
+                        field: invalid,
+                    }
+                )
 
     def test_hybrid_card_timeline_is_validated_and_frozen_on_draft(self) -> None:
         novel = self._import()
@@ -502,7 +587,7 @@ class LibraryServiceTests(unittest.TestCase):
                 }
             )
 
-    def test_platform_copy_rejects_invalid_editable_context_and_ignores_full_override(self) -> None:
+    def test_platform_copy_uses_defaults_and_allows_free_text_around_locked_tokens(self) -> None:
         novel = self._import()
         self.service.save_binding(
             {"novel_id": novel["id"], "platform_id": self.platform.id}
@@ -527,87 +612,103 @@ class LibraryServiceTests(unittest.TestCase):
         )["draft"]
         self.assertEqual(fallback["platform_search_text"], "Search GoodNovel: COPY02")
         self.assertIn("GoodNovel", fallback["platform_ending_text"])
+        self.assertEqual(
+            fallback["platform_search_template"], "Search {platform}: {code}"
+        )
         for key, invalid in (
-            ("platform_ending_prefix", "bad\x00copy"),
-            ("platform_ending_suffix", "x" * 1201),
+            ("platform_search_template", "bad\x00{platform} {code}"),
+            ("platform_ending_template", "x" * 1201 + " {platform} {code}"),
         ):
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+            with self.subTest(key=key), self.assertRaises(ValueError):
                 self.service.save_draft({**base, key: invalid})
-        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
-            self.service.save_draft(
-                {**base, "platform_ending_prefix": "Use GoodNovel first"}
-            )
-        for disguised_platform in ("GoodNovelApp", "AppGoodNovel"):
-            with self.subTest(disguised_platform=disguised_platform), self.assertRaisesRegex(
-                ValueError, "普通剧情衔接语"
-            ):
-                self.service.save_draft(
-                    {
-                        **base,
-                        "platform_ending_prefix": (
-                            f"Continue on {disguised_platform} tonight."
-                        ),
-                    }
-                )
-        for malicious in (
-            "Search FakeNovel with code 99999",
-            "Read FakeNovel with ALPHACODE tonight.",
-            "Download another app",
-            "请搜索假平台口令 ABC",
-            "Use {platform} with {code}",
-        ):
-            with self.subTest(malicious=malicious), self.assertRaisesRegex(
-                ValueError, "普通剧情衔接语"
-            ):
-                self.service.save_draft(
-                    {**base, "platform_ending_prefix": malicious}
-                )
-
-        other_platform = PlatformProfile(id="otherbooks", name="OtherBooks")
-        self.service.sync_platforms([self.platform, other_platform])
-        self.service.save_binding(
-            {"novel_id": novel["id"], "platform_id": other_platform.id}
-        )
-        self.service.add_promo_code(
+        custom = self.service.save_draft(
             {
-                "novel_id": novel["id"],
-                "platform_id": other_platform.id,
-                "code": "ALPHA",
+                **base,
+                "platform_search_template": (
+                    "Search anywhere you like: {platform} / {code} / episode 99."
+                ),
+                "platform_ending_template": (
+                    "自由文案 123 FakeNovel ALPHACODE；真实入口 {platform}，口令 {code}。"
+                ),
             }
-        )
-        self.service.add_promo_code(
-            {
-                "novel_id": novel["id"],
-                "platform_id": other_platform.id,
-                "code": "A",
-            }
-        )
-        accepted = self.service.save_draft(
-            {**base, "platform_ending_prefix": "After the storm."}
         )["draft"]
-        self.assertTrue(
-            accepted["platform_ending_text"].startswith("After the storm. ")
+        self.assertIn("episode 99", custom["platform_search_text"])
+        self.assertIn("真实入口 GoodNovel，口令 COPY02", custom["platform_ending_text"])
+
+        self.catalog.save_platform(
+            {
+                "id": self.platform.id,
+                "name": "Book{code}",
+                "search_template": "Search {platform}: {code}",
+                "ending_template": (
+                    "Download {platform} and search code {code} to continue reading."
+                ),
+            }
         )
-        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
-            self.service.save_draft(
-                {**base, "platform_ending_prefix": "Read A tonight."}
-            )
-        with self.assertRaisesRegex(ValueError, "普通剧情衔接语"):
-            self.service.save_draft(
-                {**base, "platform_ending_prefix": "Read alpha tonight."}
-            )
-        for disguised_code in ("ALPHAApp", "AppALPHA"):
-            with self.subTest(disguised_code=disguised_code), self.assertRaisesRegex(
-                ValueError, "普通剧情衔接语"
-            ):
-                self.service.save_draft(
-                    {
-                        **base,
-                        "platform_ending_prefix": (
-                            f"Continue with {disguised_code} tonight."
-                        ),
-                    }
-                )
+        literal_token_in_name = self.service.save_draft(base)["draft"]
+        self.assertEqual(
+            literal_token_in_name["platform_search_text"],
+            "Search Book{code}: COPY02",
+        )
+
+    def test_legacy_prefix_suffix_draft_projects_as_one_editable_template(self) -> None:
+        novel = self._import()
+        self.service.save_binding(
+            {"novel_id": novel["id"], "platform_id": self.platform.id}
+        )
+        promo = self.service.add_promo_code(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "code": "LEGACY77",
+            }
+        )["promo_code"]
+        saved = self.service.save_draft(
+            {
+                "novel_id": novel["id"],
+                "platform_id": self.platform.id,
+                "promo_code_id": promo["id"],
+                "episode_ids": [novel["episodes"][0]["id"]],
+                "voice": {"provider": "local_kokoro", "voice_id": "af_bella"},
+            }
+        )["draft"]
+        stored = self.catalog.get_draft(saved["id"])
+        metadata = dict(stored["metadata"])
+        metadata["platform_copy_schema_version"] = 2
+        metadata.pop("platform_search_template", None)
+        metadata.pop("platform_ending_template", None)
+        metadata["platform_ending_prefix"] = "Previously on StoryForge."
+        metadata["platform_ending_suffix"] = "New chapters daily."
+        self.catalog.save_draft({"id": saved["id"], "metadata": metadata})
+
+        projected = self.service.novel_for_ui(novel["id"])["draft"]
+        self.assertEqual(
+            projected["platform_ending_template"],
+            "Previously on StoryForge. Download {platform} and search code {code} "
+            "to continue reading. New chapters daily.",
+        )
+        self.catalog.save_platform(
+            {
+                "id": self.platform.id,
+                "name": self.platform.name,
+                "search_template": "New default {platform}: {code}",
+                "ending_template": "New ending for {platform}: {code}",
+            }
+        )
+        folders = {}
+        for name in ("video_folder", "music_folder", "output_folder"):
+            path = self.root / f"legacy-copy-{name}"
+            path.mkdir()
+            folders[name] = str(path)
+        _draft, _platform, jobs = self.service.build_render_jobs(
+            {"draft_id": saved["id"], **folders, "confirm_language": True}
+        )
+        self.assertEqual(
+            jobs[0].platform_ending_text,
+            "Previously on StoryForge. Download GoodNovel and search code LEGACY77 "
+            "to continue reading. New chapters daily.",
+        )
+        self.assertEqual(jobs[0].platform_copy_schema_version, 3)
 
     def test_queue_revalidates_live_code_and_platform_templates(self) -> None:
         novel = self._import()
@@ -663,7 +764,19 @@ class LibraryServiceTests(unittest.TestCase):
                 "ending_template": "Download {platform} and search code {code}.",
             }
         )
-        with self.assertRaisesRegex(ValueError, "必须同时包含"):
+        _draft, _platform, jobs = self.service.build_render_jobs(
+            {"draft_id": draft["id"], **folders, "confirm_language": True}
+        )
+        self.assertEqual(
+            jobs[0].platform_search_text,
+            "Search GoodNovel: QUEUECOPY1",
+        )
+
+        stored = self.catalog.get_draft(draft["id"])
+        metadata = dict(stored["metadata"])
+        metadata["platform_search_template"] = "Search {platform}"
+        self.catalog.save_draft({"id": draft["id"], "metadata": metadata})
+        with self.assertRaisesRegex(ValueError, "各保留一次"):
             self.service.build_render_jobs(
                 {"draft_id": draft["id"], **folders, "confirm_language": True}
             )

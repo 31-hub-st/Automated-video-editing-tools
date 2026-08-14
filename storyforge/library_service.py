@@ -670,8 +670,10 @@ class LibraryService:
                 "source_narration_audio": "",
                 "platform_search_text": "",
                 "platform_ending_text": "",
-                "platform_copy_schema_version": 2,
+                "platform_copy_schema_version": 3,
                 "platform_name_snapshot": "",
+                "platform_search_template": "",
+                "platform_ending_template": "",
                 "platform_authoritative_ending_text": "",
                 "platform_ending_prefix": "",
                 "platform_ending_suffix": "",
@@ -697,6 +699,29 @@ class LibraryService:
             if isinstance(metadata.get("voice"), Mapping)
             else {}
         )
+        platform_copy_schema_version = int(
+            metadata.get("platform_copy_schema_version") or 0
+        )
+        platform_search_template = str(
+            metadata.get("platform_search_template")
+            or metadata.get("platform_search_template_snapshot")
+            or ""
+        ).strip()
+        platform_ending_template = str(
+            metadata.get("platform_ending_template")
+            or metadata.get("platform_ending_template_snapshot")
+            or ""
+        ).strip()
+        if platform_copy_schema_version < 3 and platform_ending_template:
+            platform_ending_template = " ".join(
+                part
+                for part in (
+                    str(metadata.get("platform_ending_prefix") or "").strip(),
+                    platform_ending_template,
+                    str(metadata.get("platform_ending_suffix") or "").strip(),
+                )
+                if part
+            )
         return {
             "id": str(value.get("id") or ""),
             "platform_id": str(metadata.get("platform_id") or ""),
@@ -722,12 +747,12 @@ class LibraryService:
             ),
             "platform_search_text": str(metadata.get("platform_search_text") or ""),
             "platform_ending_text": str(metadata.get("platform_ending_text") or ""),
-            "platform_copy_schema_version": int(
-                metadata.get("platform_copy_schema_version") or 0
-            ),
+            "platform_copy_schema_version": platform_copy_schema_version,
             "platform_name_snapshot": str(
                 metadata.get("platform_name_snapshot") or ""
             ),
+            "platform_search_template": platform_search_template,
+            "platform_ending_template": platform_ending_template,
             "platform_authoritative_ending_text": str(
                 metadata.get("platform_authoritative_ending_text") or ""
             ),
@@ -1562,10 +1587,12 @@ class LibraryService:
         *,
         binding: Mapping[str, Any] | None = None,
         known_promo_codes: object = (),
+        search_template: object | None = None,
+        ending_template: object | None = None,
         ending_prefix: object = "",
         ending_suffix: object = "",
     ) -> dict[str, str | int]:
-        """Render immutable platform/code tokens from the shared library only."""
+        """Render employee-editable copy with server-owned identity tokens."""
 
         platforms = self.catalog.list_platforms(include_archived=True).get(
             "items", []
@@ -1581,109 +1608,80 @@ class LibraryService:
         if raw is None or bool(raw.get("archived")):
             raise ValueError("所选平台已删除或停用，请返回小说库重新绑定。")
         profile = PlatformProfile.from_dict(dict(raw))
-        search_template = str(profile.search_template or "")
-        ending_template = str(profile.ending_template or "")
-        for name, template in (
-            ("口令卡模板", search_template),
-            ("结尾引导模板", ending_template),
-        ):
-            if "{platform}" not in template or "{code}" not in template:
-                raise ValueError(
-                    f"{name}必须同时包含 {{platform}} 和 {{code}}，请由管理员在平台管理中修复。"
+        legacy_prefix = normalize_platform_copy(
+            ending_prefix, "platform_ending_prefix"
+        )
+        legacy_suffix = normalize_platform_copy(
+            ending_suffix, "platform_ending_suffix"
+        )
+        raw_search_template = (
+            profile.search_template if search_template is None else search_template
+        )
+        raw_ending_template = ending_template
+        if raw_ending_template is None:
+            raw_ending_template = " ".join(
+                part
+                for part in (
+                    legacy_prefix,
+                    str(profile.ending_template or "").strip(),
+                    legacy_suffix,
                 )
-        try:
-            search_text = normalize_platform_copy(
-                profile.render_search(promo_code), "platform_search_text"
+                if part
             )
-            authoritative_ending = normalize_platform_copy(
-                profile.render_ending(promo_code), "platform_ending_text"
+
+        def render_batch_template(
+            raw_template: object,
+            *,
+            label: str,
+            field_name: str,
+        ) -> tuple[str, str]:
+            template = normalize_platform_copy(raw_template, field_name)
+            without_tokens = template.replace("{platform}", "").replace(
+                "{code}", ""
             )
-        except (KeyError, ValueError, IndexError) as error:
-            raise ValueError("平台口令模板解析失败，请由管理员在平台管理中修复。") from error
+            if (
+                template.count("{platform}") != 1
+                or template.count("{code}") != 1
+                or "{" in without_tokens
+                or "}" in without_tokens
+            ):
+                raise ValueError(
+                    f"{label}必须把 {{platform}} 和 {{code}} 各保留一次，且不能添加其他变量。"
+                )
+            rendered = re.sub(
+                r"\{(platform|code)\}",
+                lambda match: profile.name
+                if match.group(1) == "platform"
+                else promo_code,
+                template,
+            )
+            return template, normalize_platform_copy(rendered, field_name)
+
+        search_template_value, search_text = render_batch_template(
+            raw_search_template,
+            label="平台口令卡模板",
+            field_name="platform_search_text",
+        )
+        ending_template_value, authoritative_ending = render_batch_template(
+            raw_ending_template,
+            label="结尾引导模板",
+            field_name="platform_ending_text",
+        )
         if profile.name not in search_text or promo_code not in search_text:
-            raise ValueError("口令卡模板未生成真实平台名和口令，请由管理员修复。")
+            raise ValueError("平台口令卡模板未生成小说库中的真实平台名和口令。")
         if profile.name not in authoritative_ending or promo_code not in authoritative_ending:
-            raise ValueError("结尾模板未生成真实平台名和口令，请由管理员修复。")
-        prefix = normalize_platform_copy(ending_prefix, "platform_ending_prefix")
-        suffix = normalize_platform_copy(ending_suffix, "platform_ending_suffix")
-        known_platform_names = {
-            str(item.get("name") or "").strip().casefold()
-            for item in platforms
-            if str(item.get("name") or "").strip()
-        }
-        binding_promo_codes = {
-            str(item.get("code") or "").strip().casefold()
-            for item in list((binding or {}).get("promo_codes") or [])
-            if str(item.get("code") or "").strip()
-        }
-        binding_promo_codes.update(
-            str(item or "").strip().casefold()
-            for item in list(known_promo_codes or [])
-            if str(item or "").strip()
-        )
-        promotional_directive = re.compile(
-            r"(?i)(?:\b(?:search|code|promo|platform|download|app)\b|"
-            r"搜索|口令|兑换码|推广码|平台|下载|应用)"
-        )
-
-        def contains_identity_token(context: str, token: str) -> bool:
-            folded_token = token.casefold()
-            if not folded_token:
-                return False
-            left_boundary = r"(?<![^\W_])" if folded_token[0].isalnum() else ""
-            right_boundary = r"(?![^\W_])" if folded_token[-1].isalnum() else ""
-            return bool(
-                re.search(
-                    f"{left_boundary}{re.escape(folded_token)}{right_boundary}",
-                    context.casefold(),
-                )
-            )
-
-        def contains_authoritative_identity(context: str, identity: str) -> bool:
-            folded_identity = identity.casefold()
-            if not folded_identity:
-                return False
-            # A known platform or promo identity remains authoritative even
-            # when an employee glues extra letters around it (for example
-            # ``GoodNovelApp`` or ``ALPHAApp``).
-            # Keep word-boundary matching for unusually short names so a
-            # one-letter code does not reject ordinary prose such as
-            # ``After the storm``.
-            if sum(character.isalnum() for character in folded_identity) >= 3:
-                return folded_identity in context.casefold()
-            return contains_identity_token(context, folded_identity)
-
-        for label, context in (("结尾前文", prefix), ("结尾后文", suffix)):
-            contains_known_identity = any(
-                contains_authoritative_identity(context, token)
-                for token in (*known_platform_names, *binding_promo_codes)
-            )
-            contains_untrusted_token = bool(
-                re.search(r"[{}]", context)
-                or re.search(r"\d", context)
-                or re.search(r"\b[A-Z0-9]{4,}\b", context)
-                or promotional_directive.search(context)
-            )
-            if contains_known_identity or contains_untrusted_token:
-                raise ValueError(
-                    f"{label}只能填写不含数字、平台名、口令或搜索/下载指令的普通剧情衔接语；"
-                    "平台与口令由小说库权威生成。"
-                )
-        ending_text = normalize_platform_copy(
-            " ".join(part for part in (prefix, authoritative_ending, suffix) if part),
-            "platform_ending_text",
-        )
+            raise ValueError("结尾引导模板未生成小说库中的真实平台名和口令。")
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "platform_name": profile.name,
             "promo_code": promo_code,
-            "search_template": search_template,
-            "ending_template": ending_template,
+            "search_template": search_template_value,
+            "ending_template": ending_template_value,
             "search_text": search_text,
             "authoritative_ending": authoritative_ending,
-            "ending_prefix": prefix,
-            "ending_suffix": suffix,
-            "ending_text": ending_text,
+            "ending_prefix": legacy_prefix if ending_template is None else "",
+            "ending_suffix": legacy_suffix if ending_template is None else "",
+            "ending_text": authoritative_ending,
         }
 
     def add_promo_code(self, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -2022,8 +2020,60 @@ class LibraryService:
                 for novel_binding in novel.get("bindings", [])
                 for code in novel_binding.get("promo_codes", [])
             ),
-            ending_prefix=value.get("platform_ending_prefix", ""),
-            ending_suffix=value.get("platform_ending_suffix", ""),
+            search_template=(
+                value.get("platform_search_template")
+                if "platform_search_template" in value
+                else (
+                    existing_metadata.get("platform_search_template")
+                    or existing_metadata.get("platform_search_template_snapshot")
+                )
+            ),
+            ending_template=(
+                value.get("platform_ending_template")
+                if "platform_ending_template" in value
+                else (
+                    existing_metadata.get("platform_ending_template")
+                    or (
+                        " ".join(
+                            part
+                            for part in (
+                                str(
+                                    existing_metadata.get("platform_ending_prefix")
+                                    or ""
+                                ).strip(),
+                                str(
+                                    existing_metadata.get(
+                                        "platform_ending_template_snapshot"
+                                    )
+                                    or ""
+                                ).strip(),
+                                str(
+                                    existing_metadata.get("platform_ending_suffix")
+                                    or ""
+                                ).strip(),
+                            )
+                            if part
+                        )
+                        if str(
+                            existing_metadata.get(
+                                "platform_ending_template_snapshot"
+                            )
+                            or ""
+                        ).strip()
+                        else None
+                    )
+                )
+            ),
+            ending_prefix=(
+                value.get("platform_ending_prefix")
+                if "platform_ending_prefix" in value
+                else existing_metadata.get("platform_ending_prefix", "")
+            ),
+            ending_suffix=(
+                value.get("platform_ending_suffix")
+                if "platform_ending_suffix" in value
+                else existing_metadata.get("platform_ending_suffix", "")
+            ),
         )
         platform_search_text = str(platform_copy["search_text"])
         platform_ending_text = str(platform_copy["ending_text"])
@@ -2114,8 +2164,10 @@ class LibraryService:
             "intro_card_copies": intro_card_copies,
             "platform_search_text": platform_search_text,
             "platform_ending_text": platform_ending_text,
-            "platform_copy_schema_version": 2,
+            "platform_copy_schema_version": int(platform_copy["schema_version"]),
             "platform_name_snapshot": str(platform_copy["platform_name"]),
+            "platform_search_template": str(platform_copy["search_template"]),
+            "platform_ending_template": str(platform_copy["ending_template"]),
             "platform_search_template_snapshot": str(
                 platform_copy["search_template"]
             ),
@@ -2982,6 +3034,38 @@ class LibraryService:
                 for novel_binding in novel.get("bindings", [])
                 for code in novel_binding.get("promo_codes", [])
             ),
+            search_template=(
+                draft_metadata.get("platform_search_template")
+                or draft_metadata.get("platform_search_template_snapshot")
+            ),
+            ending_template=(
+                draft_metadata.get("platform_ending_template")
+                or (
+                    " ".join(
+                        part
+                        for part in (
+                            str(
+                                draft_metadata.get("platform_ending_prefix") or ""
+                            ).strip(),
+                            str(
+                                draft_metadata.get(
+                                    "platform_ending_template_snapshot"
+                                )
+                                or ""
+                            ).strip(),
+                            str(
+                                draft_metadata.get("platform_ending_suffix") or ""
+                            ).strip(),
+                        )
+                        if part
+                    )
+                    if str(
+                        draft_metadata.get("platform_ending_template_snapshot")
+                        or ""
+                    ).strip()
+                    else None
+                )
+            ),
             ending_prefix=draft_metadata.get("platform_ending_prefix", ""),
             ending_suffix=draft_metadata.get("platform_ending_suffix", ""),
         )
@@ -3354,7 +3438,9 @@ class LibraryService:
                     intro_card_source=intro_card_source,
                     platform_search_text=platform_search_text,
                     platform_ending_text=platform_ending_text,
-                    platform_copy_schema_version=2,
+                    platform_copy_schema_version=int(
+                        platform_copy["schema_version"]
+                    ),
                     platform_name_snapshot=str(platform_copy["platform_name"]),
                     platform_search_template_snapshot=str(
                         platform_copy["search_template"]

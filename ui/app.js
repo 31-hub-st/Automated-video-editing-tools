@@ -2930,36 +2930,94 @@
     return novel?.platform_bindings?.find((item) => item.platform_id === target) || null;
   }
 
+  const DEFAULT_PLATFORM_SEARCH_TEMPLATE = "Search {platform}: {code}";
+  const DEFAULT_PLATFORM_ENDING_TEMPLATE = "Download {platform} and search code {code} to continue reading.";
+
   function draftPlatformCopyDefaults(novel, draft) {
     const platform = platformById(draft?.platform_id);
     const binding = bindingFor(novel, draft?.platform_id);
     const code = binding?.codes?.find((item) => item.id === draft?.promo_code_id)?.value || "123456";
+    const platformName = platform?.name || "Platform";
+    const searchTemplate = String(platform?.search_template || DEFAULT_PLATFORM_SEARCH_TEMPLATE).trim();
+    const endingTemplate = String(platform?.ending_template || DEFAULT_PLATFORM_ENDING_TEMPLATE).trim();
     return {
-      search: platform
-        ? safeTemplate(platform.search_template, platform.name, code)
-        : `Search Platform: ${code}`,
-      ending: platform
-        ? safeTemplate(platform.ending_template, platform.name, code)
-        : "Download the novel app to discover what happened next.",
+      platform: platformName,
+      code,
+      search_template: searchTemplate,
+      ending_template: endingTemplate,
+      search: safeTemplate(searchTemplate, platformName, code),
+      ending: safeTemplate(endingTemplate, platformName, code),
     };
   }
 
+  function batchPlatformTemplate(draft, kind, defaults) {
+    const key = kind === "search" ? "platform_search_template" : "platform_ending_template";
+    const touchedKey = kind === "search" ? "_platformSearchTemplateTouched" : "_platformEndingTemplateTouched";
+    const selected = String(draft?.[key] ?? "");
+    if (selected || draft?.[touchedKey] === true) return selected;
+    if (kind === "ending") {
+      // Schema 2 stored free text on either side of the authoritative ending.
+      // Keep that old batch readable as one editable schema 3 template.
+      return [
+        String(draft?.platform_ending_prefix || "").trim(),
+        String(defaults?.ending_template || "").trim(),
+        String(draft?.platform_ending_suffix || "").trim(),
+      ].filter(Boolean).join(" ");
+    }
+    return String(defaults?.search_template || DEFAULT_PLATFORM_SEARCH_TEMPLATE).trim();
+  }
+
+  function validateBatchPlatformTemplate(template) {
+    const value = String(template || "").trim();
+    if (!value) return "文案不能为空。";
+    const tokenMatches = value.match(/\{(?:platform|code)\}/g) || [];
+    if (tokenMatches.length !== 2 || tokenMatches.filter((token) => token === "{platform}").length !== 1 || tokenMatches.filter((token) => token === "{code}").length !== 1) {
+      return "必须各保留一次 {platform} 和 {code}。";
+    }
+    const unknownTokens = value.match(/\{[^}]*\}/g) || [];
+    const openingBraces = (value.match(/\{/g) || []).length;
+    const closingBraces = (value.match(/\}/g) || []).length;
+    if (unknownTokens.length !== 2 || openingBraces !== 2 || closingBraces !== 2) return "含有未知变量；只允许 {platform} 和 {code}。";
+    return "";
+  }
+
+  function draftPlatformSearchPreview(novel, draft) {
+    const defaults = draftPlatformCopyDefaults(novel, draft);
+    return safeTemplate(batchPlatformTemplate(draft, "search", defaults), defaults.platform, defaults.code);
+  }
+
   function draftPlatformEndingPreview(novel, draft) {
-    return [
-      String(draft?.platform_ending_prefix || "").trim(),
-      String(draftPlatformCopyDefaults(novel, draft).ending || "").trim(),
-      String(draft?.platform_ending_suffix || "").trim(),
-    ].filter(Boolean).join(" ");
+    const defaults = draftPlatformCopyDefaults(novel, draft);
+    const template = batchPlatformTemplate(draft, "ending", defaults);
+    return safeTemplate(template, defaults.platform, defaults.code);
   }
 
   function syncDraftPlatformCopyDefaults(novel, draft) {
     if (!novel || !draft) return { search: "", ending: "" };
     const defaults = draftPlatformCopyDefaults(novel, draft);
-    const searchInput = $("#production-platform-search-text");
-    const endingInput = $("#production-platform-ending-text");
-    if (searchInput) searchInput.value = String(defaults.search);
-    if (endingInput) endingInput.value = String(defaults.ending);
-    return defaults;
+    const searchTemplate = batchPlatformTemplate(draft, "search", defaults);
+    const endingTemplate = batchPlatformTemplate(draft, "ending", defaults);
+    const searchInput = $("#production-platform-search-template");
+    const endingInput = $("#production-platform-ending-template");
+    if (searchInput && searchInput.value !== searchTemplate) searchInput.value = searchTemplate;
+    if (endingInput && endingInput.value !== endingTemplate) endingInput.value = endingTemplate;
+    const searchPreview = draftPlatformSearchPreview(novel, draft);
+    const endingPreview = draftPlatformEndingPreview(novel, draft);
+    const searchProof = $("#production-platform-search-preview");
+    const endingProof = $("#production-platform-ending-preview");
+    if (searchProof) searchProof.textContent = searchPreview;
+    if (endingProof) endingProof.textContent = endingPreview;
+    [["search", searchTemplate], ["ending", endingTemplate]].forEach(([kind, template]) => {
+      const message = validateBatchPlatformTemplate(template);
+      const proof = $(`#production-platform-${kind}-template-validation`);
+      if (proof) {
+        proof.textContent = message || "变量已锁定，可继续编辑其他文案。";
+        proof.classList.toggle("is-error", Boolean(message));
+      }
+      const control = kind === "search" ? searchInput : endingInput;
+      if (control) control.setAttribute("aria-invalid", String(Boolean(message)));
+    });
+    return { ...defaults, search_template: searchTemplate, ending_template: endingTemplate, search: searchPreview, ending: endingPreview };
   }
 
   function coverToneClass(value) {
@@ -3842,8 +3900,10 @@
     novel.draft.production_preset_dirty = Boolean(novel.draft.production_preset_dirty);
     novel.draft.intro_card_text ||= "";
     novel.draft.intro_card_source ||= "";
-    novel.draft.platform_search_text = String(novel.draft.platform_search_text || "");
-    novel.draft.platform_ending_text = String(novel.draft.platform_ending_text || "");
+    novel.draft.platform_search_template = String(novel.draft.platform_search_template || "");
+    novel.draft.platform_ending_template = String(novel.draft.platform_ending_template || "");
+    novel.draft._platformSearchTemplateTouched = Boolean(novel.draft._platformSearchTemplateTouched);
+    novel.draft._platformEndingTemplateTouched = Boolean(novel.draft._platformEndingTemplateTouched);
     novel.draft.platform_ending_prefix = String(novel.draft.platform_ending_prefix || "");
     novel.draft.platform_ending_suffix = String(novel.draft.platform_ending_suffix || "");
     if (isAuthenticatedHubBrowser() || isClientLocalBrowser()) {
@@ -4025,8 +4085,10 @@
       intro_card_text: "",
       intro_card_source: "",
       intro_card_copies: {},
-      platform_search_text: "",
-      platform_ending_text: "",
+      platform_search_template: "",
+      platform_ending_template: "",
+      _platformSearchTemplateTouched: false,
+      _platformEndingTemplateTouched: false,
       platform_ending_prefix: "",
       platform_ending_suffix: "",
       variant_count: 1,
@@ -4847,8 +4909,12 @@
     const targetMinimum = 1;
     draft.target_video_count = Math.max(targetMinimum, Math.trunc(Number(draft.target_video_count || 10)));
     const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
-    const platformSearchText = String(platformCopyDefaults.search);
-    const platformEndingText = String(platformCopyDefaults.ending);
+    const platformSearchTemplate = batchPlatformTemplate(draft, "search", platformCopyDefaults);
+    const platformEndingTemplate = batchPlatformTemplate(draft, "ending", platformCopyDefaults);
+    const platformSearchText = draftPlatformSearchPreview(novel, draft);
+    const platformEndingText = draftPlatformEndingPreview(novel, draft);
+    const platformSearchTemplateError = validateBatchPlatformTemplate(platformSearchTemplate);
+    const platformEndingTemplateError = validateBatchPlatformTemplate(platformEndingTemplate);
     const structureLocked = productionStructureLocked(novel, draft);
     const recentBatch = (
       !draft.id
@@ -4990,14 +5056,13 @@
                 <div class="production-card-presets"><button type="button" class="text-button" data-card-preset="code:opening">开头短显</button><button type="button" class="text-button" data-card-preset="code:middle">中段提醒</button><button type="button" class="text-button" data-card-preset="code:ending">结尾提醒</button><button type="button" class="text-button" data-card-preset="code:full">全程显示</button></div>
                 <p class="production-card-estimate ${codeTimelineEstimate.invalid ? "is-error" : ""}" data-card-estimate="code">${escapeHtml(codeTimelineEstimate.text)}</p>
                 <label class="field"><span>口令卡样式</span><select id="production-code-card-preset" ${settings.code_card_enabled !== false ? "" : "disabled"}><option value="brand_pill">品牌胶囊</option><option value="dark_glass">深色玻璃</option><option value="light_chip">浅色标签</option><option value="outline_only">纯描边</option><option value="warning_red">醒目红条</option><option value="golden_ticket">金色票签</option><option value="romance_blush">浪漫粉签</option><option value="minimal_dark">极简暗条</option></select></label>
-                <div class="field production-platform-search-copy-field"><span>平台口令卡（小说库权威来源）</span><div class="production-authoritative-copy"><small>平台：${escapeHtml(selectedPlatformName)}</small><small>口令：${escapeHtml(activeCodes.find((item) => item.id === draft.promo_code_id)?.value || "待选择")}</small><b>最终口令卡：${escapeHtml(platformSearchText)}</b><em>来源：小说库；只能由管理员在平台管理中修改模板</em></div><textarea id="production-platform-search-text" hidden readonly>${escapeHtml(platformSearchText)}</textarea></div>
+                <div class="field production-platform-search-copy-field"><span>平台口令卡文案</span><div class="production-copy-template-editor"><div class="production-copy-template-heading"><span><b>本批可编辑</b><small>平台管理模板会作为默认值</small></span><em>屏幕口令卡</em></div><label class="field"><span>模板</span><textarea id="production-platform-search-template" rows="2" maxlength="300" ${structureLocked ? "disabled" : ""}>${escapeHtml(platformSearchTemplate)}</textarea></label><div class="production-template-token-row"><b>锁定变量</b><code class="production-template-token">{platform}</code><code class="production-template-token">{code}</code><small>两个变量必须各保留一次；其他文字可自由修改。</small></div><div class="production-template-preview"><small>实时替换预览</small><b id="production-platform-search-preview">${escapeHtml(platformSearchText)}</b><em id="production-platform-search-template-validation" class="${platformSearchTemplateError ? "is-error" : ""}">${escapeHtml(platformSearchTemplateError || "变量已锁定，可继续编辑其他文案。")}</em></div></div></div>
               </div>
               <div class="production-platform-copy-overrides">
-                <label class="field"><span>结尾普通前文</span><textarea id="production-platform-ending-prefix" rows="2" maxlength="220">${escapeHtml(draft.platform_ending_prefix || "")}</textarea><small>只写普通剧情衔接语；不能包含数字、平台名、口令或搜索/下载指令。</small></label>
-                <div class="production-authoritative-token"><b>${escapeHtml(platformEndingText)}</b><small>锁定的平台/口令片段 · 来源：小说库</small></div>
-                <label class="field"><span>结尾普通后文</span><textarea id="production-platform-ending-suffix" rows="2" maxlength="220">${escapeHtml(draft.platform_ending_suffix || "")}</textarea><small>只写普通剧情衔接语；平台和口令由服务端锁定生成。</small></label>
-                <textarea id="production-platform-ending-text" hidden readonly>${escapeHtml(platformEndingText)}</textarea>
-                <p><b>平台和口令不可编辑</b><span>提交时服务端会按小说绑定重新核对并冻结权威文案。</span></p>
+                <div class="production-copy-template-heading"><span><b>结尾引导文案</b><small>本批可编辑；排队时由服务端替换并冻结实际平台和口令</small></span><em>旁白与字幕</em></div>
+                <label class="field"><span>模板</span><textarea id="production-platform-ending-template" rows="3" maxlength="1200" ${structureLocked ? "disabled" : ""}>${escapeHtml(platformEndingTemplate)}</textarea></label>
+                <div class="production-template-token-row"><b>锁定变量</b><code class="production-template-token">{platform}</code><code class="production-template-token">{code}</code><small>两个变量必须各保留一次；可自由编辑其余前后文。</small></div>
+                <div class="production-template-preview"><small>实时替换预览</small><b id="production-platform-ending-preview">${escapeHtml(platformEndingText)}</b><em id="production-platform-ending-template-validation" class="${platformEndingTemplateError ? "is-error" : ""}">${escapeHtml(platformEndingTemplateError || "变量已锁定，可继续编辑其他文案。")}</em></div>
               </div>
             </section>
           </div>
@@ -5403,8 +5468,8 @@
     productionSettings.code_card_start_seconds = productionSettings.code_card_start_mode === "seconds" ? productionSettings.code_card_start_value : 0;
     productionSettings.code_card_duration_seconds = productionSettings.code_card_display_mode === "seconds" ? productionSettings.code_card_display_value : 0;
     if ($("#production-intro-card-copy")) draft.intro_card_text = $("#production-intro-card-copy").value.trim();
-    if ($("#production-platform-ending-prefix")) draft.platform_ending_prefix = $("#production-platform-ending-prefix").value.trim();
-    if ($("#production-platform-ending-suffix")) draft.platform_ending_suffix = $("#production-platform-ending-suffix").value.trim();
+    if ($("#production-platform-search-template") && (draft._platformSearchTemplateTouched || draft.platform_search_template)) draft.platform_search_template = $("#production-platform-search-template").value;
+    if ($("#production-platform-ending-template") && (draft._platformEndingTemplateTouched || draft.platform_ending_template)) draft.platform_ending_template = $("#production-platform-ending-template").value;
     syncDraftPlatformCopyDefaults(novel, draft);
     productionSettings.intro_card_preset = $("#production-intro-card-preset")?.value || productionSettings.intro_card_preset || "editorial_white";
     productionSettings.subtitle_preset = $("#production-subtitle-preset")?.value || productionSettings.subtitle_preset || "clear_outline";
@@ -5575,8 +5640,8 @@
     const id = control?.id || "";
     const name = control?.name || "";
     if (["production-intro-card-enabled", "production-intro-card-start-mode", "production-intro-card-start-value", "production-intro-card-display-mode", "production-intro-card-display-value", "production-intro-card-copy", "production-intro-card-preset", "production-color-grade", "production-intro-animation", "production-video-transition", "production-video-speed-custom"].includes(id) || name === "production-video-speed-preset") return "intro";
-    if (["production-code-card-enabled", "production-code-card-start-mode", "production-code-card-start-value", "production-code-card-display-mode", "production-code-card-display-value", "production-code-card-preset"].includes(id)) return "subtitle";
-    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset", "production-platform-ending-prefix", "production-platform-ending-suffix"].includes(id)) return "outro";
+    if (["production-code-card-enabled", "production-code-card-start-mode", "production-code-card-start-value", "production-code-card-display-mode", "production-code-card-display-value", "production-code-card-preset", "production-platform-search-template"].includes(id)) return "subtitle";
+    if (["production-cover-outro-enabled", "production-cover-animation", "production-outro-card-preset", "production-platform-ending-template"].includes(id)) return "outro";
     if (id.startsWith("production-subtitle-") || id === "production-caption-mode") return "subtitle";
     return "";
   }
@@ -5963,8 +6028,7 @@
     const binding = bindingFor(novel, draft.platform_id);
     const platform = platformById(draft.platform_id);
     const code = binding?.codes?.find((item) => item.id === draft.promo_code_id)?.value || "123456";
-    const platformCopyDefaults = draftPlatformCopyDefaults(novel, draft);
-    const platformSearchText = String(platformCopyDefaults.search);
+    const platformSearchText = draftPlatformSearchPreview(novel, draft);
     $("#preview-code").textContent = platformSearchText;
     $("#preview-platform").textContent = platform?.name || "尚未选择";
     const subtitle = $("#preview-subtitle");
@@ -7673,6 +7737,16 @@
     syncProductionDraftFromControls();
     const draft = activeDraft(novel);
     if (!draft.platform_id || !draft.promo_code_id) throw new Error("请选择已绑定的平台和本批口令。");
+    const platformDefaults = draftPlatformCopyDefaults(novel, draft);
+    const platformSearchTemplate = batchPlatformTemplate(draft, "search", platformDefaults);
+    const platformEndingTemplate = batchPlatformTemplate(draft, "ending", platformDefaults);
+    for (const [label, template] of [
+      ["屏幕口令模板", platformSearchTemplate],
+      ["结尾引导模板", platformEndingTemplate],
+    ]) {
+      const message = validateBatchPlatformTemplate(template);
+      if (message) throw new Error(`${label}${message}`);
+    }
     if (!draft.episode_ids.length) throw new Error("至少选择一个分集。");
     if (draft.target_video_count < 1) throw new Error("生成总视频数至少为 1。");
     const outputMode = normalizedProductionOutputMode(draft.production_settings?.output_mode);
@@ -7722,8 +7796,8 @@
       intro_card_source: String(
         draft.intro_card_source || (String(novel.synopsis || "").trim() ? "novel_synopsis" : "episode_excerpt"),
       ),
-      platform_ending_prefix: String(draft.platform_ending_prefix || ""),
-      platform_ending_suffix: String(draft.platform_ending_suffix || ""),
+      platform_search_template: platformSearchTemplate,
+      platform_ending_template: platformEndingTemplate,
       video_folder: draft.video_folder,
       music_folder: draft.music_folder,
       output_folder: draft.output_folder,
@@ -10897,6 +10971,16 @@
         const remembered = novel ? rememberedProductionContext(novel.id) : null;
         const rememberedCode = String(remembered?.novel?.promo_codes?.[platformId] || "");
         const rememberedAccount = String(remembered?.preferences?.publishing_accounts?.[platformId] || "");
+        const currentDraft = novel ? activeDraft(novel) : null;
+        const previousDefaults = currentDraft ? draftPlatformCopyDefaults(novel, currentDraft) : null;
+        const searchUsesPlatformDefault = Boolean(currentDraft && !currentDraft._platformSearchTemplateTouched && (
+          !String(currentDraft.platform_search_template || "").trim()
+          || String(currentDraft.platform_search_template).trim() === String(previousDefaults?.search_template || "").trim()
+        ));
+        const endingUsesPlatformDefault = Boolean(currentDraft && !currentDraft._platformEndingTemplateTouched && (
+          !String(currentDraft.platform_ending_template || "").trim()
+          || String(currentDraft.platform_ending_template).trim() === String(previousDefaults?.ending_template || "").trim()
+        ));
         syncProductionDraftFromControls();
         if (novel) {
           const draft = activeDraft(novel);
@@ -10910,6 +10994,14 @@
           draft.publishing_account_id = validAccounts.some((item) => item.id === rememberedAccount)
             ? rememberedAccount
             : "";
+          if (searchUsesPlatformDefault) {
+            draft.platform_search_template = "";
+            draft._platformSearchTemplateTouched = false;
+          }
+          if (endingUsesPlatformDefault) {
+            draft.platform_ending_template = "";
+            draft._platformEndingTemplateTouched = false;
+          }
           persistProductionPreferences(novel, draft);
         }
         renderProductionWorkbench();
@@ -10961,6 +11053,11 @@
     });
     document.addEventListener("input", (event) => {
       if (!event.target.closest("#production-workbench-content")) return;
+      if (state.productionNovel && event.target.matches("#production-platform-search-template, #production-platform-ending-template")) {
+        const draft = activeDraft(state.productionNovel);
+        if (event.target.matches("#production-platform-search-template")) draft._platformSearchTemplateTouched = true;
+        if (event.target.matches("#production-platform-ending-template")) draft._platformEndingTemplateTouched = true;
+      }
       if (event.target.matches("#production-voice-search") && state.productionNovel) {
         state.voiceCatalogQuery = String(event.target.value || "");
         renderProductionWorkbench();

@@ -3495,6 +3495,22 @@ body.web-runtime [data-view="queue"] .preview-dock { top: 118px; }
 .production-platform-copy-overrides > .field { margin: 0; }
 .production-platform-copy-overrides > p { display: flex; gap: 8px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .production-platform-copy-overrides > p b { flex: 0 0 auto; color: var(--cobalt); }
+.production-copy-template-editor { display: grid; gap: 10px; padding: 12px; border: 1px solid #cbd8f2; border-radius: 10px; background: linear-gradient(135deg, #f5f8ff, #edf3ff); }
+.production-copy-template-editor > .field { margin: 0; }
+.production-copy-template-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.production-copy-template-heading > span { display: grid; gap: 2px; }
+.production-copy-template-heading b { color: #1c3567; font-size: 12px; }
+.production-copy-template-heading small { color: #68758b; font-size: 11px; }
+.production-copy-template-heading em { padding: 3px 7px; border-radius: 999px; background: #dbe7ff; color: #315bd8; font: 700 10px/1.2 var(--body); font-style: normal; white-space: nowrap; }
+.production-template-token-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 10px; border-left: 3px solid #315bd8; border-radius: 7px; background: rgba(255,255,255,.74); color: #536681; font-size: 11px; }
+.production-template-token-row > b { color: #254681; font-size: 11px; }
+.production-template-token { padding: 3px 6px; border: 1px solid #9ab5ee; border-radius: 5px; background: #e9f0ff; color: #214d9a; font: 700 11px/1 var(--mono, monospace); }
+.production-template-token-row > small { flex: 1 1 180px; color: #68758b; }
+.production-template-preview { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #d4dfef; border-radius: 8px; background: #fff; }
+.production-template-preview > small { color: #6b7d98; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.production-template-preview > b { color: #17243c; font-size: 13px; line-height: 1.45; }
+.production-template-preview > em { color: #5b6f8b; font-size: 11px; font-style: normal; }
+.production-template-preview > em.is-error { color: #b42318; }
 .production-semantic-panel .production-speed-control,
 .production-semantic-panel .production-cover-toggle { margin-top: 0; }
 .workbench-advanced { margin-top: 12px; border-radius: 9px; }

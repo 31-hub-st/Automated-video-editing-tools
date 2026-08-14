@@ -311,8 +311,8 @@ class StyleSettingsContractTests(unittest.TestCase):
             "window.queueMicrotask(() => void loadProductionVoiceCatalog())",
             javascript[workbench_start:workbench_end],
         )
-        self.assertIn("const platformSearchText = String(platformCopyDefaults.search)", javascript)
-        self.assertIn("const platformEndingText = String(platformCopyDefaults.ending)", javascript)
+        self.assertIn("const platformSearchText = draftPlatformSearchPreview(novel, draft)", javascript)
+        self.assertIn("const platformEndingText = draftPlatformEndingPreview(novel, draft)", javascript)
         self.assertIn("function focusProductionSection(section, selector", javascript)
         self.assertIn("function updateProductionJumpbar", javascript)
         self.assertIn("data-production-missing=", javascript)
@@ -1312,10 +1312,8 @@ class StyleSettingsContractTests(unittest.TestCase):
             "production-code-card-start-value",
             "production-code-card-display-mode",
             "production-code-card-display-value",
-            "production-platform-search-text",
-            "production-platform-ending-text",
-            "production-platform-ending-prefix",
-            "production-platform-ending-suffix",
+            "production-platform-search-template",
+            "production-platform-ending-template",
         ):
             self.assertIn(f'id="{element_id}"', javascript)
 
@@ -1334,14 +1332,14 @@ class StyleSettingsContractTests(unittest.TestCase):
             self.assertIn(f"productionSettings.{field} =", javascript)
 
         self.assertIn("显示至正文结束", javascript)
-        self.assertIn("平台和口令不可编辑", javascript)
+        self.assertIn("锁定变量", javascript)
         self.assertIn("function syncDraftPlatformCopyDefaults(novel, draft)", javascript)
         self.assertNotIn("_platformSearchTextCustomized", javascript)
         self.assertNotIn("_platformEndingTextCustomized", javascript)
-        self.assertNotIn("platform_search_text: String(draft.platform_search_text", javascript)
-        self.assertNotIn("platform_ending_text: String(draft.platform_ending_text", javascript)
-        self.assertIn('platform_ending_prefix: String(draft.platform_ending_prefix || "")', javascript)
-        self.assertIn('platform_ending_suffix: String(draft.platform_ending_suffix || "")', javascript)
+        self.assertIn("const platformSearchTemplate = batchPlatformTemplate", javascript)
+        self.assertIn("const platformEndingTemplate = batchPlatformTemplate", javascript)
+        self.assertIn("platform_search_template: platformSearchTemplate", javascript)
+        self.assertIn("platform_ending_template: platformEndingTemplate", javascript)
         self.assertIn("text: outroCopy", javascript)
         self.assertNotIn("`${outroCopy} Search ${code}.`", javascript)
         self.assertIn(
@@ -1364,8 +1362,8 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertEqual(javascript.count('? "99.5" : "99999"'), 2)
         self.assertIn('data-card-preset="intro:opening"', javascript)
         self.assertIn('const videoTemplate = settings.video_template || "classic"', javascript)
-        self.assertIn("draft.platform_search_text", javascript)
-        self.assertIn("draft.platform_ending_text", javascript)
+        self.assertIn("draft.platform_search_template", javascript)
+        self.assertIn("draft.platform_ending_template", javascript)
         self.assertIn(".production-card-timeline-controls[data-card-enabled=\"false\"]", css)
         self.assertIn('[data-code-card-enabled="false"] > .code-card', css)
         self.assertIn(
@@ -1390,8 +1388,9 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertNotIn('checkedCall("set_user_permission"', workbench)
         self.assertNotIn("platforms.manage", workbench)
 
-    def test_batch_platform_copy_is_read_only_and_only_plain_prefix_suffix_are_editable(self) -> None:
+    def test_batch_platform_copy_keeps_authoritative_tokens_while_the_surrounding_copy_is_editable(self) -> None:
         javascript = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
 
         defaults = javascript[
             javascript.index("function draftPlatformCopyDefaults(novel, draft)"):
@@ -1399,41 +1398,39 @@ class StyleSettingsContractTests(unittest.TestCase):
         ]
         self.assertIn("platformById(draft?.platform_id)", defaults)
         self.assertIn("draft?.promo_code_id", defaults)
-        self.assertIn("safeTemplate(platform.search_template, platform.name, code)", defaults)
-        self.assertIn("safeTemplate(platform.ending_template, platform.name, code)", defaults)
+        self.assertIn("platform?.search_template || DEFAULT_PLATFORM_SEARCH_TEMPLATE", defaults)
+        self.assertIn("platform?.ending_template || DEFAULT_PLATFORM_ENDING_TEMPLATE", defaults)
 
         ending_preview = javascript[
             javascript.index("function draftPlatformEndingPreview(novel, draft)"):
             javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)")
         ]
-        self.assertIn('String(draft?.platform_ending_prefix || "").trim()', ending_preview)
-        self.assertIn('String(draft?.platform_ending_suffix || "").trim()', ending_preview)
-        self.assertIn("draftPlatformCopyDefaults(novel, draft).ending", ending_preview)
-        self.assertLess(
-            ending_preview.index("platform_ending_prefix"),
-            ending_preview.index("draftPlatformCopyDefaults(novel, draft).ending"),
-        )
-        self.assertLess(
-            ending_preview.index("draftPlatformCopyDefaults(novel, draft).ending"),
-            ending_preview.index("platform_ending_suffix"),
-        )
-        self.assertIn(".filter(Boolean)", ending_preview)
-        self.assertIn('.join(" ")', ending_preview)
+        self.assertIn("batchPlatformTemplate(draft, \"ending\"", ending_preview)
+        self.assertIn("safeTemplate(template", ending_preview)
+
+        batch_template = javascript[
+            javascript.index("function batchPlatformTemplate(draft, kind, defaults)"):
+            javascript.index("function validateBatchPlatformTemplate(template)")
+        ]
+        self.assertIn("_platformSearchTemplateTouched", batch_template)
+        self.assertIn("_platformEndingTemplateTouched", batch_template)
+        self.assertNotIn('String(draft?.[key] || "").trim()', batch_template)
 
         sync_defaults = javascript[
             javascript.index("function syncDraftPlatformCopyDefaults(novel, draft)"):
             javascript.index("function coverToneClass")
         ]
-        self.assertNotIn("Customized", sync_defaults)
-        self.assertIn("defaults.search", sync_defaults)
-        self.assertIn("defaults.ending", sync_defaults)
+        self.assertIn('"#production-platform-search-template"', sync_defaults)
+        self.assertIn('"#production-platform-ending-template"', sync_defaults)
+        self.assertIn("draftPlatformCopyDefaults(novel, draft)", sync_defaults)
+        self.assertIn("platform_ending_prefix", defaults)  # legacy draft fallback
 
         active_draft = javascript[
             javascript.index("function activeDraft(novel)"):
             javascript.index("function freshProductionDraftForNextBatch")
         ]
-        self.assertIn('novel.draft.platform_ending_prefix = String', active_draft)
-        self.assertIn('novel.draft.platform_ending_suffix = String', active_draft)
+        self.assertIn('novel.draft.platform_search_template = String', active_draft)
+        self.assertIn('novel.draft.platform_ending_template = String', active_draft)
         self.assertNotIn('intro_card_enabled: defaults.intro_card_enabled === true ||', active_draft)
 
         next_batch = javascript[
@@ -1451,8 +1448,9 @@ class StyleSettingsContractTests(unittest.TestCase):
             sync_controls.index('draft.promo_code_id = $("#production-code-select")'),
             sync_controls.index("syncDraftPlatformCopyDefaults(novel, draft)"),
         )
-        self.assertIn('draft.platform_ending_prefix = $("#production-platform-ending-prefix").value.trim()', sync_controls)
-        self.assertIn('draft.platform_ending_suffix = $("#production-platform-ending-suffix").value.trim()', sync_controls)
+        self.assertIn('draft.platform_search_template = $("#production-platform-search-template").value', sync_controls)
+        self.assertIn('draft.platform_ending_template = $("#production-platform-ending-template").value', sync_controls)
+        self.assertIn("validateBatchPlatformTemplate", sync_defaults)
 
         input_handler = javascript[
             javascript.index('document.addEventListener("input"'):
@@ -1465,8 +1463,17 @@ class StyleSettingsContractTests(unittest.TestCase):
             javascript.index('if (event.target.matches("#production-local-tts-provider"')
         ]
         self.assertIn("renderProductionWorkbench()", platform_change)
-        self.assertNotIn("platform_search_text =", platform_change)
-        self.assertNotIn("platform_ending_text =", platform_change)
+        self.assertIn("searchUsesPlatformDefault", platform_change)
+        self.assertIn("endingUsesPlatformDefault", platform_change)
+        self.assertIn('draft.platform_search_template = ""', platform_change)
+        self.assertIn('draft.platform_ending_template = ""', platform_change)
+
+        input_handler = javascript[
+            javascript.index('document.addEventListener("input"'):
+            javascript.index('document.addEventListener("keydown"')
+        ]
+        self.assertIn("_platformSearchTemplateTouched = true", input_handler)
+        self.assertIn("_platformEndingTemplateTouched = true", input_handler)
 
         live_preview = javascript[
             javascript.index("function updateProductionPreview()"):
@@ -1475,6 +1482,21 @@ class StyleSettingsContractTests(unittest.TestCase):
         self.assertIn("const outroCopy = draftPlatformEndingPreview(novel, draft)", live_preview)
         self.assertIn('$("#preview-outro-copy").textContent = outroCopy', live_preview)
         self.assertIn("text: outroCopy", live_preview)
+
+        self.assertIn('id="production-platform-search-template"', javascript)
+        self.assertIn('id="production-platform-ending-template"', javascript)
+        self.assertIn('id="production-platform-search-template" rows="2" maxlength="300"', javascript)
+        self.assertIn('id="production-platform-ending-template" rows="3" maxlength="1200"', javascript)
+        self.assertIn("平台口令卡文案", javascript)
+        self.assertIn("锁定变量", javascript)
+        self.assertIn("{platform}", javascript)
+        self.assertIn("{code}", javascript)
+        self.assertIn("实时替换预览", javascript)
+        self.assertIn("function validateBatchPlatformTemplate", javascript)
+        self.assertIn("tokenMatches.length !== 2", javascript)
+        self.assertIn("未知变量", javascript)
+        self.assertIn("production-template-token", css)
+        self.assertIn("production-template-preview", css)
 
         workbench_change = javascript[
             javascript.index('document.addEventListener("change"'):

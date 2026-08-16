@@ -3,7 +3,7 @@
 > Hub 主机向其他制作电脑发布软件更新的流程、安全边界和 API 见 [AUTO_UPDATE.md](AUTO_UPDATE.md)。
 
 适用系统：Windows 10/11 64 位  
-适用源码候选版本：StoryForge Studio `v1.0.8`；GitHub 当前正式稳定基线为 `v1.0.6`，`v1.0.7` 员工通道版本未成为 GitHub 正式 Release。当前团队验收只使用包含本机制作服务、FFmpeg、约定 TTS 组件和根目录一键恢复载荷的完整程序目录；不得用旧版单 EXE 或残缺目录代替。ZIP 名称、大小与 SHA-256 必须在真实构建后填写到 [v1.0.8 发布交付报告](V1.0.8_RELEASE.md)；报告仍有 TODO 时不得交付。
+适用正式稳定版本：StoryForge Studio `v1.0.8`；GitHub 当前 `Latest` 稳定 Release 与 Hub 员工更新通道均为 `v1.0.8`。当前团队验收只使用包含本机制作服务、FFmpeg、约定 TTS 组件和根目录一键恢复载荷的完整程序目录；不得用旧版单 EXE 或残缺目录代替。正式 ZIP 的名称、大小、SHA-256 与发布验收证据见 [v1.0.8 发布交付报告](V1.0.8_RELEASE.md)。
 
 ## 最简单的开始方式
 

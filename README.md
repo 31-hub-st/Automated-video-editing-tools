@@ -2,7 +2,7 @@
 
 ## 新电脑一键恢复 Hub
 
-普通用户不需要 Codex，也不用输入 PowerShell 命令：`v1.0.6` 正式发布后，在浏览器登录有私有仓库权限的 GitHub 账号，从该正式 Release 下载 `StoryForge-1.0.6-update.zip`（不要下载 GitHub 的 Source code/源码 ZIP），完整解压后双击解压目录根部的：
+普通用户不需要 Codex，也不用输入 PowerShell 命令：在浏览器登录有私有仓库权限的 GitHub 账号，从 GitHub 标记为 `Latest` 的最新稳定 Release 下载其中唯一的 `StoryForge-<版本>-update.zip`（当前为 `StoryForge-1.0.8-update.zip`；不要下载 GitHub 的 Source code/源码 ZIP），完整解压后双击解压目录根部的：
 
 ```text
 一键恢复StoryForge-Hub.cmd
@@ -14,7 +14,7 @@
 
 StoryForge Studio 是一套面向小说推文生产的 Windows 本地批量制作系统。它把小说资料、平台口令、配音、字幕、简介卡、视频素材、背景音乐、批次队列和生产记录整合到同一套桌面与网页界面中。
 
-GitHub 当前正式稳定基线为 `v1.0.6`；`v1.0.7` 曾发布到 Hub 员工更新通道，但未通过 GitHub 手动稳定门、没有成为正式 Release。当前源码候选版本为 `v1.0.8`。在 [v1.0.8 发布交付报告](docs/V1.0.8_RELEASE.md) 的测试、哈希和远程门禁 TODO 全部由真实结果替换前，不得把候选源码或本地目录当成已交付程序。
+GitHub 当前正式稳定版与 `Latest` Release 均为 `v1.0.8`，同一正式制品也已发布到 Hub 员工更新通道。新电脑恢复始终以 GitHub `Latest` 稳定 Release 和私有预发布 `hub-state-latest` 为权威；仓库文件列表旁出现的 `发布 StoryForge v1.0.2` 等文字只是该路径最后一次变更的历史提交说明，不代表当前程序版本。
 
 ## 先看这三份文档
 
@@ -22,7 +22,7 @@ GitHub 当前正式稳定基线为 `v1.0.6`；`v1.0.7` 曾发布到 Hub 员工�
 - [Windows 部署与多电脑协同](docs/DEPLOYMENT_WINDOWS.md)：主机、员工制作电脑、数据目录、登录和故障处理。
 - [员工快速使用说明](docs/EMPLOYEE_QUICK_START.md)：最短生产流程。
 
-`v1.0.8` 的发布阻断项和待填写证据见 [v1.0.8 发布交付报告](docs/V1.0.8_RELEASE.md)；`v1.0.7` 的历史候选证据和失败门禁见 [v1.0.7 历史交付报告](docs/V1.0.7_RELEASE.md)；`v1.0.6` 的正式证据保留在 [v1.0.6 发布交付报告](docs/V1.0.6_RELEASE.md)。
+`v1.0.8` 的正式发布、制品哈希、生产切换与远程门禁证据见 [v1.0.8 发布交付报告](docs/V1.0.8_RELEASE.md)；`v1.0.7` 的历史候选证据和失败门禁见 [v1.0.7 历史交付报告](docs/V1.0.7_RELEASE.md)；`v1.0.6` 的历史正式证据保留在 [v1.0.6 发布交付报告](docs/V1.0.6_RELEASE.md)。
 
 ## 产品能力
 

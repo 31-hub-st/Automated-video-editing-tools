@@ -1,6 +1,6 @@
 # StoryForge 员工电脑快速开始
 
-适用源码候选版本：`v1.0.8`；GitHub 当前正式稳定基线：`v1.0.6`，`v1.0.7` 员工通道版本未成为 GitHub 正式 Release。
+适用正式稳定版本：`v1.0.8`；GitHub 当前 `Latest` 稳定 Release 与 Hub 员工更新通道均为 `v1.0.8`。
 
 ## 第一次安装
 

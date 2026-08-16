@@ -1,7 +1,7 @@
 # StoryForge Studio 产品需求基线
 
 更新日期：2026-08-14
-适用源码候选版本：StoryForge Studio `v1.0.8`；GitHub 当前正式稳定基线为 `v1.0.6`，`v1.0.7` 员工通道版本未成为 GitHub 正式 Release。
+适用正式稳定版本：StoryForge Studio `v1.0.8`；GitHub 当前 `Latest` 稳定 Release 与 Hub 员工更新通道均为 `v1.0.8`。
 状态：当前测试版需求基线
 目标语言：美式英语仍是默认生产语言；小说库支持多语种自动识别与分类，本地配音已覆盖九个语言档案
 
